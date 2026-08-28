@@ -33,6 +33,11 @@ class RunStatus(StrEnum):
     * ``FINALIZED``  - Round 4 done, finalizer artifacts written
     * ``READY_TO_PUBLISH`` - Round 5 approved it for publication
     * ``PUBLISH_BLOCKED``  - Round 5 refused it
+    * ``PUBLISHING``       - Round 6 has written its intent and may be sending
+    * ``PUBLISHED``        - every chunk confirmed by Telegram
+    * ``PARTIALLY_PUBLISHED`` - some chunks confirmed, then an explicit refusal
+    * ``PUBLISH_FAILED``   - explicitly refused before anything was delivered
+    * ``PUBLISH_UNCERTAIN``- delivery could not be determined; needs a human
     * ``FAILED``     - a stage failed; see ``error`` for which and why
 
     A failed writer or reviewer stage leaves the Run at its previous status, not
@@ -45,9 +50,13 @@ class RunStatus(StrEnum):
     the finalizer refuses to auto-correct it.
 
     ``PUBLISH_BLOCKED`` is likewise a completed outcome, not a failure: the gate
-    ran and said no. Neither it nor ``READY_TO_PUBLISH`` means anything was sent
-    anywhere - publication is Round 6, and nothing here is ever called
-    ``PUBLISHED``.
+    ran and said no. ``READY_TO_PUBLISH`` means Round 5 approved it, not that
+    anything was sent.
+
+    ``PUBLISHING`` is the one status that is not terminal. It exists so that a
+    process killed mid-send leaves a trace: the next run sees an intent with no
+    result and refuses to send again, because Telegram may already have the
+    message.
     """
 
     CREATED = "CREATED"
@@ -57,6 +66,11 @@ class RunStatus(StrEnum):
     FINALIZED = "FINALIZED"
     READY_TO_PUBLISH = "READY_TO_PUBLISH"
     PUBLISH_BLOCKED = "PUBLISH_BLOCKED"
+    PUBLISHING = "PUBLISHING"
+    PUBLISHED = "PUBLISHED"
+    PARTIALLY_PUBLISHED = "PARTIALLY_PUBLISHED"
+    PUBLISH_FAILED = "PUBLISH_FAILED"
+    PUBLISH_UNCERTAIN = "PUBLISH_UNCERTAIN"
     FAILED = "FAILED"
 
 

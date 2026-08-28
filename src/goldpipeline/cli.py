@@ -20,17 +20,25 @@ from typing import Any
 
 from goldpipeline import PIPELINE_VERSION
 from goldpipeline.adapters.fake_finalizer import FakeFinalizerClient
+from goldpipeline.adapters.fake_publisher import FakePublisherClient
 from goldpipeline.adapters.fake_reviewer import FakeReviewerClient
 from goldpipeline.adapters.fake_writer import FakeWriterClient
 from goldpipeline.adapters.file_source import JsonFileAnalysisSource, JsonFileMarketDataSource
 from goldpipeline.adapters.finalizer_client import FinalizerClient
+from goldpipeline.adapters.publisher_client import PublisherClient
 from goldpipeline.adapters.reviewer_client import ReviewerClient
 from goldpipeline.adapters.writer_client import WriterClient
-from goldpipeline.config import FinalizerSettings, ReviewerSettings, WriterSettings
+from goldpipeline.config import (
+    FinalizerSettings,
+    ReviewerSettings,
+    TelegramSettings,
+    WriterSettings,
+)
 from goldpipeline.domain.errors import (
     FinalizationBlockedError,
     FinalizeConfigurationError,
     PipelineError,
+    PublisherConfigurationError,
     ReviewConfigurationError,
     WriterConfigurationError,
 )
@@ -39,6 +47,7 @@ from goldpipeline.schemas.quality import DataQuality
 from goldpipeline.services.finalizer import finalize_run
 from goldpipeline.services.pipeline import create_run, validate_sources
 from goldpipeline.services.publish_gate import gate_publish
+from goldpipeline.services.publisher import publish_run
 from goldpipeline.services.reviewer import review_draft
 from goldpipeline.services.writer import write_draft
 from goldpipeline.storage.run_store import RunStore
@@ -204,6 +213,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gate.add_argument("--json", action="store_true", help="Emit the result as JSON.")
 
+    publish = subparsers.add_parser(
+        "publish",
+        help="Send an approved Run to Telegram. One attempt per Run.",
+    )
+    publish.add_argument("--run-id", required=True, help="Run to publish.")
+    publish.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=DEFAULT_RUNS_DIR,
+        help=f"Root directory for Runs. Default: {DEFAULT_RUNS_DIR}.",
+    )
+    publish.add_argument(
+        "--fake-publisher",
+        action="store_true",
+        help="Use the offline publisher. Nothing is sent anywhere.",
+    )
+    publish.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+
     show = subparsers.add_parser("show-run", help="Print a summary of an existing Run.")
     show.add_argument("run_id", help="Run identifier, e.g. 20260828_022701_a83f2c.")
     show.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
@@ -342,7 +369,10 @@ def _report_failure(exc: PipelineError, *, as_json: bool) -> int:
     """
     configuration = isinstance(
         exc,
-        WriterConfigurationError | ReviewConfigurationError | FinalizeConfigurationError,
+        WriterConfigurationError
+        | ReviewConfigurationError
+        | FinalizeConfigurationError
+        | PublisherConfigurationError,
     )
     code = EXIT_ERROR if configuration else EXIT_INVALID_DATA
 
@@ -700,6 +730,88 @@ def _cmd_gate_publish(args: argparse.Namespace) -> int:
     return EXIT_OK if result.approved else EXIT_BLOCKED
 
 
+FAKE_TARGET_CHAT = "@fake_offline_channel"
+"""Destination recorded by `--fake-publisher`.
+
+Obviously not a real channel, so a fake attempt can never be mistaken for one
+that reached Telegram - and the offline path needs no credentials at all.
+"""
+
+
+def _build_publisher(args: argparse.Namespace) -> tuple[PublisherClient, str]:
+    """Pick the transport and the destination.
+
+    The destination comes from configuration only. There is deliberately no
+    `--chat-id`: a flag that redirects where an approved article is posted is
+    one typo away from publishing to the wrong channel, and it would also give
+    anything that can influence a command line control over the destination.
+    """
+    if args.fake_publisher:
+        return FakePublisherClient(), FAKE_TARGET_CHAT
+
+    settings = TelegramSettings.from_env()
+    from goldpipeline.adapters.telegram_publisher import TelegramPublisherClient
+
+    return TelegramPublisherClient(settings), settings.target_chat
+
+
+def _cmd_publish(args: argparse.Namespace) -> int:
+    client, target = _build_publisher(args)
+    outcome = publish_run(
+        run_id=args.run_id,
+        store=RunStore(args.runs_dir),
+        client=client,
+        target_chat=target,
+    )
+    result = outcome.result
+    ok = outcome.published
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "run_id": outcome.run_id,
+                    "status": outcome.status,
+                    "publish_status": result.status,
+                    "provider": result.provider,
+                    "target_chat": result.target_chat,
+                    "attempt_id": result.attempt_id,
+                    "chunk_count": result.chunk_count,
+                    "confirmed_count": result.confirmed_count,
+                    "message_ids": [m.message_id for m in result.messages],
+                    "failure": (
+                        {
+                            "category": result.failure.category,
+                            "code": result.failure.safe_code,
+                            "message": result.failure.safe_message,
+                        }
+                        if result.failure
+                        else None
+                    ),
+                    "artifact": str(outcome.result_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return EXIT_OK if ok else EXIT_BLOCKED
+
+    stream = sys.stdout if ok else sys.stderr
+    print(f"Run: {outcome.run_id}", file=stream)
+    print(f"Publisher: {result.provider} -> {result.target_chat}", file=stream)
+    print(f"Status: {result.status}", file=stream)
+    print(f"Delivered: {result.confirmed_count}/{result.chunk_count} message(s)", file=stream)
+    for message in result.messages:
+        print(f"  chunk {message.chunk_index}: message_id={message.message_id}", file=stream)
+    if result.failure is not None:
+        print(f"Failure: [{result.failure.safe_code}] {result.failure.safe_message}", file=stream)
+    for warning in result.warnings:
+        print(f"  ! {warning}", file=stream)
+    print(f"Artifact: {outcome.result_path}", file=stream)
+
+    return EXIT_OK if ok else EXIT_BLOCKED
+
+
 def _cmd_show_run(args: argparse.Namespace) -> int:
     store = RunStore(args.runs_dir)
     try:
@@ -760,6 +872,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "review-draft": _cmd_review_draft,
         "finalize": _cmd_finalize,
         "gate-publish": _cmd_gate_publish,
+        "publish": _cmd_publish,
         "show-run": _cmd_show_run,
         "list-runs": _cmd_list_runs,
     }

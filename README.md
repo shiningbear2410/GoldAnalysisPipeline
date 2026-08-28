@@ -2,14 +2,14 @@
 
 Multi-agent pipeline for producing XAUUSD ("Nhận định Vàng") articles.
 
-**This repository is at Round 5: the final publish gate.** Round 1 turns a raw
+**This repository is at Round 6: the Telegram publisher.** Round 1 turns a raw
 human analysis plus OHLC data into an immutable **Run** with a machine-readable
 `context.json`; Round 2 writes a Vietnamese XAUUSD commentary from it; Round 3
 audits that commentary and records a verdict; Round 4 applies the audit; Round 5
-decides deterministically whether the result may be published at all.
+decides deterministically whether the result may be published; Round 6 sends it.
 
-Nothing is published yet — that is Round 6. See [Scope](#scope) for the full
-boundary.
+Every stage is a separate command. Nothing runs automatically — orchestration is
+Round 7. See [Scope](#scope) for the full boundary.
 
 ## What this is
 
@@ -39,6 +39,9 @@ raw analysis JSON  +  OHLC JSON
                            -> claude_finalizer.json                  (Round 4)
         -> verify chain -> deterministic checks
                         -> publish_decision.json  APPROVED|BLOCKED   (Round 5)
+        -> re-verify approval -> publish_intent.json
+                              -> Telegram sendMessage
+                              -> publish_result.json                 (Round 6)
 ```
 
 `context.json` is the contract throughout. The writer receives it and nothing
@@ -114,6 +117,7 @@ Without installing, set `PYTHONPATH=src` instead of `pip install -e .`.
 | `review-draft --run-id <id>` | Run the ChatGPT Reviewer over a drafted Run |
 | `finalize --run-id <id>` | Apply the review and store the final article |
 | `gate-publish --run-id <id>` | Decide deterministically whether it may be published |
+| `publish --run-id <id>` | Send an approved Run to Telegram, once |
 | `show-run <run_id>` | Print a Run's status, files and digests |
 | `list-runs` | List Run ids under the runs directory |
 
@@ -545,6 +549,132 @@ Re-running the gate on a Run that already has a decision is refused. There is no
 `--force`: re-evaluating under a newer gate would let an approval appear where a
 block used to be, with nothing recording that it changed.
 
+## The publisher
+
+```bash
+python -m goldpipeline publish --run-id 20260828_022701_a83f2c --fake-publisher
+```
+
+```
+Run: 20260828_022701_a83f2c
+Publisher: fake -> @fake_offline_channel
+Status: PUBLISHED
+Delivered: 1/1 message(s)
+  chunk 0: message_id=1000
+Artifact: runs/20260828_022701_a83f2c/publish_result.json
+```
+
+Drop `--fake-publisher` to post for real. That needs `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_TARGET_CHAT_ID` in the environment.
+
+> **The implementation and its tests never publish for real.** The whole suite
+> runs against the offline client, and a socket guard fails any test that tries
+> to connect. Nothing in this repository has posted to a Telegram channel.
+
+Exit codes: `0` published, `3` any other delivery outcome, `1` configuration
+problem, `2` the Run may not be published or was already attempted.
+
+### Preconditions
+
+The publisher sends only when **all** of these hold, and checks every one before
+it writes anything:
+
+- the Run is `READY_TO_PUBLISH`;
+- `publish_decision.decision` is `APPROVED`;
+- the decision came from a gate version this publisher supports;
+- `claude_final.md`, `claude_finalizer.json`, `context.json` and
+  `publish_decision.json` still match the digests recorded for them;
+- no `publish_result.json` exists — one attempt per Run;
+- no orphaned `publish_intent.json` exists.
+
+The article is then read **once** and held in memory. Chunking, hashing and
+sending all work from that snapshot, so a file edited mid-publish cannot change
+what goes out.
+
+### Delivery outcomes
+
+| Status | Meaning |
+| --- | --- |
+| `PUBLISHED` | Every chunk confirmed by Telegram with a message id |
+| `FAILED` | Nothing delivered, and Telegram said so explicitly |
+| `PARTIAL` | Some chunks confirmed, then an explicit refusal |
+| `UNCERTAIN` | A timeout, reset, 5xx or unparseable reply — delivery unknown |
+
+The distinction that matters is between *knowing* and *not knowing*. An explicit
+refusal is good news: nothing was delivered, and that is certain. `UNCERTAIN`
+means Telegram may or may not hold the message.
+
+> **`UNCERTAIN` MUST NEVER BE AUTOMATICALLY RETRIED.** A duplicate post cannot be
+> taken back — readers have already seen it. Reconcile by looking at the channel.
+
+`UNCERTAIN` outranks `PARTIAL`: if the last chunk's fate is unknown, so is the
+attempt's. Once any chunk is refused or unknown, the remaining chunks are not
+sent.
+
+### Retry policy
+
+Exactly one condition is retried: an explicit **429** with a `retry_after`. That
+is Telegram stating it did *not* accept the request, so a retry cannot duplicate.
+The delay is honoured, capped at 300 seconds, and bounded to 2 retries per chunk.
+
+Nothing else is retried — not timeouts, not connection resets, not 5xx, not a
+malformed reply. Each of those may mean the message was delivered and the
+acknowledgement lost.
+
+### The durable intent
+
+`publish_intent.json` is committed **before the first request** and records the
+destination, the article digest and the chunk plan. It exists for one scenario:
+
+```
+POST sendMessage  ->  Telegram accepts and posts  ->  connection drops
+                  ->  process sees a failure      ->  process dies
+```
+
+Without the intent, the next run cannot tell "never sent" from "sent,
+acknowledgement lost", and a retry would post the article twice. With it, the
+next run sees an intent and no result, records `UNCERTAIN`, and **sends nothing**.
+
+That includes the unavoidable window where Telegram confirms and the process dies
+before `publish_result.json` is written. The Run is then `PUBLISH_UNCERTAIN` and
+needs a human. This is deliberate: the pipeline does not fake exactly-once
+delivery by retrying blindly.
+
+### Chunking
+
+Telegram caps a message at 4096 UTF-16 code units; the publisher targets 3900.
+Length is counted the way Telegram counts it, so an emoji above the BMP costs
+two — a naive character count would let an emoji-heavy article through and have
+it refused.
+
+Cuts prefer a paragraph break, then a line break, then a sentence end, then any
+whitespace, then a hard boundary. The invariant, asserted before sending:
+
+```python
+"".join(chunks) == article  # exactly
+```
+
+Nothing is stripped, normalised, or annotated. There is no `(1/2)` marker — that
+would be content the gate never approved. Almost every article fits in one
+message; multi-part sends are paced at 1.1 s between chunks.
+
+### Security
+
+The bot token appears in the Bot API **URL**, which makes every HTTP exception a
+potential credential leak. No exception from the HTTP layer is allowed to
+propagate: each is caught and replaced with a message written in this codebase,
+and even the exception's `__cause__` is scrubbed so a printed traceback cannot
+expose it. Tests assert a token sentinel appears in no artifact, log, exception
+or CLI output.
+
+The destination comes only from `TELEGRAM_TARGET_CHAT_ID`. There is deliberately
+no `--chat-id` flag, and article content is never read for configuration — a
+pipeline whose destination its own content could steer would be one prompt away
+from posting to a stranger's channel.
+
+Messages are sent as plain text with no `parse_mode`, so no markup parser can
+restyle or swallow text nobody reviewed in that form.
+
 ## Run directory structure
 
 ```
@@ -586,6 +716,8 @@ All schemas are Pydantic models under `src/goldpipeline/schemas/`.
 | `FinalizerModelOutput` | What the finalizer may author: a revised article and one resolution per issue. No verdict, no score. |
 | `FinalizerResult` | The `claude_finalizer.json` artifact, with the digests of all four inputs. |
 | `PublishDecision` | The `publish_decision.json` artifact: verdict, checks, blockers, and the digests of all six inputs. |
+| `PublishIntent` | The `publish_intent.json` artifact, written before the first request. |
+| `PublishResult` | The `publish_result.json` artifact: outcome, confirmed message ids, and why an attempt stopped. |
 
 ### Two things worth knowing about the data types
 
@@ -699,8 +831,9 @@ src/goldpipeline/
                   fencing, integrity, claim resolver, prechecks, content safety,
                   review and finalizer policy, prompt builders, and the run /
                   writer / reviewer / finalizer / publish-gate orchestration
-    adapters/     source, writer, reviewer and finalizer protocols;
-                  JSON file / Anthropic / OpenAI / fake implementations
+    adapters/     source, writer, reviewer, finalizer and publisher protocols;
+                  JSON file / Anthropic / OpenAI / Telegram / fake
+                  implementations
     storage/      atomic writes, Run directory lifecycle
     config.py     environment settings; the only place a credential lives
     cli.py        argparse entry point
@@ -744,13 +877,20 @@ market scanners with a stricter boundary policy, the immutable
 `publish_decision.json`, and `gate-publish`. No model, no network, no
 credentials.
 
-**Deliberately not built:** Telegram publishing, auto-publish, a second review
-loop, schedulers, dashboards, databases, queues, a technical-analysis engine
-(RSI, MACD, ICT, bias, trade signals), web or news retrieval, sentiment
-analysis, and backtesting.
+**Round 6 — Telegram publisher.** Durable publish intent, one immutable attempt
+per Run, deterministic chunking with an exact-content invariant, plain-text
+transport, bounded 429 retries, and a policy of never retrying an ambiguous
+delivery. Publisher client protocol with Telegram and offline implementations,
+and `publish`.
+
+**Deliberately not built:** orchestration, schedulers, cron, dashboards,
+automatic retry or reconciliation of an `UNCERTAIN` attempt, deleting or editing
+posted messages, databases, queues, a technical-analysis engine (RSI, MACD, ICT,
+bias, trade signals), web or news retrieval, sentiment analysis, and
+backtesting.
 
 `AnalysisContext` describes facts and carries the raw analysis; it holds no
 interpretation. The writer produces prose and an audit trail of the numbers it
 used. The reviewer judges that prose and says what to fix. The finalizer fixes
-it. The gate decides whether the result may be published — and actually
-publishing it is Round 6.
+it. The gate decides whether the result may be published, and the publisher
+sends it. Running the stages together on a schedule is Round 7.

@@ -399,6 +399,110 @@ class UntrustworthyRunError(PublishGateError):
     code = "UNTRUSTWORTHY_RUN"
 
 
+# --- publisher (Round 6) -------------------------------------------------
+
+
+class PublisherError(PipelineError):
+    """Base class for failures of the Telegram publisher."""
+
+    code = "PUBLISHER_ERROR"
+
+
+class PublisherConfigurationError(PublisherError):
+    """Publishing is not configured. Names the setting, never its value."""
+
+    code = "PUBLISHER_CONFIGURATION_ERROR"
+
+
+class PublisherNotApprovedError(PublisherError):
+    """The Run is not cleared for publication.
+
+    Either it never reached ``READY_TO_PUBLISH`` or its decision is not
+    ``APPROVED``. No intent is written and no request is made.
+    """
+
+    code = "PUBLISHER_NOT_APPROVED"
+
+
+class PublisherIntegrityError(PublisherError):
+    """An artifact changed after the gate approved it.
+
+    The approval describes exact bytes. If those bytes moved, the approval no
+    longer covers what would be sent, so nothing is sent.
+    """
+
+    code = "PUBLISHER_INTEGRITY_ERROR"
+
+
+class PublisherArtifactExistsError(PublisherError):
+    """The Run has already been attempted.
+
+    One attempt per Run in V1. A second attempt cannot know what the first one
+    delivered, so retrying is how duplicates get published.
+    """
+
+    code = "PUBLISHER_ARTIFACT_EXISTS"
+
+
+class PublisherPreviousAttemptUncertainError(PublisherError):
+    """A previous attempt left an intent with no result.
+
+    The process died somewhere around the network call, so Telegram may or may
+    not have the message. Resending is exactly the wrong move.
+    """
+
+    code = "PUBLISHER_PREVIOUS_ATTEMPT_UNCERTAIN"
+
+
+class PublisherAuthenticationError(PublisherError):
+    """The provider rejected the credentials. Never carries the token."""
+
+    code = "PUBLISHER_AUTHENTICATION_ERROR"
+
+
+class PublisherPermissionError(PublisherError):
+    """The bot may not post to the configured target."""
+
+    code = "PUBLISHER_PERMISSION_ERROR"
+
+
+class PublisherRejectedError(PublisherError):
+    """The provider explicitly refused the request.
+
+    An explicit refusal is *good* news relative to silence: it means the message
+    was not delivered, so the outcome is knowable.
+    """
+
+    code = "PUBLISHER_REJECTED"
+
+
+class PublisherRateLimitError(PublisherError):
+    """Flood control. The only condition this pipeline retries.
+
+    A 429 is the provider stating plainly that it did not accept the request and
+    saying when to try again - the one case where a retry cannot duplicate.
+    """
+
+    code = "PUBLISHER_RATE_LIMITED"
+
+
+class PublisherTransportAmbiguousError(PublisherError):
+    """The outcome cannot be determined.
+
+    A timeout, a reset connection, a 5xx, a reply that does not parse. The
+    request may have been delivered and the acknowledgement lost. This never
+    triggers a retry - it ends the attempt as ``UNCERTAIN`` for a human.
+    """
+
+    code = "PUBLISHER_TRANSPORT_AMBIGUOUS"
+
+
+class PublisherResponseError(PublisherError):
+    """The provider answered, but not in a way that confirms delivery."""
+
+    code = "PUBLISHER_RESPONSE_ERROR"
+
+
 __all__ = [
     "AnalysisTextTooLargeError",
     "ArtifactAlreadyExistsError",
@@ -421,6 +525,18 @@ __all__ = [
     "NaiveTimestampError",
     "NormalizationError",
     "PipelineError",
+    "PublisherArtifactExistsError",
+    "PublisherAuthenticationError",
+    "PublisherConfigurationError",
+    "PublisherError",
+    "PublisherIntegrityError",
+    "PublisherNotApprovedError",
+    "PublisherPermissionError",
+    "PublisherPreviousAttemptUncertainError",
+    "PublisherRateLimitError",
+    "PublisherRejectedError",
+    "PublisherResponseError",
+    "PublisherTransportAmbiguousError",
     "PublishDecisionExistsError",
     "PublishGateError",
     "ReviewArtifactExistsError",

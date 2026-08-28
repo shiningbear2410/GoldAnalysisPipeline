@@ -7,6 +7,7 @@ test suite never needs the SDK loaded.
 
 from goldpipeline.adapters.base import AnalysisSource, LoadedSource, MarketDataSource
 from goldpipeline.adapters.fake_finalizer import FakeFinalizerClient
+from goldpipeline.adapters.fake_publisher import FakePublisherClient
 from goldpipeline.adapters.fake_reviewer import FakeReviewerClient
 from goldpipeline.adapters.fake_writer import FakeWriterClient
 from goldpipeline.adapters.file_source import (
@@ -18,6 +19,11 @@ from goldpipeline.adapters.finalizer_client import (
     FinalizeRequest,
     FinalizeResponse,
 )
+from goldpipeline.adapters.publisher_client import (
+    PublisherClient,
+    SendOutcome,
+    SendRequest,
+)
 from goldpipeline.adapters.reviewer_client import (
     ReviewerClient,
     ReviewRequest,
@@ -28,6 +34,7 @@ from goldpipeline.adapters.writer_client import WriterClient, WriterRequest, Wri
 __all__ = [
     "AnalysisSource",
     "FakeFinalizerClient",
+    "FakePublisherClient",
     "FakeReviewerClient",
     "FakeWriterClient",
     "JsonFileAnalysisSource",
@@ -37,9 +44,12 @@ __all__ = [
     "FinalizeResponse",
     "FinalizerClient",
     "MarketDataSource",
+    "PublisherClient",
     "ReviewRequest",
     "ReviewResponse",
     "ReviewerClient",
+    "SendOutcome",
+    "SendRequest",
     "WriterClient",
     "WriterRequest",
     "WriterResponse",

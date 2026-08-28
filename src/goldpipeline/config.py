@@ -14,10 +14,12 @@ Secrets live here and nowhere else. Two rules this module exists to enforce:
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 from goldpipeline.domain.errors import (
     FinalizeConfigurationError,
+    PublisherConfigurationError,
     ReviewConfigurationError,
     WriterConfigurationError,
 )
@@ -42,6 +44,14 @@ FINALIZER_MODEL_ENV = "ANTHROPIC_FINALIZER_MODEL"
 FINALIZER_TIMEOUT_ENV = "GOLDPIPELINE_FINALIZER_TIMEOUT"
 FINALIZER_MAX_RETRIES_ENV = "GOLDPIPELINE_FINALIZER_MAX_RETRIES"
 FINALIZER_MAX_TOKENS_ENV = "GOLDPIPELINE_FINALIZER_MAX_TOKENS"
+
+TELEGRAM_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
+TELEGRAM_TARGET_ENV = "TELEGRAM_TARGET_CHAT_ID"
+TELEGRAM_TIMEOUT_ENV = "GOLDPIPELINE_PUBLISH_TIMEOUT"
+
+DEFAULT_PUBLISH_TIMEOUT_SECONDS = 30.0
+"""Finite by construction. An unbounded publish call is how a process hangs
+holding an uncommitted publish intent."""
 
 REVIEW_API_KEY_ENV = "OPENAI_API_KEY"
 REVIEW_MODEL_ENV = "OPENAI_REVIEW_MODEL"
@@ -268,6 +278,96 @@ class FinalizerSettings:
         )
 
 
+_CHAT_USERNAME = re.compile(r"^@[A-Za-z][A-Za-z0-9_]{4,31}$")
+_CHAT_NUMERIC = re.compile(r"^-?\d{1,19}$")
+
+
+@dataclass(frozen=True)
+class TelegramSettings:
+    """Everything the publisher needs in order to post.
+
+    The destination lives here and nowhere else. It comes from the environment,
+    is validated before use, and is never taken from article text, the analyst's
+    note, or any model output - a pipeline whose destination could be influenced
+    by its own content would be one prompt away from posting to a stranger's
+    channel.
+    """
+
+    bot_token: str = field(repr=False)
+    target_chat: str = ""
+    timeout_seconds: float = DEFAULT_PUBLISH_TIMEOUT_SECONDS
+
+    def __repr__(self) -> str:
+        """Render without the token.
+
+        The Telegram API embeds the token in the request path, so a leaked
+        settings object is a leaked credential.
+        """
+        return (
+            f"TelegramSettings(bot_token={_REDACTED}, target_chat={self.target_chat!r}, "
+            f"timeout_seconds={self.timeout_seconds})"
+        )
+
+    __str__ = __repr__
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> TelegramSettings:
+        """Build settings from the environment.
+
+        Raises:
+            PublisherConfigurationError: If a required value is missing or the
+                destination is not a shape Telegram accepts. The message names
+                the setting, never its value.
+        """
+        source = os.environ if env is None else env
+
+        token = (source.get(TELEGRAM_TOKEN_ENV) or "").strip()
+        if not token:
+            raise PublisherConfigurationError(
+                f"{TELEGRAM_TOKEN_ENV} is not set; the publisher cannot reach Telegram",
+                setting=TELEGRAM_TOKEN_ENV,
+            )
+
+        target = (source.get(TELEGRAM_TARGET_ENV) or "").strip()
+        if not target:
+            raise PublisherConfigurationError(
+                f"{TELEGRAM_TARGET_ENV} is not set; the publisher has no destination",
+                setting=TELEGRAM_TARGET_ENV,
+            )
+
+        return cls(
+            bot_token=token,
+            target_chat=validate_target_chat(target),
+            timeout_seconds=_positive_float(
+                source,
+                TELEGRAM_TIMEOUT_ENV,
+                DEFAULT_PUBLISH_TIMEOUT_SECONDS,
+                PublisherConfigurationError,
+            ),
+        )
+
+
+def validate_target_chat(target: str) -> str:
+    """Check a destination is a shape Telegram recognises, and return it canonically.
+
+    Two accepted forms: a public ``@username`` and a numeric chat id, which is
+    negative for channels and supergroups. The numeric form is kept as a
+    *string* throughout - a channel id like ``-1002145890733`` exceeds what a
+    float represents exactly, and rounding a destination is a way to post
+    somewhere unintended.
+
+    Raises:
+        PublisherConfigurationError: If the target is neither form.
+    """
+    cleaned = target.strip()
+    if _CHAT_USERNAME.fullmatch(cleaned) or _CHAT_NUMERIC.fullmatch(cleaned):
+        return cleaned
+    raise PublisherConfigurationError(
+        f"{TELEGRAM_TARGET_ENV} must be an @username or a numeric chat id",
+        setting=TELEGRAM_TARGET_ENV,
+    )
+
+
 def _raw(source: dict[str, str] | os._Environ[str], name: str) -> str | None:
     value = source.get(name)
     return value.strip() if value and value.strip() else None
@@ -277,6 +377,7 @@ ConfigError = (
     type[WriterConfigurationError]
     | type[ReviewConfigurationError]
     | type[FinalizeConfigurationError]
+    | type[PublisherConfigurationError]
 )
 """Which configuration error a helper should raise.
 
@@ -336,6 +437,7 @@ def _non_negative_int(
 
 __all__ = [
     "API_KEY_ENV",
+    "DEFAULT_PUBLISH_TIMEOUT_SECONDS",
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_MAX_TOKENS",
     "DEFAULT_MODEL",
@@ -347,5 +449,9 @@ __all__ = [
     "REVIEW_MODEL_ENV",
     "FinalizerSettings",
     "ReviewerSettings",
+    "TELEGRAM_TARGET_ENV",
+    "TELEGRAM_TOKEN_ENV",
+    "TelegramSettings",
     "WriterSettings",
+    "validate_target_chat",
 ]

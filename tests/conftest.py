@@ -535,3 +535,84 @@ def load_decision(run_dir: Path) -> Any:
     return PublishDecision.model_validate_json(
         (Path(run_dir) / "publish_decision.json").read_text(encoding="utf-8")
     )
+
+
+# --------------------------------------------------------------------------
+# Round 6 helpers
+# --------------------------------------------------------------------------
+
+PUBLISH_NOW = datetime(2026, 8, 28, 7, 30, tzinfo=UTC)
+"""Deterministic 'now' for publish artifacts."""
+
+TELEGRAM_TOKEN_SENTINEL = "telegram-test-credential-DO-NOT-LEAK"
+"""A stand-in bot token, greppable across artifacts, logs and CLI output.
+
+Deliberately not shaped like a real Telegram token (`<digits>:AA<35 chars>`):
+a fake carrying that shape would trip secret scanners and push protection
+forever after, and nothing here depends on the format.
+"""
+
+TEST_TARGET_CHAT = "@gold_signals_test"
+
+
+def make_published_ready_run(
+    runs_dir: Path,
+    tmp_path: Path,
+    *,
+    article: str = CLEAN_ARTICLE,
+    claims: list[Any] | None = None,
+    analysis: dict[str, Any] | None = None,
+) -> Any:
+    """Create a real READY_TO_PUBLISH Run, gate approval and all.
+
+    Driven through all five stages rather than assembled by hand: the publisher
+    re-verifies four artifacts against the gate's own digests, so only a Run the
+    pipeline produced is a fair test of it.
+    """
+    from goldpipeline.services.publish_gate import gate_publish
+    from goldpipeline.storage.run_store import RunStore
+
+    finalized = make_finalized_run(
+        runs_dir, tmp_path, article=article, claims=claims, analysis=analysis
+    )
+    gated = gate_publish(run_id=finalized.run_id, store=RunStore(runs_dir), now=GATE_NOW)
+    assert gated.approved, f"fixture run was blocked: {gated.decision.blockers}"
+    return gated
+
+
+@pytest.fixture
+def ready_run(runs_dir: Path, tmp_path: Path) -> Any:
+    """A Run the gate approved, ready for the publisher."""
+    return make_published_ready_run(runs_dir, tmp_path)
+
+
+class RecordingSleep:
+    """Captures pacing and flood-control waits instead of spending them."""
+
+    def __init__(self) -> None:
+        self.waits: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.waits.append(seconds)
+
+    @property
+    def total(self) -> float:
+        return sum(self.waits)
+
+
+def load_publish_result(run_dir: Path) -> Any:
+    """Read a Run's publish result back through its schema."""
+    from goldpipeline.schemas.publisher import PublishResult
+
+    return PublishResult.model_validate_json(
+        (Path(run_dir) / "publish_result.json").read_text(encoding="utf-8")
+    )
+
+
+def load_publish_intent(run_dir: Path) -> Any:
+    """Read a Run's publish intent back through its schema."""
+    from goldpipeline.schemas.publisher import PublishIntent
+
+    return PublishIntent.model_validate_json(
+        (Path(run_dir) / "publish_intent.json").read_text(encoding="utf-8")
+    )

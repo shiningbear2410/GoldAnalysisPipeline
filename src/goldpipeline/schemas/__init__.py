@@ -28,6 +28,15 @@ from goldpipeline.schemas.publish import (
     GateFinding,
     PublishDecision,
 )
+from goldpipeline.schemas.publisher import (
+    ChunkPlan,
+    DeliveredMessage,
+    FailureCategory,
+    PublishFailure,
+    PublishIntent,
+    PublishResult,
+    PublishStatus,
+)
 from goldpipeline.schemas.quality import DataQuality, QualityStatus, QualityWarning
 from goldpipeline.schemas.review import (
     Evidence,
@@ -66,8 +75,10 @@ __all__ = [
     "ContextRawAnalysis",
     "ContextTiming",
     "DataQuality",
+    "DeliveredMessage",
     "BlockerCode",
     "CheckId",
+    "ChunkPlan",
     "CheckStatus",
     "Decision",
     "Evidence",
@@ -75,6 +86,7 @@ __all__ = [
     "FinalizerModelOutput",
     "FinalizerPrompt",
     "FinalizerResult",
+    "FailureCategory",
     "FindingCode",
     "GateCheck",
     "GateFinding",
@@ -85,6 +97,10 @@ __all__ = [
     "OHLCBar",
     "PrecheckFinding",
     "PublishDecision",
+    "PublishFailure",
+    "PublishIntent",
+    "PublishResult",
+    "PublishStatus",
     "QualityStatus",
     "QualityWarning",
     "ReviewIssue",
