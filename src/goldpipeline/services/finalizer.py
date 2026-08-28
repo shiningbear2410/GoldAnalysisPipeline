@@ -1,0 +1,567 @@
+"""Finalizer stage orchestration.
+
+The verdict decides the path, and two of the three never reach a provider:
+
+* ``PASS`` - the article is already correct. It is copied byte for byte and the
+  stage records ``PASSTHROUGH``. Calling a model here would spend money to
+  introduce drift into something that passed, which is the opposite of the job.
+* ``NEEDS_REVISION`` - Claude edits the article against the review, and the
+  result is checked before anything is written.
+* ``REJECT`` - blocked. A reviewer judged the piece unsalvageable, and
+  "ask a model to rescue it" is not a recovery strategy. The Run waits for a
+  human.
+
+For the revision path the order is:
+
+1. refuse unless the Run is reviewed and not already finalized;
+2. verify all four artifacts against the manifest, and the review's own
+   cross-references against them;
+3. re-run the deterministic checks on the draft, for a baseline;
+4. render the versioned prompt;
+5. call the provider;
+6. validate the resolutions - complete, honest, severe issues actually applied;
+7. re-run the checks on the revision and compare against the baseline;
+8. commit both artifacts atomically;
+9. update the manifest.
+
+Nothing is written before step 8. A failure anywhere earlier leaves the Run
+exactly as Round 3 produced it, plus one failure event on the ledger.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
+
+from goldpipeline.adapters.finalizer_client import FinalizerClient, FinalizeRequest
+from goldpipeline.domain.errors import (
+    ArtifactIntegrityError,
+    FinalizationBlockedError,
+    FinalizeArtifactExistsError,
+    FinalizeError,
+    RunNotFinalizableError,
+)
+from goldpipeline.prompts import DEFAULT_FINALIZER_PROMPT
+from goldpipeline.schemas.common import utc_now
+from goldpipeline.schemas.context import AnalysisContext
+from goldpipeline.schemas.finalizer import (
+    FinalizationMode,
+    FinalizerResult,
+    FinalizerUsage,
+    FinalizerWarning,
+    IssueResolution,
+)
+from goldpipeline.schemas.manifest import RunError, RunManifest, RunStatus
+from goldpipeline.schemas.review import PrecheckFinding, ReviewResult, ReviewStatus
+from goldpipeline.schemas.writer import WriterResult
+from goldpipeline.services.finalizer_policy import (
+    compare_findings,
+    require_clean_postcheck,
+    validate_resolutions,
+)
+from goldpipeline.services.finalizer_prompt import build_finalizer_prompt
+from goldpipeline.services.integrity import (
+    VerifiedArtifact,
+    require_digest_match,
+    verify_artifact,
+)
+from goldpipeline.services.pipeline import CONTEXT_FILENAME
+from goldpipeline.services.precheck import run_prechecks
+from goldpipeline.services.reviewer import REVIEW_FILENAME
+from goldpipeline.services.writer import DRAFT_FILENAME, WRITER_FILENAME
+from goldpipeline.storage.run_store import PreparedArtifact, RunDirectory, RunStore
+
+logger = logging.getLogger(__name__)
+
+FINAL_FILENAME = "claude_final.md"
+FINALIZER_FILENAME = "claude_finalizer.json"
+
+FINALIZER_ARTIFACTS = (FINAL_FILENAME, FINALIZER_FILENAME)
+
+FinalizeFailure = FinalizeError | ArtifactIntegrityError
+"""The two families of expected failure: the stage's own, and artifact tampering."""
+
+
+@dataclass(frozen=True)
+class FinalizeRunResult:
+    """Outcome of a finalizer stage attempt."""
+
+    run_id: str
+    run_dir: Path
+    status: RunStatus
+    result: FinalizerResult | None = None
+    final_path: Path | None = None
+    metadata_path: Path | None = None
+    error: FinalizeFailure | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        """Whether both artifacts were committed."""
+        return self.status is RunStatus.FINALIZED and self.result is not None
+
+    @property
+    def blocked(self) -> bool:
+        """Whether the review verdict forbade finalization.
+
+        Distinct from a failure: nothing went wrong, the pipeline declined.
+        """
+        return isinstance(self.error, FinalizationBlockedError)
+
+
+@dataclass(frozen=True)
+class FinalizeInputs:
+    """The four verified artifacts a finalization is built from."""
+
+    context: AnalysisContext
+    context_sha256: str
+    draft_bytes: bytes
+    draft_sha256: str
+    writer_result: WriterResult
+    writer_metadata_sha256: str
+    review: ReviewResult
+    review_sha256: str
+
+    @property
+    def article(self) -> str:
+        """The draft as text."""
+        return self.draft_bytes.decode("utf-8").strip()
+
+
+def finalize_run(
+    *,
+    run_id: str,
+    store: RunStore,
+    client: FinalizerClient | None = None,
+    prompt_version: str = DEFAULT_FINALIZER_PROMPT,
+    max_tokens: int = 8000,
+    now: datetime | None = None,
+) -> FinalizeRunResult:
+    """Produce the final article for a reviewed Run.
+
+    Args:
+        run_id: The Run to finalize. Must already be ``REVIEWED``.
+        store: Where Runs live.
+        client: Any :class:`FinalizerClient`. Only needed when the verdict is
+            ``NEEDS_REVISION``; a passthrough or a block never touches it, so
+            ``None`` is legitimate for those.
+        prompt_version: Versioned prompt template id.
+        max_tokens: Output ceiling for the provider call.
+        now: Injection point for tests.
+
+    Returns:
+        A :class:`FinalizeRunResult`. Expected failures - including a blocking
+        ``REJECT`` - are reported through ``result.error`` rather than raised.
+    """
+    run = store.open(run_id)
+    manifest = run.load_manifest()
+
+    try:
+        return _execute(
+            run=run,
+            manifest=manifest,
+            client=client,
+            prompt_version=prompt_version,
+            max_tokens=max_tokens,
+            now=now,
+        )
+    except (FinalizeError, ArtifactIntegrityError) as exc:
+        _record_failure(run, manifest, exc)
+        return FinalizeRunResult(
+            run_id=run.run_id, run_dir=run.path, status=manifest.status, error=exc
+        )
+
+
+def _execute(
+    *,
+    run: RunDirectory,
+    manifest: RunManifest,
+    client: FinalizerClient | None,
+    prompt_version: str,
+    max_tokens: int,
+    now: datetime | None,
+) -> FinalizeRunResult:
+    """Do the work. Raises on any expected failure."""
+    _require_finalizable(run, manifest)
+    inputs = load_verified_inputs(run, manifest)
+    verdict = inputs.review.status
+
+    logger.info("run=%s stage=finalize.start status=OK review=%s", run.run_id, verdict)
+    manifest.record_event("finalize.start", str(verdict), f"review verdict {verdict}")
+
+    if verdict is ReviewStatus.REJECT:
+        raise FinalizationBlockedError(
+            f"review verdict is {verdict}; finalization is blocked. "
+            "A rejected article needs a human, not another model.",
+            run_id=run.run_id,
+            review_status=str(verdict),
+            issue_count=len(inputs.review.issues),
+        )
+
+    if verdict is ReviewStatus.PASS:
+        return _finalize_passthrough(run=run, manifest=manifest, inputs=inputs, now=now)
+
+    return _finalize_revision(
+        run=run,
+        manifest=manifest,
+        inputs=inputs,
+        client=client,
+        prompt_version=prompt_version,
+        max_tokens=max_tokens,
+        now=now,
+    )
+
+
+# --------------------------------------------------------------------------
+# the two accepting paths
+# --------------------------------------------------------------------------
+
+
+def _finalize_passthrough(
+    *,
+    run: RunDirectory,
+    manifest: RunManifest,
+    inputs: FinalizeInputs,
+    now: datetime | None,
+) -> FinalizeRunResult:
+    """Copy the draft to the final article, byte for byte.
+
+    Not "re-serialize the text" - the exact bytes. Normalizing whitespace or a
+    trailing newline here would mean the published article differs from the one
+    that was reviewed, which is the whole thing a passthrough exists to prevent.
+    """
+    final = PreparedArtifact.from_bytes(FINAL_FILENAME, inputs.draft_bytes)
+
+    result = _build_result(
+        inputs=inputs,
+        run_id=run.run_id,
+        mode=FinalizationMode.PASSTHROUGH,
+        provider_called=False,
+        final=final,
+        article=inputs.article,
+        resolutions=[],
+        warnings=[],
+        postcheck_findings=[],
+        model=None,
+        provider=None,
+        prompt_version=None,
+        usage=FinalizerUsage(),
+        now=now,
+    )
+    return _commit(run=run, manifest=manifest, final=final, result=result)
+
+
+def _finalize_revision(
+    *,
+    run: RunDirectory,
+    manifest: RunManifest,
+    inputs: FinalizeInputs,
+    client: FinalizerClient | None,
+    prompt_version: str,
+    max_tokens: int,
+    now: datetime | None,
+) -> FinalizeRunResult:
+    """Have the model apply the review, then check that it really did."""
+    if client is None:
+        raise RunNotFinalizableError(
+            f"run {run.run_id} needs revision, which requires a finalizer client",
+            run_id=run.run_id,
+        )
+
+    baseline = run_prechecks(
+        context=inputs.context,
+        writer_result=inputs.writer_result,
+        article=inputs.article,
+        check_claims=False,
+    )
+
+    prompt = build_finalizer_prompt(
+        context=inputs.context,
+        article=inputs.article,
+        review=inputs.review,
+        report=baseline,
+        prompt_version=prompt_version,
+    )
+
+    response = client.finalize(
+        FinalizeRequest(prompt=prompt, run_id=run.run_id, max_tokens=max_tokens)
+    )
+    validate_resolutions(response.output, inputs.review, run_id=run.run_id)
+
+    article = response.output.article.strip()
+    revised = run_prechecks(
+        context=inputs.context,
+        writer_result=inputs.writer_result,
+        article=article,
+        check_claims=False,
+    )
+    outcome = compare_findings(
+        original=baseline, revised=revised, review=inputs.review, final_article=article
+    )
+    require_clean_postcheck(outcome)
+
+    logger.info(
+        "run=%s stage=finalize.postcheck status=OK findings=%d",
+        run.run_id,
+        len(outcome.findings),
+    )
+
+    final = PreparedArtifact.from_text(FINAL_FILENAME, article)
+    result = _build_result(
+        inputs=inputs,
+        run_id=run.run_id,
+        mode=FinalizationMode.REVISED,
+        provider_called=True,
+        final=final,
+        article=article,
+        resolutions=list(response.output.issue_resolutions),
+        warnings=list(response.output.warnings),
+        postcheck_findings=outcome.findings,
+        model=response.model,
+        provider=response.provider,
+        prompt_version=prompt.prompt_version,
+        usage=response.usage,
+        now=now,
+    )
+    return _commit(run=run, manifest=manifest, final=final, result=result)
+
+
+def _build_result(
+    *,
+    inputs: FinalizeInputs,
+    run_id: str,
+    mode: FinalizationMode,
+    provider_called: bool,
+    final: PreparedArtifact,
+    article: str,
+    resolutions: list[IssueResolution],
+    warnings: list[FinalizerWarning],
+    postcheck_findings: list[PrecheckFinding],
+    model: str | None,
+    provider: str | None,
+    prompt_version: str | None,
+    usage: FinalizerUsage,
+    now: datetime | None,
+) -> FinalizerResult:
+    """Stamp the metadata artifact. Every provenance field is set here."""
+    return FinalizerResult(
+        run_id=run_id,
+        finalization_mode=mode,
+        review_status=inputs.review.status,
+        provider_called=provider_called,
+        final_file=FINAL_FILENAME,
+        final_article_sha256=final.sha256,
+        article_chars=len(article),
+        issue_resolutions=resolutions,
+        warnings=warnings,
+        postcheck_findings=postcheck_findings,
+        model=model,
+        provider=provider,
+        prompt_version=prompt_version,
+        created_at=now or utc_now(),
+        context_sha256=inputs.context_sha256,
+        original_draft_sha256=inputs.draft_sha256,
+        writer_metadata_sha256=inputs.writer_metadata_sha256,
+        review_sha256=inputs.review_sha256,
+        usage=usage,
+    )
+
+
+def _commit(
+    *,
+    run: RunDirectory,
+    manifest: RunManifest,
+    final: PreparedArtifact,
+    result: FinalizerResult,
+) -> FinalizeRunResult:
+    """Write both artifacts as one unit, then move the Run to FINALIZED."""
+    metadata = PreparedArtifact.from_json(FINALIZER_FILENAME, result)
+    run.commit_artifacts([final, metadata], manifest)
+
+    manifest.status = RunStatus.FINALIZED
+    manifest.record_event(
+        "finalize.complete",
+        str(result.finalization_mode),
+        f"{result.article_chars} chars, {result.applied_count}/"
+        f"{len(result.issue_resolutions)} issues applied, "
+        f"provider_called={result.provider_called}",
+    )
+    run.save_manifest(manifest)
+    logger.info(
+        "run=%s stage=finalize.complete status=%s chars=%d provider_called=%s",
+        run.run_id,
+        result.finalization_mode,
+        result.article_chars,
+        result.provider_called,
+    )
+
+    return FinalizeRunResult(
+        run_id=run.run_id,
+        run_dir=run.path,
+        status=RunStatus.FINALIZED,
+        result=result,
+        final_path=run.artifact_path(FINAL_FILENAME),
+        metadata_path=run.artifact_path(FINALIZER_FILENAME),
+    )
+
+
+# --------------------------------------------------------------------------
+# preconditions
+# --------------------------------------------------------------------------
+
+
+def _require_finalizable(run: RunDirectory, manifest: RunManifest) -> None:
+    """Refuse unless the Run is reviewed and not already finalized."""
+    existing = [name for name in FINALIZER_ARTIFACTS if run.has_artifact(name)]
+    if existing:
+        raise FinalizeArtifactExistsError(
+            f"run {run.run_id} already has finalizer artifacts: {existing}. "
+            "Runs are immutable; a published article is never silently replaced.",
+            run_id=run.run_id,
+            artifacts=existing,
+        )
+
+    if manifest.status is not RunStatus.REVIEWED:
+        raise RunNotFinalizableError(
+            f"run {run.run_id} is {manifest.status}, the finalizer needs {RunStatus.REVIEWED}",
+            run_id=run.run_id,
+            status=str(manifest.status),
+        )
+
+    missing = [
+        name
+        for name in (CONTEXT_FILENAME, DRAFT_FILENAME, WRITER_FILENAME, REVIEW_FILENAME)
+        if not run.has_artifact(name)
+    ]
+    if missing:
+        raise RunNotFinalizableError(
+            f"run {run.run_id} is missing artifacts the finalizer needs: {missing}",
+            run_id=run.run_id,
+            missing=missing,
+        )
+
+
+def load_verified_inputs(run: RunDirectory, manifest: RunManifest) -> FinalizeInputs:
+    """Load and cross-check every artifact the finalization is built from.
+
+    Four proofs, each catching a different kind of tampering:
+
+    * each file matches the digest the manifest recorded for it;
+    * the writer result still describes the draft and the context it named;
+    * the review still describes the same three inputs it judged;
+    * every document agrees on the run id.
+
+    Raises:
+        ArtifactIntegrityError: If any of those fail.
+    """
+    context_artifact = verify_artifact(run, manifest, CONTEXT_FILENAME)
+    draft_artifact = verify_artifact(run, manifest, DRAFT_FILENAME)
+    writer_artifact = verify_artifact(run, manifest, WRITER_FILENAME)
+    review_artifact = verify_artifact(run, manifest, REVIEW_FILENAME)
+
+    context = _parse(run, context_artifact, AnalysisContext, "context")
+    writer_result = _parse(run, writer_artifact, WriterResult, "writer result")
+    review = _parse(run, review_artifact, ReviewResult, "review")
+
+    require_digest_match(
+        label=f"{WRITER_FILENAME}.article_sha256 vs {DRAFT_FILENAME}",
+        expected=writer_result.article_sha256,
+        actual=draft_artifact.sha256,
+        run_id=run.run_id,
+        artifact=DRAFT_FILENAME,
+    )
+    require_digest_match(
+        label=f"{REVIEW_FILENAME}.draft_sha256 vs {DRAFT_FILENAME}",
+        expected=review.draft_sha256,
+        actual=draft_artifact.sha256,
+        run_id=run.run_id,
+        artifact=DRAFT_FILENAME,
+    )
+    require_digest_match(
+        label=f"{REVIEW_FILENAME}.context_sha256 vs {CONTEXT_FILENAME}",
+        expected=review.context_sha256,
+        actual=context_artifact.sha256,
+        run_id=run.run_id,
+        artifact=CONTEXT_FILENAME,
+    )
+    require_digest_match(
+        label=f"{REVIEW_FILENAME}.writer_metadata_sha256 vs {WRITER_FILENAME}",
+        expected=review.writer_metadata_sha256,
+        actual=writer_artifact.sha256,
+        run_id=run.run_id,
+        artifact=WRITER_FILENAME,
+    )
+
+    for label, value in (
+        (CONTEXT_FILENAME, context.run_id),
+        (WRITER_FILENAME, writer_result.run_id),
+        (REVIEW_FILENAME, review.run_id),
+    ):
+        if value != run.run_id:
+            raise ArtifactIntegrityError(
+                f"{label} belongs to run {value}, not {run.run_id}",
+                run_id=run.run_id,
+                artifact=label,
+                found_run_id=value,
+            )
+
+    if not draft_artifact.text.strip():
+        raise ArtifactIntegrityError(
+            f"{DRAFT_FILENAME} is empty", run_id=run.run_id, artifact=DRAFT_FILENAME
+        )
+
+    return FinalizeInputs(
+        context=context,
+        context_sha256=context_artifact.sha256,
+        draft_bytes=draft_artifact.payload,
+        draft_sha256=draft_artifact.sha256,
+        writer_result=writer_result,
+        writer_metadata_sha256=writer_artifact.sha256,
+        review=review,
+        review_sha256=review_artifact.sha256,
+    )
+
+
+def _parse[ModelT: BaseModel](
+    run: RunDirectory, artifact: VerifiedArtifact, model: type[ModelT], label: str
+) -> ModelT:
+    """Parse an artifact, turning a schema failure into an integrity failure."""
+    try:
+        return model.model_validate_json(artifact.text)
+    except (PydanticValidationError, UnicodeDecodeError) as exc:
+        raise ArtifactIntegrityError(
+            f"{artifact.name} does not satisfy the {label} schema",
+            run_id=run.run_id,
+            artifact=artifact.name,
+        ) from exc
+
+
+def _record_failure(run: RunDirectory, manifest: RunManifest, exc: FinalizeFailure) -> None:
+    """Append a failure event to the ledger.
+
+    The Run's status is left at ``REVIEWED``. A blocked or failed finalization
+    does not invalidate the review, and a ``REJECT`` in particular is a correct
+    outcome that a human still needs to see.
+    """
+    manifest.error = RunError(code=exc.code, message=exc.message, details=exc.details)
+    manifest.record_event("finalize.failed", exc.code, exc.message)
+    run.save_manifest(manifest)
+
+    log = logger.warning if isinstance(exc, FinalizationBlockedError) else logger.error
+    log("run=%s stage=finalize.failed status=%s message=%s", run.run_id, exc.code, exc.message)
+
+
+__all__ = [
+    "FINALIZER_ARTIFACTS",
+    "FINALIZER_FILENAME",
+    "FINAL_FILENAME",
+    "FinalizeFailure",
+    "FinalizeInputs",
+    "FinalizeRunResult",
+    "finalize_run",
+    "load_verified_inputs",
+]

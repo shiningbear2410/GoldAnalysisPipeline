@@ -1,0 +1,13 @@
+{
+  "symbol": "XAUUSD",
+  "provider": "mt5-demo",
+  "timeframe": "M15",
+  "timezone": "UTC",
+  "requested_at": "2026-08-28T02:20:05Z",
+  "bars": [
+    { "timestamp": "2026-08-28T01:45:00Z", "open": 3313.45, "high": 3314.90, "low": 3312.60, "close": 3312.95, "volume": 1732 },
+    { "timestamp": "2026-08-28T02:00:00Z", "open": 3312.90, "high": 3314.60, "low": 3312.05, "close": 3312.50, "volume": 1654 },
+    { "timestamp": "2026-08-28T02:00:00Z", "open": 3312.90, "high": 3314.75, "low": 3312.00, "close": 3312.65, "volume": 1660 },
+    { "timestamp": "2026-08-28T02:15:00Z", "open": 3312.45, "high": 3315.10, "low": 3311.90, "close": 3314.20, "volume": 1489 }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "symbol": "XAUUSD",
+  "provider": "mt5-demo",
+  "timeframe": "M15",
+  "timezone": "UTC",
+  "requested_at": "2026-08-28T02:20:05Z",
+  "data_from": "2026-08-27T21:30:00Z",
+  "data_to": "2026-08-28T02:15:00Z",
+  "bars": [
+    { "timestamp": "2026-08-27T21:30:00Z", "open": 3306.20, "high": 3307.90, "low": 3305.10, "close": 3305.60, "volume": 1842 },
+    { "timestamp": "2026-08-27T21:45:00Z", "open": 3305.55, "high": 3306.40, "low": 3304.80, "close": 3305.90, "volume": 1615 },
+    { "timestamp": "2026-08-27T22:00:00Z", "open": 3305.95, "high": 3308.10, "low": 3305.70, "close": 3307.80, "volume": 1978 },
+    { "timestamp": "2026-08-27T22:15:00Z", "open": 3307.75, "high": 3309.60, "low": 3307.20, "close": 3309.10, "volume": 2103 },
+    { "timestamp": "2026-08-27T22:30:00Z", "open": 3309.05, "high": 3310.40, "low": 3308.30, "close": 3308.75, "volume": 1744 },
+    { "timestamp": "2026-08-27T22:45:00Z", "open": 3308.80, "high": 3311.20, "low": 3308.55, "close": 3310.90, "volume": 1996 },
+    { "timestamp": "2026-08-27T23:00:00Z", "open": 3310.85, "high": 3313.60, "low": 3310.40, "close": 3313.15, "volume": 2410 },
+    { "timestamp": "2026-08-27T23:15:00Z", "open": 3313.20, "high": 3314.80, "low": 3312.10, "close": 3312.60, "volume": 2187 },
+    { "timestamp": "2026-08-27T23:30:00Z", "open": 3312.55, "high": 3316.30, "low": 3312.35, "close": 3315.85, "volume": 2634 },
+    { "timestamp": "2026-08-27T23:45:00Z", "open": 3315.90, "high": 3318.70, "low": 3315.20, "close": 3318.20, "volume": 2891 },
+    { "timestamp": "2026-08-28T00:00:00Z", "open": 3318.15, "high": 3320.40, "low": 3317.60, "close": 3319.05, "volume": 3120 },
+    { "timestamp": "2026-08-28T00:15:00Z", "open": 3319.10, "high": 3321.85, "low": 3318.40, "close": 3318.90, "volume": 3345 },
+    { "timestamp": "2026-08-28T00:30:00Z", "open": 3318.85, "high": 3319.50, "low": 3315.70, "close": 3316.20, "volume": 2760 },
+    { "timestamp": "2026-08-28T00:45:00Z", "open": 3316.25, "high": 3317.10, "low": 3313.80, "close": 3314.40, "volume": 2405 },
+    { "timestamp": "2026-08-28T01:00:00Z", "open": 3314.35, "high": 3315.60, "low": 3312.90, "close": 3313.25, "volume": 2118 },
+    { "timestamp": "2026-08-28T01:15:00Z", "open": 3313.30, "high": 3314.20, "low": 3311.40, "close": 3311.85, "volume": 1963 },
+    { "timestamp": "2026-08-28T01:30:00Z", "open": 3311.90, "high": 3313.75, "low": 3311.20, "close": 3313.40, "volume": 1877 },
+    { "timestamp": "2026-08-28T01:45:00Z", "open": 3313.45, "high": 3314.90, "low": 3312.60, "close": 3312.95, "volume": 1732 },
+    { "timestamp": "2026-08-28T02:00:00Z", "open": 3312.90, "high": 3314.60, "low": 3312.05, "close": 3312.50, "volume": 1654 },
+    { "timestamp": "2026-08-28T02:15:00Z", "open": 3312.45, "high": 3315.10, "low": 3311.90, "close": 3314.20, "volume": 1489 }
+  ],
+  "latest_bar": {
+    "timestamp": "2026-08-28T02:15:00Z",
+    "open": 3312.45,
+    "high": 3315.10,
+    "low": 3311.90,
+    "close": 3314.20,
+    "volume": 1489
+  }
+}

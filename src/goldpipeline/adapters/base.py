@@ -1,0 +1,56 @@
+"""Source interfaces.
+
+The domain must not know whether analysis text arrived over the Telegram Bot
+API, from a local fixture, or from a paste buffer - only that it arrived and
+parses. Round 1 ships the fixture/file implementation; a real Telegram client
+in a later round implements the same protocol and nothing downstream changes.
+
+Each loader returns both the parsed model *and* the raw payload it parsed. The
+raw payload is what gets persisted into the Run, so an audit reads exactly what
+the provider sent, not a re-serialization of our interpretation of it.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+from goldpipeline.schemas.market import MarketDataInput
+from goldpipeline.schemas.telegram import TelegramAnalysisInput
+
+
+@dataclass(frozen=True)
+class LoadedSource[ModelT]:
+    """A parsed source payload alongside the bytes-level data it came from."""
+
+    model: ModelT
+    raw_payload: dict[str, Any]
+    origin: str
+    """Human-readable description of where this came from, for logs and audit."""
+
+
+class AnalysisSource(Protocol):
+    """Supplies the raw human analysis the pipeline works from."""
+
+    def load(self) -> LoadedSource[TelegramAnalysisInput]:
+        """Fetch and parse one analysis message.
+
+        Raises:
+            InputValidationError: If the payload does not satisfy the schema.
+        """
+        ...
+
+
+class MarketDataSource(Protocol):
+    """Supplies OHLC market data."""
+
+    def load(self) -> LoadedSource[MarketDataInput]:
+        """Fetch and parse one market data payload.
+
+        Raises:
+            InputValidationError: If the payload does not satisfy the schema.
+        """
+        ...
+
+
+__all__ = ["AnalysisSource", "LoadedSource", "MarketDataSource"]

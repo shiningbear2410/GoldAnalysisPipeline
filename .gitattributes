@@ -1,0 +1,10 @@
+# Normalize to LF in the repository, whatever the checkout platform does.
+# Without this, a Windows checkout stores CRLF and every file looks modified
+# on a Linux machine (and in CI), which buries real diffs in noise.
+* text=auto eol=lf
+
+# Binary-ish assets are never converted.
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary

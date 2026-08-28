@@ -1,0 +1,96 @@
+"""Pydantic contracts for every artifact the pipeline reads or writes."""
+
+from goldpipeline.schemas.common import Timeframe, UtcDatetime
+from goldpipeline.schemas.context import (
+    AnalysisContext,
+    ContextMarket,
+    ContextOHLC,
+    ContextPrice,
+    ContextRawAnalysis,
+    ContextTiming,
+)
+from goldpipeline.schemas.finalizer import (
+    FinalizationMode,
+    FinalizerModelOutput,
+    FinalizerPrompt,
+    FinalizerResult,
+    IssueResolution,
+    ResolutionStatus,
+)
+from goldpipeline.schemas.manifest import ArtifactRef, RunEvent, RunManifest, RunStatus
+from goldpipeline.schemas.market import MarketDataInput, MarketDataSnapshot, OHLCBar
+from goldpipeline.schemas.quality import DataQuality, QualityStatus, QualityWarning
+from goldpipeline.schemas.review import (
+    Evidence,
+    FindingCode,
+    IssueCategory,
+    PrecheckFinding,
+    ReviewerPrompt,
+    ReviewIssue,
+    ReviewModelOutput,
+    ReviewResult,
+    ReviewStatus,
+    ReviewUsage,
+    Severity,
+    VerdictSource,
+)
+from goldpipeline.schemas.telegram import Author, TelegramAnalysisInput
+from goldpipeline.schemas.writer import (
+    ClaimType,
+    SourceClaim,
+    WriterModelOutput,
+    WriterResult,
+    WriterStatus,
+    WriterUsage,
+    WriterWarning,
+)
+from goldpipeline.schemas.writer import WarningCode as WriterWarningCode
+
+__all__ = [
+    "AnalysisContext",
+    "ArtifactRef",
+    "Author",
+    "ClaimType",
+    "ContextMarket",
+    "ContextOHLC",
+    "ContextPrice",
+    "ContextRawAnalysis",
+    "ContextTiming",
+    "DataQuality",
+    "Evidence",
+    "FinalizationMode",
+    "FinalizerModelOutput",
+    "FinalizerPrompt",
+    "FinalizerResult",
+    "FindingCode",
+    "IssueCategory",
+    "IssueResolution",
+    "MarketDataInput",
+    "MarketDataSnapshot",
+    "OHLCBar",
+    "PrecheckFinding",
+    "QualityStatus",
+    "QualityWarning",
+    "ReviewIssue",
+    "ReviewModelOutput",
+    "ReviewResult",
+    "ReviewStatus",
+    "ResolutionStatus",
+    "ReviewUsage",
+    "ReviewerPrompt",
+    "RunEvent",
+    "RunManifest",
+    "RunStatus",
+    "Severity",
+    "SourceClaim",
+    "TelegramAnalysisInput",
+    "Timeframe",
+    "UtcDatetime",
+    "VerdictSource",
+    "WriterModelOutput",
+    "WriterResult",
+    "WriterStatus",
+    "WriterUsage",
+    "WriterWarning",
+    "WriterWarningCode",
+]
