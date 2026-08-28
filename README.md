@@ -2,13 +2,14 @@
 
 Multi-agent pipeline for producing XAUUSD ("Nhận định Vàng") articles.
 
-**This repository is at Round 4: the Claude Finalizer.** Round 1 turns a raw
+**This repository is at Round 5: the final publish gate.** Round 1 turns a raw
 human analysis plus OHLC data into an immutable **Run** with a machine-readable
 `context.json`; Round 2 writes a Vietnamese XAUUSD commentary from it; Round 3
-audits that commentary and records a verdict; Round 4 applies the audit and
-produces the final article.
+audits that commentary and records a verdict; Round 4 applies the audit; Round 5
+decides deterministically whether the result may be published at all.
 
-Nothing is published yet. See [Scope](#scope) for the full boundary.
+Nothing is published yet — that is Round 6. See [Scope](#scope) for the full
+boundary.
 
 ## What this is
 
@@ -20,8 +21,8 @@ Telegram Gold Bot / raw analysis  +  OHLC market data
         -> Claude Writer                    <- Round 2
         -> ChatGPT Reviewer                 <- Round 3
         -> Claude Finalizer                 <- Round 4
-        -> Deterministic Validator          <- Round 5+
-        -> Telegram Publisher
+        -> Deterministic Validator          <- Round 5
+        -> Telegram Publisher               <- Round 6
 ```
 
 What exists today:
@@ -36,6 +37,8 @@ raw analysis JSON  +  OHLC JSON
         -> verdict routing -> Claude (only if revision needed)
                            -> claude_final.md
                            -> claude_finalizer.json                  (Round 4)
+        -> verify chain -> deterministic checks
+                        -> publish_decision.json  APPROVED|BLOCKED   (Round 5)
 ```
 
 `context.json` is the contract throughout. The writer receives it and nothing
@@ -110,6 +113,7 @@ Without installing, set `PYTHONPATH=src` instead of `pip install -e .`.
 | `write-draft --run-id <id>` | Run the Claude Writer over a normalized Run |
 | `review-draft --run-id <id>` | Run the ChatGPT Reviewer over a drafted Run |
 | `finalize --run-id <id>` | Apply the review and store the final article |
+| `gate-publish --run-id <id>` | Decide deterministically whether it may be published |
 | `show-run <run_id>` | Print a Run's status, files and digests |
 | `list-runs` | List Run ids under the runs directory |
 
@@ -442,6 +446,105 @@ fields quote the article back verbatim. All three are fenced with a per-request
 nonce under distinct labels, and the system turn is the on-disk template byte for
 byte.
 
+## The publish gate
+
+```bash
+python -m goldpipeline gate-publish --run-id 20260828_022701_a83f2c
+```
+
+```
+Run: 20260828_022701_a83f2c
+Gate: gold_publish_gate_v1
+Decision: APPROVED
+Checks: 16 passed, 0 warnings, 0 failed
+Artifact: runs/20260828_022701_a83f2c/publish_decision.json
+```
+
+**No AI, no network, no credentials.** Every decision here is made by code. The
+command runs with `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` unset, and a test
+asserts it opens no socket.
+
+Exit codes: `0` approved, `3` blocked, `1` configuration problem, `2` the Run is
+not gateable or its decision already exists. A block is **not** a crash — it is
+the gate working.
+
+### The contract for Round 6
+
+> **The publisher MUST NOT publish unless `publish_decision.decision == APPROVED`
+> and the digests recorded in that decision still match the artifacts on disk.**
+
+The decision names the exact bytes it approved. If `claude_final.md` changed
+after the gate ran, the approval no longer describes it.
+
+### What it decides
+
+One question — *is it safe to publish this automatically?* — and two answers,
+`APPROVED` or `BLOCKED`. The gate never edits, sanitises or retries. An article
+it will not approve needs a human or a new Run; quietly cleaning one up would
+make the boundary decorative.
+
+**Fail closed.** Anything uncertain about credentials, model-control prose, a
+foreign instrument, an unsupported indicator or a suspicious price blocks. A
+false block costs someone a look; a false approval publishes it.
+
+### The checks
+
+| Check | Blocks on |
+| --- | --- |
+| `ARTIFACT_CHAIN_INTEGRITY` | Any of the 8 artifacts failing its manifest digest, or a cross-reference disagreeing |
+| `RUN_STATE` | The Run is not `FINALIZED` |
+| `REVIEW_VERDICT_STATE` | A `REJECT` review that somehow finalized, or a finalization that disagrees with the review |
+| `REVIEW_ISSUE_CLOSURE` | An unanswered issue, or a HIGH/CRITICAL one not `APPLIED` |
+| `CORRECTION_CLOSURE` | A value the review called wrong still in the text |
+| `ARTICLE_STRUCTURE` | Empty, too short, too long, a JSON dump, a traceback, a code fence |
+| `TELEGRAM_COMPATIBILITY` | Bad UTF-8 or control characters (over-length is a warning) |
+| `INSTRUCTION_SHAPED_TEXT` | Model-control prose, English or Vietnamese |
+| `CREDENTIAL_EXPOSURE` | A credential-shaped value |
+| `FOREIGN_SYMBOL` | An instrument other than the Run's |
+| `UNSUPPORTED_INDICATOR` | RSI, EMA200, MACD… — the context carries none |
+| `SUSPICIOUS_PRICE` | A price-like number the data does not account for |
+| `RISK_LANGUAGE` | "chắc chắn", "không thể", guarantees |
+| `EXTERNAL_FACT_WITHOUT_SOURCE` | A claim that a named economic event occurred |
+| `CONTEXT_CONSISTENCY` | A timeframe other than the Run's |
+| `NO_NEW_REGRESSION` | A severe problem the draft did not have |
+
+The symbol, indicator, price and risk-language scanners are Round 3's, reused
+rather than restated — one definition of "foreign symbol" for the whole
+pipeline. **The gate rates one of them more severely than the review does:** an
+unexplained price-like number is MEDIUM mid-pipeline, where a later stage may
+still fix it, and HIGH here, where there is no later stage.
+
+### Instruction-shaped text
+
+Round 4 leaves a gap by design: a finalizer making the *minimum necessary* edit
+leaves "Ignore all previous instructions" in the prose, because no review issue
+named it. This gate is where that is caught — in both languages, and matched on
+diacritic-folded text so `bỏ qua`, `bo qua` and `BỎ QUA` all hit.
+
+### Credential redaction
+
+A detected token is **never** copied into `publish_decision.json`. The finding
+records its shape and a redaction that keeps the vendor prefix and the last four
+characters — enough to know which key to rotate, not enough to use it:
+
+```
+sk-pro…wxyz (<redacted:38 chars>)
+```
+
+### Integrity failures
+
+A tampered-but-readable Run gets a `BLOCKED` **decision** with a generic
+`ARTIFACT_INTEGRITY_FAILURE` blocker; the tampered content is never quoted back
+as evidence, and no later check runs on it. A Run whose *manifest* cannot be
+parsed raises instead — there is no trustworthy identity to attach a decision to,
+so writing one would be inventing provenance.
+
+### Decisions are immutable
+
+Re-running the gate on a Run that already has a decision is refused. There is no
+`--force`: re-evaluating under a newer gate would let an approval appear where a
+block used to be, with nothing recording that it changed.
+
 ## Run directory structure
 
 ```
@@ -482,6 +585,7 @@ All schemas are Pydantic models under `src/goldpipeline/schemas/`.
 | `PrecheckFinding` | One deterministic observation, made before any model was consulted. |
 | `FinalizerModelOutput` | What the finalizer may author: a revised article and one resolution per issue. No verdict, no score. |
 | `FinalizerResult` | The `claude_finalizer.json` artifact, with the digests of all four inputs. |
+| `PublishDecision` | The `publish_decision.json` artifact: verdict, checks, blockers, and the digests of all six inputs. |
 
 ### Two things worth knowing about the data types
 
@@ -592,9 +696,9 @@ src/goldpipeline/
     schemas/      Pydantic contracts for every artifact
     prompts/      versioned prompt templates + loader
     services/     normalizer, context builder, market facts, source guard,
-                  fencing, integrity, claim resolver, prechecks, review and
-                  finalizer policy, prompt builders, and the run / writer /
-                  reviewer / finalizer orchestration
+                  fencing, integrity, claim resolver, prechecks, content safety,
+                  review and finalizer policy, prompt builders, and the run /
+                  writer / reviewer / finalizer / publish-gate orchestration
     adapters/     source, writer, reviewer and finalizer protocols;
                   JSON file / Anthropic / OpenAI / fake implementations
     storage/      atomic writes, Run directory lifecycle
@@ -633,12 +737,20 @@ block), byte-exact passthrough, finalizer client protocol with Anthropic and
 offline implementations, resolution contract with mandatory fixes, deterministic
 postchecks and regression comparison, `finalize`.
 
-**Deliberately not built:** the deterministic publish gate, Telegram publishing,
-auto-publish, a second review loop after finalization, schedulers, dashboards,
-databases, queues, a technical-analysis engine (RSI, MACD, ICT, bias, trade
-signals), web or news retrieval, sentiment analysis, and backtesting.
+**Round 5 — final publish gate.** Whole-chain integrity verification, content
+safety scanners (instruction-shaped text, credential shapes with redaction,
+external factual claims, structure and transport sanity), reuse of the shared
+market scanners with a stricter boundary policy, the immutable
+`publish_decision.json`, and `gate-publish`. No model, no network, no
+credentials.
+
+**Deliberately not built:** Telegram publishing, auto-publish, a second review
+loop, schedulers, dashboards, databases, queues, a technical-analysis engine
+(RSI, MACD, ICT, bias, trade signals), web or news retrieval, sentiment
+analysis, and backtesting.
 
 `AnalysisContext` describes facts and carries the raw analysis; it holds no
 interpretation. The writer produces prose and an audit trail of the numbers it
 used. The reviewer judges that prose and says what to fix. The finalizer fixes
-it — but deciding whether the result may be published is Round 5.
+it. The gate decides whether the result may be published — and actually
+publishing it is Round 6.

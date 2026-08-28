@@ -355,6 +355,50 @@ class RunNotFinalizableError(FinalizeError):
     code = "RUN_NOT_FINALIZABLE"
 
 
+# --- publish gate (Round 5) ----------------------------------------------
+
+
+class PublishGateError(PipelineError):
+    """Base class for failures of the deterministic publish gate.
+
+    Note what is *not* here: a blocked article. A ``BLOCKED`` decision is the
+    gate working, not the gate failing, so it is an artifact rather than an
+    exception. These errors are for the cases where no trustworthy decision can
+    be reached at all.
+    """
+
+    code = "PUBLISH_GATE_ERROR"
+
+
+class PublishDecisionExistsError(PublishGateError):
+    """The Run already has a publish decision.
+
+    Decisions are immutable. Re-evaluating a Run under a newer gate would mean
+    an approval could appear where a block used to be, with nothing in the
+    artifact chain recording that it changed.
+    """
+
+    code = "PUBLISH_DECISION_EXISTS"
+
+
+class RunNotGateableError(PublishGateError):
+    """The Run is not in a state the gate accepts."""
+
+    code = "RUN_NOT_GATEABLE"
+
+
+class UntrustworthyRunError(PublishGateError):
+    """The Run is too damaged to decide about.
+
+    Distinct from an integrity *finding*: a tampered artifact still yields a
+    ``BLOCKED`` decision, because the Run is identifiable and the block is
+    meaningful. This is for a manifest that cannot be parsed at all - there is
+    no trustworthy identity to attach a decision to.
+    """
+
+    code = "UNTRUSTWORTHY_RUN"
+
+
 __all__ = [
     "AnalysisTextTooLargeError",
     "ArtifactAlreadyExistsError",
@@ -377,6 +421,8 @@ __all__ = [
     "NaiveTimestampError",
     "NormalizationError",
     "PipelineError",
+    "PublishDecisionExistsError",
+    "PublishGateError",
     "ReviewArtifactExistsError",
     "ReviewConfigurationError",
     "ReviewError",
@@ -385,11 +431,13 @@ __all__ = [
     "ReviewTimeoutError",
     "RunAlreadyExistsError",
     "RunNotFinalizableError",
+    "RunNotGateableError",
     "RunNotReadyError",
     "RunNotReviewableError",
     "StorageError",
     "SymbolMismatchError",
     "UnknownTimezoneError",
+    "UntrustworthyRunError",
     "WriterArtifactExistsError",
     "WriterConfigurationError",
     "WriterError",

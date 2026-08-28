@@ -31,6 +31,8 @@ class RunStatus(StrEnum):
     * ``DRAFTED``    - Round 2 done, writer artifacts written
     * ``REVIEWED``   - Round 3 done, ``gpt_review.json`` written
     * ``FINALIZED``  - Round 4 done, finalizer artifacts written
+    * ``READY_TO_PUBLISH`` - Round 5 approved it for publication
+    * ``PUBLISH_BLOCKED``  - Round 5 refused it
     * ``FAILED``     - a stage failed; see ``error`` for which and why
 
     A failed writer or reviewer stage leaves the Run at its previous status, not
@@ -41,6 +43,11 @@ class RunStatus(StrEnum):
     lives in ``gpt_review.json``; a Run may legitimately be ``REVIEWED`` with a
     status of ``REJECT`` - and such a Run never reaches ``FINALIZED``, because
     the finalizer refuses to auto-correct it.
+
+    ``PUBLISH_BLOCKED`` is likewise a completed outcome, not a failure: the gate
+    ran and said no. Neither it nor ``READY_TO_PUBLISH`` means anything was sent
+    anywhere - publication is Round 6, and nothing here is ever called
+    ``PUBLISHED``.
     """
 
     CREATED = "CREATED"
@@ -48,6 +55,8 @@ class RunStatus(StrEnum):
     DRAFTED = "DRAFTED"
     REVIEWED = "REVIEWED"
     FINALIZED = "FINALIZED"
+    READY_TO_PUBLISH = "READY_TO_PUBLISH"
+    PUBLISH_BLOCKED = "PUBLISH_BLOCKED"
     FAILED = "FAILED"
 
 

@@ -38,6 +38,7 @@ from goldpipeline.logging_setup import configure_logging
 from goldpipeline.schemas.quality import DataQuality
 from goldpipeline.services.finalizer import finalize_run
 from goldpipeline.services.pipeline import create_run, validate_sources
+from goldpipeline.services.publish_gate import gate_publish
 from goldpipeline.services.reviewer import review_draft
 from goldpipeline.services.writer import write_draft
 from goldpipeline.storage.run_store import RunStore
@@ -46,10 +47,12 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_INVALID_DATA = 2
 EXIT_BLOCKED = 3
-"""A stage declined to run because an earlier verdict forbade it.
+"""A gate declined. Nothing went wrong; retrying will not help.
 
-Distinct from a failure: nothing went wrong, and retrying will not help.
-A caller automating the pipeline needs to tell the two apart.
+Used by both `finalize` (the review rejected the article) and `gate-publish`
+(the article is not safe to publish). One code for one concept: a caller can
+always tell *which* gate spoke from the command it ran, so a second number for
+the same meaning would only invite mistakes.
 """
 
 DEFAULT_RUNS_DIR = Path("runs")
@@ -187,6 +190,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use the offline deterministic finalizer. No API call, no cost.",
     )
     final.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+
+    gate = subparsers.add_parser(
+        "gate-publish",
+        help="Decide deterministically whether a finalized Run may be published.",
+    )
+    gate.add_argument("--run-id", required=True, help="Run to gate.")
+    gate.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=DEFAULT_RUNS_DIR,
+        help=f"Root directory for Runs. Default: {DEFAULT_RUNS_DIR}.",
+    )
+    gate.add_argument("--json", action="store_true", help="Emit the result as JSON.")
 
     show = subparsers.add_parser("show-run", help="Print a summary of an existing Run.")
     show.add_argument("run_id", help="Run identifier, e.g. 20260828_022701_a83f2c.")
@@ -636,6 +652,54 @@ class _LazyFinalizerClient:
         return self._client().finalize(request)
 
 
+def _cmd_gate_publish(args: argparse.Namespace) -> int:
+    """Run the final publish gate. No provider, no credentials, no network."""
+    result = gate_publish(run_id=args.run_id, store=RunStore(args.runs_dir))
+    decision = result.decision
+    passed, warned, failed = decision.counts
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "run_id": result.run_id,
+                    "status": result.status,
+                    "gate_version": decision.gate_version,
+                    "decision": decision.decision,
+                    "checks": {"passed": passed, "warnings": warned, "failed": failed},
+                    "blockers": [
+                        {"code": b.code, "severity": b.severity, "message": b.message}
+                        for b in decision.blockers
+                    ],
+                    "warnings_detail": [
+                        {"code": w.code, "severity": w.severity, "message": w.message}
+                        for w in decision.warnings
+                    ],
+                    "artifact": str(result.decision_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return EXIT_OK if result.approved else EXIT_BLOCKED
+
+    stream = sys.stdout if result.approved else sys.stderr
+    print(f"Run: {result.run_id}", file=stream)
+    print(f"Gate: {decision.gate_version}", file=stream)
+    print(f"Decision: {decision.decision}", file=stream)
+    print(f"Checks: {passed} passed, {warned} warnings, {failed} failed", file=stream)
+
+    if decision.blockers:
+        print(f"Blockers: {len(decision.blockers)}", file=stream)
+        for blocker in decision.blockers:
+            print(f"  - [{blocker.severity}] {blocker.code}: {blocker.message}", file=stream)
+    for warning in decision.warnings:
+        print(f"  ! {warning.code}: {warning.message}", file=stream)
+
+    print(f"Artifact: {result.decision_path}", file=stream)
+    return EXIT_OK if result.approved else EXIT_BLOCKED
+
+
 def _cmd_show_run(args: argparse.Namespace) -> int:
     store = RunStore(args.runs_dir)
     try:
@@ -695,6 +759,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "write-draft": _cmd_write_draft,
         "review-draft": _cmd_review_draft,
         "finalize": _cmd_finalize,
+        "gate-publish": _cmd_gate_publish,
         "show-run": _cmd_show_run,
         "list-runs": _cmd_list_runs,
     }

@@ -19,6 +19,15 @@ from goldpipeline.schemas.finalizer import (
 )
 from goldpipeline.schemas.manifest import ArtifactRef, RunEvent, RunManifest, RunStatus
 from goldpipeline.schemas.market import MarketDataInput, MarketDataSnapshot, OHLCBar
+from goldpipeline.schemas.publish import (
+    BlockerCode,
+    CheckId,
+    CheckStatus,
+    Decision,
+    GateCheck,
+    GateFinding,
+    PublishDecision,
+)
 from goldpipeline.schemas.quality import DataQuality, QualityStatus, QualityWarning
 from goldpipeline.schemas.review import (
     Evidence,
@@ -57,18 +66,25 @@ __all__ = [
     "ContextRawAnalysis",
     "ContextTiming",
     "DataQuality",
+    "BlockerCode",
+    "CheckId",
+    "CheckStatus",
+    "Decision",
     "Evidence",
     "FinalizationMode",
     "FinalizerModelOutput",
     "FinalizerPrompt",
     "FinalizerResult",
     "FindingCode",
+    "GateCheck",
+    "GateFinding",
     "IssueCategory",
     "IssueResolution",
     "MarketDataInput",
     "MarketDataSnapshot",
     "OHLCBar",
     "PrecheckFinding",
+    "PublishDecision",
     "QualityStatus",
     "QualityWarning",
     "ReviewIssue",

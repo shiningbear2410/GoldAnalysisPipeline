@@ -431,3 +431,107 @@ def load_finalization(run_dir: Path) -> Any:
     return FinalizerResult.model_validate_json(
         (Path(run_dir) / "claude_finalizer.json").read_text(encoding="utf-8")
     )
+
+
+# --------------------------------------------------------------------------
+# Round 5 helpers
+# --------------------------------------------------------------------------
+
+GATE_NOW = datetime(2026, 8, 28, 6, 0, tzinfo=UTC)
+"""Deterministic 'now' for publish decisions."""
+
+
+def make_finalized_run(
+    runs_dir: Path,
+    tmp_path: Path,
+    *,
+    article: str = CLEAN_ARTICLE,
+    claims: list[Any] | None = None,
+    analysis: dict[str, Any] | None = None,
+    market: dict[str, Any] | None = None,
+    review_client: Any = None,
+    finalizer_client: Any = None,
+) -> Any:
+    """Create a real FINALIZED Run, ready for the publish gate.
+
+    Driven through all four real stages rather than assembled by hand: the gate
+    verifies eight artifacts against each other and against the manifest, so
+    only a Run the pipeline itself produced is a fair test of it.
+    """
+    from goldpipeline.adapters.fake_finalizer import FakeFinalizerClient
+    from goldpipeline.services.finalizer import finalize_run
+    from goldpipeline.storage.run_store import RunStore
+
+    reviewed = make_reviewed_run(
+        runs_dir,
+        tmp_path,
+        article=article,
+        claims=claims,
+        analysis=analysis,
+        market=market,
+        review_client=review_client,
+    )
+    finalized = finalize_run(
+        run_id=reviewed.run_id,
+        store=RunStore(runs_dir),
+        client=finalizer_client or FakeFinalizerClient(),
+        now=FINALIZE_NOW,
+    )
+    assert finalized.succeeded, f"fixture run failed to finalize: {finalized.error}"
+    return finalized
+
+
+@pytest.fixture
+def finalized_run(runs_dir: Path, tmp_path: Path) -> Any:
+    """A finalized Run whose article is clean and whose review passed."""
+    return make_finalized_run(runs_dir, tmp_path)
+
+
+def republish_article(runs_dir: Path, run_id: str, article: str) -> None:
+    """Replace a Run's final article and re-stamp every digest that names it.
+
+    The gate's first check is the artifact chain, so a test about *content*
+    must leave that chain consistent - otherwise every such test would trip the
+    integrity check instead of the scanner it is aiming at. This rewrites the
+    final article and updates the manifest and the finalizer metadata to match,
+    which is exactly what an honest pipeline producing that article would have
+    written.
+    """
+    import json
+
+    from goldpipeline.storage.atomic import encode_text, sha256_bytes
+    from goldpipeline.storage.run_store import RunStore
+
+    store = RunStore(runs_dir)
+    run = store.open(run_id)
+    run_dir = Path(run.path)
+
+    payload = encode_text(article)
+    (run_dir / "claude_final.md").write_bytes(payload)
+    digest = sha256_bytes(payload)
+
+    metadata = json.loads((run_dir / "claude_finalizer.json").read_text(encoding="utf-8"))
+    metadata["final_article_sha256"] = digest
+    # `article_chars` is constrained to >= 1, so an empty-article test would
+    # otherwise fail schema validation and trip the integrity check instead of
+    # reaching the structure check it is aiming at.
+    metadata["article_chars"] = max(1, len(article.strip()))
+    encoded = (json.dumps(metadata, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    (run_dir / "claude_finalizer.json").write_bytes(encoded)
+
+    manifest = run.load_manifest()
+    for ref in manifest.artifact_files:
+        if ref.name == "claude_final.md":
+            ref.sha256, ref.size_bytes = digest, len(payload)
+        elif ref.name == "claude_finalizer.json":
+            ref.sha256, ref.size_bytes = sha256_bytes(encoded), len(encoded)
+    run.save_manifest(manifest)
+
+
+def load_decision(run_dir: Path) -> Any:
+    """Read a Run's publish decision back through its schema."""
+    from goldpipeline.schemas.publish import PublishDecision
+
+    return PublishDecision.model_validate_json(
+        (Path(run_dir) / "publish_decision.json").read_text(encoding="utf-8")
+    )
