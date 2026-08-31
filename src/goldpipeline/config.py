@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from goldpipeline.domain.errors import (
+    AutomationConfigurationError,
     FinalizeConfigurationError,
     MarketDataConfigurationError,
     PublisherConfigurationError,
@@ -461,6 +462,145 @@ class MarketDataSettings:
         )
 
 
+AUTOMATION_ENABLED_ENV = "GOLDPIPELINE_AUTOMATION_ENABLED"
+AUTOMATION_DIR_ENV = "GOLDPIPELINE_AUTOMATION_DIR"
+MAX_EVENTS_PER_TICK_ENV = "GOLDPIPELINE_AUTOMATION_MAX_EVENTS_PER_TICK"
+MAX_TICK_MINUTES_ENV = "GOLDPIPELINE_AUTOMATION_MAX_TICK_MINUTES"
+MAX_EVENT_AGE_ENV = "GOLDPIPELINE_MAX_ANALYSIS_EVENT_AGE_MINUTES"
+DEFER_RETRY_ENV = "GOLDPIPELINE_DEFER_RETRY_MINUTES"
+AUTOPUBLISH_ENABLED_ENV = "GOLDPIPELINE_AUTOPUBLISH_ENABLED"
+AUTOPUBLISH_TARGET_ENV = "GOLDPIPELINE_AUTOPUBLISH_ALLOWED_TARGET"
+AUTOPUBLISH_MAX_AGE_ENV = "GOLDPIPELINE_AUTOPUBLISH_MAX_RUN_AGE_MINUTES"
+
+DEFAULT_MAX_EVENTS_PER_TICK = 3
+MIN_EVENTS_PER_TICK = 1
+MAX_EVENTS_PER_TICK = 20
+"""A tick does a bounded amount of work and exits.
+
+Draining an inbox of fifty events in one invocation would hold the worker lock
+for an hour and spend an unbounded amount on providers before anyone could look
+at the first result.
+"""
+
+DEFAULT_MAX_TICK_MINUTES = 10
+DEFAULT_MAX_EVENT_AGE_MINUTES = 60
+"""How old an analysis may be before it is too late to write about it.
+
+Deliberately separate from - and shorter than - the market data limit. They
+answer different questions: ``MAX_DATA_AGE`` asks whether the *candles* are
+current, and this asks whether the *analyst's note* still describes the market
+anyone is looking at. One hour is conservative for intraday M15 commentary; the
+failure it exists to prevent is a Saturday note waiting in the queue and being
+paired with Monday's opening bars.
+"""
+
+DEFAULT_DEFER_RETRY_MINUTES = 5
+"""How long a deferred event waits before the worker looks at it again.
+
+The scheduler fires every minute. Retrying a market that was closed sixty
+seconds ago just burns terminal round-trips to learn the same thing.
+"""
+
+DEFAULT_AUTOPUBLISH_MAX_RUN_AGE_MINUTES = 30
+"""How old an approved Run may be and still be published unattended.
+
+This is the guard against the worst automation accident available here: someone
+enables auto-publish and a backlog of last week's approved articles goes out at
+once. An article older than this is left for a human, who can still publish it
+deliberately with the `publish` command.
+"""
+
+
+def _flag(source: dict[str, str] | os._Environ[str], name: str, default: bool = False) -> bool:
+    """Read a boolean setting.
+
+    Only an explicit affirmative turns something on. Anything unrecognised -
+    including ``"yes please"``, an empty string, or a typo - reads as off,
+    because every flag here defaults to the safer answer.
+    """
+    raw = _raw(source, name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True)
+class AutomationSettings:
+    """What the scheduled worker is allowed to do, and how much of it.
+
+    Holds no credential. Every field here answers a question about *scope* -
+    how much work, for how long, how old is too old, and whether publishing is
+    authorised - and none of them can be influenced by a payload: they come from
+    the process environment, which a producer cannot write to.
+    """
+
+    enabled: bool = False
+    """Whether the *scheduled* entry point does anything.
+
+    Defaults off so that registering the task is not the same act as switching
+    the system on. `automation-run-once` ignores this; it is a person typing a
+    command, which is its own authorisation.
+    """
+
+    automation_dir: Path = Path("automation")
+    max_events_per_tick: int = DEFAULT_MAX_EVENTS_PER_TICK
+    max_tick_minutes: int = DEFAULT_MAX_TICK_MINUTES
+    max_event_age_minutes: int = DEFAULT_MAX_EVENT_AGE_MINUTES
+    defer_retry_minutes: int = DEFAULT_DEFER_RETRY_MINUTES
+
+    auto_publish_enabled: bool = False
+    auto_publish_allowed_target: str | None = None
+    auto_publish_max_run_age_minutes: int = DEFAULT_AUTOPUBLISH_MAX_RUN_AGE_MINUTES
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> AutomationSettings:
+        """Build settings from the environment.
+
+        Raises:
+            AutomationConfigurationError: If a value is present but unusable.
+        """
+        source = os.environ if env is None else env
+        error = AutomationConfigurationError
+
+        events = _positive_int(source, MAX_EVENTS_PER_TICK_ENV, DEFAULT_MAX_EVENTS_PER_TICK, error)
+        if not MIN_EVENTS_PER_TICK <= events <= MAX_EVENTS_PER_TICK:
+            raise error(
+                f"{MAX_EVENTS_PER_TICK_ENV} must be between {MIN_EVENTS_PER_TICK} and "
+                f"{MAX_EVENTS_PER_TICK}",
+                setting=MAX_EVENTS_PER_TICK_ENV,
+            )
+
+        target = _raw(source, AUTOPUBLISH_TARGET_ENV)
+        if target is not None:
+            # Validated the same way the publisher validates its destination, so
+            # an allowlist entry that could never match anything fails loudly
+            # here rather than silently blocking every tick.
+            target = validate_target_chat(target)
+
+        return cls(
+            enabled=_flag(source, AUTOMATION_ENABLED_ENV),
+            automation_dir=Path(_raw(source, AUTOMATION_DIR_ENV) or "automation"),
+            max_events_per_tick=events,
+            max_tick_minutes=_positive_int(
+                source, MAX_TICK_MINUTES_ENV, DEFAULT_MAX_TICK_MINUTES, error
+            ),
+            max_event_age_minutes=_positive_int(
+                source, MAX_EVENT_AGE_ENV, DEFAULT_MAX_EVENT_AGE_MINUTES, error
+            ),
+            defer_retry_minutes=_positive_int(
+                source, DEFER_RETRY_ENV, DEFAULT_DEFER_RETRY_MINUTES, error
+            ),
+            auto_publish_enabled=_flag(source, AUTOPUBLISH_ENABLED_ENV),
+            auto_publish_allowed_target=target,
+            auto_publish_max_run_age_minutes=_positive_int(
+                source,
+                AUTOPUBLISH_MAX_AGE_ENV,
+                DEFAULT_AUTOPUBLISH_MAX_RUN_AGE_MINUTES,
+                error,
+            ),
+        )
+
+
 def inbox_dir_from_env(env: dict[str, str] | None = None) -> Path:
     """Where the analysis inbox lives. Configuration only, never a payload."""
     source = os.environ if env is None else env
@@ -499,6 +639,7 @@ ConfigError = (
     | type[FinalizeConfigurationError]
     | type[PublisherConfigurationError]
     | type[MarketDataConfigurationError]
+    | type[AutomationConfigurationError]
 )
 """Which configuration error a helper should raise.
 
@@ -558,11 +699,22 @@ def _non_negative_int(
 
 __all__ = [
     "API_KEY_ENV",
+    "AUTOMATION_DIR_ENV",
+    "AUTOMATION_ENABLED_ENV",
+    "AUTOPUBLISH_ENABLED_ENV",
+    "AUTOPUBLISH_MAX_AGE_ENV",
+    "AUTOPUBLISH_TARGET_ENV",
+    "AutomationSettings",
     "BARS_ENV",
     "CANONICAL_SYMBOL_ENV",
+    "DEFAULT_AUTOPUBLISH_MAX_RUN_AGE_MINUTES",
     "DEFAULT_BAR_COUNT",
+    "DEFAULT_DEFER_RETRY_MINUTES",
     "DEFAULT_MAX_DATA_AGE_MINUTES",
+    "DEFAULT_MAX_EVENTS_PER_TICK",
+    "DEFAULT_MAX_EVENT_AGE_MINUTES",
     "DEFAULT_MAX_RETRIES",
+    "DEFAULT_MAX_TICK_MINUTES",
     "DEFAULT_MAX_TOKENS",
     "DEFAULT_MODEL",
     "DEFAULT_MT5_SYMBOL",
@@ -570,12 +722,18 @@ __all__ = [
     "DEFAULT_REVIEW_MODEL",
     "DEFAULT_TIMEFRAME",
     "DEFAULT_TIMEOUT_SECONDS",
+    "DEFER_RETRY_ENV",
     "FINALIZER_MODEL_ENV",
     "FinalizerSettings",
     "INBOX_DIR_ENV",
     "MAX_BAR_COUNT",
     "MAX_DATA_AGE_ENV",
+    "MAX_EVENTS_PER_TICK",
+    "MAX_EVENTS_PER_TICK_ENV",
+    "MAX_EVENT_AGE_ENV",
+    "MAX_TICK_MINUTES_ENV",
     "MIN_BAR_COUNT",
+    "MIN_EVENTS_PER_TICK",
     "MODEL_ENV",
     "MT5_SYMBOL_ENV",
     "MarketDataSettings",

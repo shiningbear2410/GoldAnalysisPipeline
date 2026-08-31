@@ -2,19 +2,19 @@
 
 Multi-agent pipeline for producing XAUUSD ("Nhận định Vàng") articles.
 
-**This repository is at Round 8: live input.** Round 1 turns a raw human
+**This repository is at Round 9: automation.** Round 1 turns a raw human
 analysis plus OHLC data into an immutable **Run** with a machine-readable
 `context.json`; Round 2 writes a Vietnamese XAUUSD commentary from it; Round 3
 audits that commentary and records a verdict; Round 4 applies the audit; Round 5
 decides deterministically whether the result may be published; Round 6 sends it;
 Round 7 runs the whole sequence from one command; Round 8 feeds that sequence
-production data - analyses handed over by the existing Gold Analysis Bot, and
-closed XAUUSD candles read from a MetaTrader 5 terminal.
+production data; Round 9 lets a scheduler call it every minute.
 
 Every stage is still a separate command and still works on its own. The
-orchestrator coordinates those stages; **it does not bypass any gate.** Nothing
-runs on a timer — schedulers are Round 9. See [Scope](#scope) for the full
-boundary.
+orchestrator coordinates those stages; **it does not bypass any gate.** The
+worker runs one finite tick and exits — there is no daemon, and it publishes
+nothing unless unattended publishing is separately enabled and allowlisted,
+which it is not. See [Scope](#scope) for the full boundary.
 
 ## What this is
 
@@ -30,6 +30,7 @@ Telegram Gold Bot / raw analysis  +  OHLC market data
         -> Telegram Publisher               <- Round 6
         (all of the above, from one command) <- Round 7
         (fed by a durable inbox + MT5)       <- Round 8
+        (called every minute by a scheduler) <- Round 9
 ```
 
 What exists today:
@@ -53,6 +54,8 @@ raw analysis JSON  +  OHLC JSON
            stage declines                                            (Round 7)
         -> the analysis arrives from a durable inbox and the candles
            from a live MT5 terminal                                  (Round 8)
+        -> a Windows scheduled task calls one finite worker tick,
+           which reconciles, resumes and ingests, then exits         (Round 9)
 ```
 
 `context.json` is the contract throughout. The writer receives it and nothing
@@ -136,6 +139,11 @@ Without installing, set `PYTHONPATH=src` instead of `pip install -e .`.
 | `inbox-process-one` | Claim the oldest waiting event and drive it |
 | `inbox-reconcile [--recover]` | Resolve events an interrupted run left behind |
 | `mt5-check` | Read-only MetaTrader 5 diagnostic |
+| `automation-run-once` | Run one automation tick now, as an operator |
+| `automation-worker-tick` | What Task Scheduler runs; honours the kill switch |
+| `automation-status` | Read-only summary of the queue, Runs and last tick |
+| `automation-preflight` | Report unattended readiness; prints no secret values |
+| `automation-task-plan` | Print the Task Scheduler definition; registers nothing |
 | `show-run <run_id>` | Print a Run's status, files and digests |
 | `list-runs` | List Run ids under the runs directory |
 
@@ -1064,6 +1072,227 @@ Together with the ledger's `event_id → payload_sha256 → run_id` mapping, thi
 answers the question an audit actually has: *which analysis, and which candles,
 is this article built on?*
 
+## Automation
+
+```bash
+python -m goldpipeline automation-run-once
+```
+
+```
+Tick: 4b28fe58 (OK)
+Mode: READY_FOR_PUBLISH
+Auto publish: OFF
+  Resumed     20260831_132115_670216 COMPLETED
+  Processed   smoke-r9-aaaaaaaa INGESTED
+```
+
+**One finite tick, then exit. There is no daemon.** Windows Task Scheduler owns
+the clock; the worker owns one unit of work. A long-lived process would need its
+own supervision, its own restart policy, and its own answer for what happens when
+it wedges - three problems the operating system already solved. So the worker
+starts, does a bounded amount of work, writes down what it did, and exits.
+
+Within a tick:
+
+1. take the worker lock - one intake at a time;
+2. reconcile events a killed tick left stranded;
+3. promote deferred events whose wait is over;
+4. resume existing Runs, oldest first;
+5. process new events, oldest first, up to the cap;
+6. write the state and one history record;
+7. release the lock and exit.
+
+**Existing Runs come before new events.** A Run that already reached the reviewer
+has spent real money on providers; abandoning it half-finished while starting a
+fresh one turns a backlog into a bill.
+
+### The two entry points
+
+| Command | For | Kill switch |
+| --- | --- | --- |
+| `automation-worker-tick` | Task Scheduler | Honours `GOLDPIPELINE_AUTOMATION_ENABLED`; does nothing when off |
+| `automation-run-once` | an operator | Ignores it - a person typing the command is the authorisation |
+
+The switch exists to stop the *scheduler*, not to stop someone investigating. It
+defaults to **off**, so registering the task is not the same act as switching the
+system on.
+
+```bash
+python -m goldpipeline automation-run-once --dry-run
+```
+
+Reports the work a tick would do, having done none of it: claims no event,
+creates no Run, calls no provider, and writes no state.
+
+### Nothing publishes by default
+
+The tick runs at `READY_FOR_PUBLISH`. Unattended publishing needs three separate
+things to agree, and any one of them missing means nothing is sent:
+
+| Guard | Setting | Why |
+| --- | --- | --- |
+| Enabled | `GOLDPIPELINE_AUTOPUBLISH_ENABLED=true` | The absence of configuration means no |
+| Allowlisted channel | `GOLDPIPELINE_AUTOPUBLISH_ALLOWED_TARGET` must **equal** `TELEGRAM_TARGET_CHAT_ID` | Enabling publishing and naming where it may publish are two decisions, so a copied environment cannot silently redirect the pipeline |
+| Age cutoff | `GOLDPIPELINE_AUTOPUBLISH_MAX_RUN_AGE_MINUTES` (default 30) | Switching automation on must not empty last week's approved backlog into the channel at once |
+
+A mismatch fails closed with `AUTO_PUBLISH_TARGET_MISMATCH`, before any work
+starts. An approved Run past the cutoff is reported `AUTO_PUBLISH_TOO_OLD` and
+left exactly where it is, for a human to publish deliberately with `publish`.
+
+The match is exact - no prefix, no normalisation, no close enough.
+
+### Weekends, without a calendar
+
+There is no market calendar and no `if Saturday` anywhere. Two independent age
+limits produce the right behaviour on their own:
+
+| Question | Setting | Default |
+| --- | --- | --- |
+| Are the *candles* current? | `GOLDPIPELINE_MAX_DATA_AGE_MINUTES` | 90 |
+| Does the *note* still describe a market anyone is watching? | `GOLDPIPELINE_MAX_ANALYSIS_EVENT_AGE_MINUTES` | 60 |
+
+- **market stale + event still fresh → `DEFERRED`.** Nothing is wrong with the
+  event; the market is shut. No Run is created from prices nobody should quote.
+- **event too old → `EXPIRED`.** It is never paired with newer candles. That
+  pairing - a Saturday note against Monday's opening bars - is the specific
+  accident this policy exists to prevent.
+
+So on Saturday events defer, and by Monday they have expired. A fresh note
+submitted when the market opens runs normally.
+
+The event age is checked *before* the terminal is consulted, so an expired
+analysis never even causes a round-trip.
+
+```
+inbox/
+    deferred/   waiting for the world, with a .defer.json sidecar
+    expired/    waiting for nobody, with a .reason.json beside it
+```
+
+Neither is destructive: the producer's bytes are never rewritten, and nothing is
+deleted. A deferred event is retried after
+`GOLDPIPELINE_DEFER_RETRY_MINUTES` (default 5) rather than every minute -
+retrying a market that was closed sixty seconds ago just burns terminal
+round-trips.
+
+### Retry and backoff
+
+A scheduler firing every minute is a machine for turning one bad decision into
+sixty an hour, so every failure is sorted first:
+
+| Class | Examples | Policy |
+| --- | --- | --- |
+| `TERMINAL` | review `REJECT`, gate `BLOCKED`, publish `FAILED` / `PARTIAL` / `UNCERTAIN` | **Never retried.** A stage reached a conclusion; nothing failed |
+| `PERMANENT` | tampered artifacts, unusable payload | Never retried. It will not repair itself |
+| `CONFIGURATION` | a missing API key | 30-minute backoff, never exhausted - a human will fix it, and should not also have to clear a retry file |
+| `TRANSIENT` | provider timeout, 5xx, malformed structured response | 1m → 2m → 5m → 10m → 30m, then exhausted |
+
+Five attempts over three quarters of an hour, then a person looks. Any successful
+advance clears the state, so a Run that recovers does not carry a delay forward.
+
+**Publish outcomes never reach the classifier.** Round 6 decided that an
+ambiguous delivery is terminal, and a scheduler that could second-guess that
+would be the single most expensive bug available here. `PUBLISH_UNCERTAIN`
+arrives as `BLOCKED`, is written down, and is never touched again.
+
+### Two locks, not one
+
+`automation/.worker.lock` stops two scheduled ticks both deciding what to work on
+next. It is **not** the per-Run lock: a Run someone is driving by hand is skipped
+with `RUN_LOCKED`, not fought over. An overlapping tick exits `SKIPPED` and zero -
+with a minute schedule and a stage that can take longer than a minute, overlap is
+routine, not an error.
+
+As with the per-Run lock, **a stale worker lock is never removed automatically**.
+
+### Status and preflight
+
+```bash
+python -m goldpipeline automation-status
+python -m goldpipeline automation-preflight
+```
+
+Both read-only, both open no socket. `automation-preflight` reports whether each
+provider is `configured` or `missing` and **never prints a value** - it is meant
+to be safe to paste into a chat window. Readiness depends on mode: with
+publishing off, Telegram credentials are not required and their absence is not a
+blocker.
+
+### The scheduled task
+
+```bash
+python -m goldpipeline automation-task-plan          # summary
+python -m goldpipeline automation-task-plan --xml    # the definition
+```
+
+**It generates; it never registers.** There is no install command and no
+`--apply`: registering a task that runs every minute is a decision to make while
+looking at the definition.
+
+Four choices in it, each deliberate:
+
+- **the exact interpreter** - `.venv\Scripts\python.exe` by absolute path, never
+  `python`. Task Scheduler's PATH has little to do with an operator's shell;
+- **an explicit `WorkingDirectory`** - runs, the inbox and the automation state
+  all resolve relative to the current directory, and without this the worker
+  would build a second, empty set of them somewhere else;
+- **`MultipleInstancesPolicy = IgnoreNew`** - never `StopExisting`, which would
+  kill a stage mid-request, possibly mid-`sendMessage`. A skipped tick costs a
+  minute; a killed publish costs certainty;
+- **the interactive user, never SYSTEM** - MetaTrader 5 is a desktop application
+  bound to a logged-in session, and a SYSTEM task would defer every event forever
+  while looking healthy.
+
+**No credential appears in the definition.** It carries a command line and a
+schedule. The task inherits the environment it is registered in.
+
+### Credentials for unattended running
+
+Nothing here persists a credential, and nothing writes to `setx`, the registry,
+`.env`, or the task XML.
+
+Note the trap: variables set with `$env:NAME = "..."` exist only in that
+PowerShell process tree. A Task Scheduler invocation is a different process and
+will **not** see them. Making automation work unattended therefore needs a
+deliberate, persistent credential strategy - which this round does not choose on
+anyone's behalf.
+
+### Operational state
+
+```
+automation/
+    state.json      the dashboard: counts and the last tick
+    history/        one immutable record per tick, newest 500 kept
+    retries/        backoff state, keyed by run id
+    .worker.lock    held for the duration of one tick
+```
+
+All runtime, all gitignored, none of it consulted to decide whether something is
+safe to publish. `state.json` is overwritten atomically - it describes *now*, not
+what happened. History is one file per tick rather than an append log, because a
+process killed mid-append leaves a truncated line every later reader has to cope
+with.
+
+Tick records hold counts and identifiers. No article text, no prompts, no
+provider payloads, no secrets.
+
+### Exit codes
+
+`0` the tick completed - including nothing to do, a deferral, or an expiry ·
+`3` business-blocked work occurred and the worker is healthy · `1` / `2` a
+worker, configuration or system failure.
+
+A deferred event exits **0** on purpose. With a market that is shut two days a
+week, a non-zero exit for "the market is closed" would paint the Task Scheduler
+history red all weekend and teach an operator to ignore it.
+
+### Not yet switched on
+
+Round 9 builds and tests unattended operation; it does not activate it. No task
+is registered, `GOLDPIPELINE_AUTOMATION_ENABLED` and
+`GOLDPIPELINE_AUTOPUBLISH_ENABLED` both default to false, and no real Telegram
+message was sent while building it.
+
 ## Run directory structure
 
 ```
@@ -1225,8 +1454,10 @@ src/goldpipeline/
                   fencing, integrity, claim resolver, prechecks, content safety,
                   review and finalizer policy, prompt builders, chunking, the
                   run / writer / reviewer / finalizer / publish-gate / publisher
-                  stages, orchestrator.py + run_lock.py above them, and
-                  inbox.py + ingestion.py feeding them
+                  stages, orchestrator.py + run_lock.py above them,
+                  inbox.py + ingestion.py feeding them, and
+                  automation.py + automation_state.py + task_plan.py
+                  driving the whole thing on a schedule
     adapters/     source, writer, reviewer, finalizer and publisher protocols;
                   JSON file / inbox / MetaTrader 5 / Anthropic / OpenAI /
                   Telegram / fake implementations
@@ -1237,6 +1468,7 @@ fixtures/         realistic XAUUSD M15 sample data, a sample inbox event, and
                   an adversarial message
 runs/             generated Runs (gitignored)
 inbox/            live analysis events and the ingestion ledger (gitignored)
+automation/       worker state, tick history and backoff (gitignored)
 tests/
 ```
 
@@ -1296,17 +1528,29 @@ explicit broker-versus-canonical symbol handling, Run provenance in the manifest
 and `pipeline-ingest` / `inbox-submit` / `inbox-process-one` / `inbox-reconcile`
 / `mt5-check`.
 
-**Deliberately not built:** schedulers and cron (Round 9), a second Telegram bot
-reading another bot's messages (the Bot API does not allow it), historical
-snapshots reconstructed at message time, market calendars, dashboards, daemons,
-polling loops, filesystem watchers, automatic retry or reconciliation of an
-`UNCERTAIN` publish attempt, deleting or editing posted messages, databases,
-queues, a technical-analysis engine (RSI, MACD, ICT, bias, trade signals), web or
-news retrieval, sentiment analysis, and backtesting.
+**Round 9 - automation worker and Task Scheduler integration.** A finite
+run-once worker with a per-worker intake lock, work prioritised reconcile →
+resume → ingest, an analysis-age limit independent of the market-data limit,
+deferred and expired inbox states that preserve the payload, a classified retry
+policy with bounded backoff that never touches a publish outcome, unattended
+publishing behind three separate guards and off by default, a generated Windows
+Task Scheduler definition that is never registered, and `automation-run-once` /
+`automation-worker-tick` / `automation-status` / `automation-preflight` /
+`automation-task-plan`.
+
+**Deliberately not built:** a daemon or Windows Service, any long-lived loop, a
+second Telegram bot reading another bot's messages (the Bot API does not allow
+it), historical snapshots reconstructed at message time, market calendars,
+dashboards, filesystem watchers, automatic retry or reconciliation of an
+`UNCERTAIN` publish attempt, automatic Task Scheduler registration, persisted
+credentials, deleting or editing posted messages, databases, queues, a
+technical-analysis engine (RSI, MACD, ICT, bias, trade signals), web or news
+retrieval, sentiment analysis, and backtesting.
 
 `AnalysisContext` describes facts and carries the raw analysis; it holds no
 interpretation. The writer produces prose and an audit trail of the numbers it
 used. The reviewer judges that prose and says what to fix. The finalizer fixes
 it. The gate decides whether the result may be published, and the publisher
-sends it. Round 7 runs that sequence from one command, on demand, and Round 8
-feeds it real analyses and real candles. Running it on a schedule is Round 9.
+sends it. Round 7 runs that sequence from one command, Round 8 feeds it real
+analyses and real candles, and Round 9 lets a scheduler call it every minute -
+still publishing nothing until someone deliberately says otherwise.

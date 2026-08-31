@@ -39,6 +39,14 @@ the manifest: it is not part of the Run's content, it is a runtime detail with a
 shorter lifetime than the directory around it.
 """
 
+WORKER_LOCK_FILENAME = ".worker.lock"
+"""Name of the automation worker's intake lock.
+
+A different lock guarding a different thing. The per-Run lock stops two
+processes driving one article; this one stops two scheduled ticks both deciding
+what to work on next. A Run being driven by hand is unaffected by it.
+"""
+
 
 class RunLock:
     """Exclusive claim on one Run, for the duration of one invocation.
@@ -57,19 +65,24 @@ class RunLock:
         self,
         run_dir: Path,
         *,
+        filename: str = LOCK_FILENAME,
         now: datetime | None = None,
         pid: int | None = None,
         hostname: str | None = None,
     ) -> None:
-        """Prepare a lock for *run_dir*.
+        """Prepare a lock inside *run_dir*.
 
         Args:
-            run_dir: The Run directory to guard.
+            run_dir: The directory to place the lock in.
+            filename: Which lock. Defaults to the per-Run lock; the automation
+                worker passes :data:`WORKER_LOCK_FILENAME` so its intake lock and
+                a Run lock can be held at the same time without one standing in
+                for the other.
             now: Injection point for tests.
             pid: Injection point for tests; defaults to this process.
             hostname: Injection point for tests; defaults to this host.
         """
-        self.path = run_dir / LOCK_FILENAME
+        self.path = run_dir / filename
         self._now = now
         self._pid = pid if pid is not None else os.getpid()
         self._hostname = hostname if hostname is not None else socket.gethostname()
@@ -172,4 +185,4 @@ class RunLock:
         return data if isinstance(data, dict) else {}
 
 
-__all__ = ["LOCK_FILENAME", "RunLock"]
+__all__ = ["LOCK_FILENAME", "WORKER_LOCK_FILENAME", "RunLock"]

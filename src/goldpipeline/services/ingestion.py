@@ -131,6 +131,7 @@ def ingest_claimed(
         return IngestResult(
             outcome=IngestOutcome.INVALID_PAYLOAD,
             source_path=str(landed),
+            failure_code=exc.code,
             detail=exc.message,
         )
 
@@ -151,6 +152,7 @@ def ingest_claimed(
             event_id=event.event_id,
             payload_sha256=digest,
             source_path=str(returned),
+            failure_code=exc.code,
             detail=f"[{exc.code}] {exc.message}",
         )
 
@@ -291,6 +293,7 @@ def _create(
             run_id=run_id,
             payload_sha256=claimed.sha256,
             source_path=str(landed),
+            failure_code=result.error.code if result.error else "RUN_FAILED",
             detail=detail,
         )
 

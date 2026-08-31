@@ -875,3 +875,109 @@ def read_ledger(inbox: Any, event_id: str) -> Any:
     from goldpipeline.services.inbox import Ledger
 
     return Ledger(inbox.directory("index")).read(event_id)
+
+
+# --------------------------------------------------------------------------
+# Round 9 helpers
+# --------------------------------------------------------------------------
+
+AUTOMATION_NOW = INGEST_NOW
+"""Logical 'now' for a tick.
+
+The same instant the candle series and the sample event are aligned to, so a
+tick is deterministic and neither the market nor the analysis is stale.
+"""
+
+
+class FrozenElapsed:
+    """A stand-in for the tick's elapsed-time clock.
+
+    Separate from logical time on purpose: the deadline is about how long the
+    worker has actually been running, which a pinned wall clock cannot answer.
+    Advance it to make a tick believe it is out of time.
+    """
+
+    def __init__(self, seconds: float = 0.0, *, step: float = 0.0) -> None:
+        self.seconds = seconds
+        self.step = step
+
+    def __call__(self) -> float:
+        """Return the current reading, then advance by *step*.
+
+        The step is what lets a test put a tick past its deadline *during* the
+        tick rather than before it - the worker reads this clock once at the
+        start and again before each new item.
+        """
+        current = self.seconds
+        self.seconds += self.step
+        return current
+
+    def advance(self, seconds: float) -> None:
+        self.seconds += seconds
+
+
+def make_worker_context(
+    inbox: Any,
+    runs_dir: Path,
+    automation_dir: Path,
+    *,
+    clients: Any = None,
+    market_source: Any = None,
+    settings: Any = None,
+    publisher_target: str | None = None,
+    elapsed: Any = None,
+    **overrides: Any,
+) -> Any:
+    """Assemble a worker context whose every dependency is offline."""
+    from goldpipeline.config import AutomationSettings
+    from goldpipeline.services.automation import WorkerContext
+    from goldpipeline.services.automation_state import AutomationStore
+    from goldpipeline.storage.run_store import RunStore
+
+    tracked = clients if clients is not None else make_tracked_clients()
+    resolved = settings if settings is not None else AutomationSettings(**overrides)
+    return WorkerContext(
+        inbox=inbox,
+        store=RunStore(runs_dir),
+        automation=AutomationStore(automation_dir),
+        settings=resolved,
+        market_source=market_source if market_source is not None else make_mt5_source(),
+        clients=tracked.as_pipeline_clients() if isinstance(tracked, TrackedClients) else tracked,
+        expected_symbol="XAUUSD",
+        publisher_target=publisher_target,
+        elapsed=elapsed if elapsed is not None else FrozenElapsed(),
+    )
+
+
+@pytest.fixture
+def automation_dir(tmp_path: Path) -> Path:
+    """An isolated automation state root."""
+    target = tmp_path / "automation"
+    target.mkdir()
+    return target
+
+
+def event_aged(minutes: int, *, event_id: str | None = None, **extra: Any) -> dict[str, Any]:
+    """An event payload created *minutes* before :data:`AUTOMATION_NOW`."""
+    created = AUTOMATION_NOW - timedelta(minutes=minutes)
+    return make_event_payload(
+        event_id=event_id or SAMPLE_EVENT_ID,
+        created_at=created.isoformat().replace("+00:00", "Z"),
+        **extra,
+    )
+
+
+def age_run(runs_dir: Path, run_id: str, created_at: datetime) -> None:
+    """Rewrite a Run's creation timestamp.
+
+    ``create_run`` stamps the manifest from the wall clock, not from its ``now``
+    argument - that one is the data-recency clock. Tests about how *old* a Run
+    is therefore have to say so explicitly rather than rely on a pinned logical
+    clock the manifest never saw.
+    """
+    from goldpipeline.storage.run_store import RunStore
+
+    run = RunStore(runs_dir).open(run_id)
+    manifest = run.load_manifest()
+    manifest.created_at = created_at
+    run.save_manifest(manifest)

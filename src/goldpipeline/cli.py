@@ -14,6 +14,7 @@ import contextlib
 import json
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,9 @@ from goldpipeline.adapters.publisher_client import PublisherClient
 from goldpipeline.adapters.reviewer_client import ReviewerClient
 from goldpipeline.adapters.writer_client import WriterClient
 from goldpipeline.config import (
+    AUTOMATION_ENABLED_ENV,
     INBOX_DIR_ENV,
+    AutomationSettings,
     FinalizerSettings,
     MarketDataSettings,
     ReviewerSettings,
@@ -49,9 +52,19 @@ from goldpipeline.domain.errors import (
     WriterConfigurationError,
 )
 from goldpipeline.logging_setup import configure_logging
+from goldpipeline.schemas.automation import AutomationTickResult, TickStatus
+from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.ingestion import IngestOutcome, IngestResult
 from goldpipeline.schemas.orchestration import PipelineMode, PipelineStatus
 from goldpipeline.schemas.quality import DataQuality
+from goldpipeline.services.automation import (
+    DEFERRED,
+    EXPIRED,
+    WorkerContext,
+    may_resume,
+    run_tick,
+)
+from goldpipeline.services.automation_state import AutomationStore, read_defer
 from goldpipeline.services.finalizer import finalize_run
 from goldpipeline.services.inbox import Inbox
 from goldpipeline.services.ingestion import (
@@ -61,6 +74,7 @@ from goldpipeline.services.ingestion import (
     reconcile,
 )
 from goldpipeline.services.orchestrator import (
+    DEFAULT_MODE,
     PipelineClients,
     PipelineRunResult,
     resume_pipeline,
@@ -70,6 +84,11 @@ from goldpipeline.services.pipeline import create_run, validate_sources
 from goldpipeline.services.publish_gate import gate_publish
 from goldpipeline.services.publisher import publish_run
 from goldpipeline.services.reviewer import review_draft
+from goldpipeline.services.task_plan import (
+    DEFAULT_INTERVAL_MINUTES,
+    DEFAULT_TASK_NAME,
+    build_plan,
+)
 from goldpipeline.services.writer import write_draft
 from goldpipeline.storage.run_store import RunStore
 
@@ -361,6 +380,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     check.add_argument("--json", action="store_true", help="Emit the result as JSON.")
 
+    once = subparsers.add_parser(
+        "automation-run-once",
+        help="Run one automation tick now. An operator action; ignores the kill switch.",
+    )
+    _add_automation_arguments(once)
+    once.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the work this tick would do. Claims nothing and calls nothing.",
+    )
+
+    worker = subparsers.add_parser(
+        "automation-worker-tick",
+        help="What Task Scheduler runs. Does nothing unless automation is enabled.",
+    )
+    _add_automation_arguments(worker)
+
+    status = subparsers.add_parser(
+        "automation-status",
+        help="Read-only summary of the queue, the Runs and the last tick.",
+    )
+    _add_automation_arguments(status)
+
+    preflight = subparsers.add_parser(
+        "automation-preflight",
+        help="Report whether unattended operation is configured. Prints no secret values.",
+    )
+    _add_automation_arguments(preflight)
+
+    plan = subparsers.add_parser(
+        "automation-task-plan",
+        help="Print the Windows Task Scheduler definition. Registers nothing.",
+    )
+    plan.add_argument("--task-name", default=None, help="Name to register under.")
+    plan.add_argument(
+        "--interval-minutes", type=int, default=None, help="How often to wake the worker."
+    )
+    plan.add_argument("--xml", action="store_true", help="Print the task XML.")
+    plan.add_argument("--json", action="store_true", help="Emit the plan as JSON.")
+
     show = subparsers.add_parser("show-run", help="Print a summary of an existing Run.")
     show.add_argument("run_id", help="Run identifier, e.g. 20260828_022701_a83f2c.")
     show.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
@@ -460,6 +519,30 @@ def _add_ingest_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Stop once the Run exists. Nothing after ingestion runs.",
     )
+
+
+def _add_automation_arguments(parser: argparse.ArgumentParser) -> None:
+    """Attach the flags shared by the automation commands.
+
+    Note the absence: there is no ``--publish``, no ``--auto-publish`` and no
+    ``--target``. Unattended publishing is turned on in the environment, by
+    someone with access to the machine, and no command line can do it.
+    """
+    parser.add_argument("--inbox-dir", type=Path, default=None)
+    parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    parser.add_argument("--automation-dir", type=Path, default=None)
+    parser.add_argument(
+        "--market-source", choices=("mt5", "file"), default="mt5", help="Default: mt5."
+    )
+    parser.add_argument("--ohlc", type=Path, default=None, metavar="PATH")
+    parser.add_argument("--fake-mt5", action="store_true", help="Use the offline candle stand-in.")
+    parser.add_argument("--fake-ai", action="store_true", help="Use the offline AI clients.")
+    parser.add_argument(
+        "--fake-publisher",
+        action="store_true",
+        help="Use the offline publisher. Nothing is sent, even with publishing enabled.",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit the result as JSON.")
 
 
 def _parse_now(value: str) -> datetime:
@@ -1045,14 +1128,23 @@ def _pipeline_clients(args: argparse.Namespace) -> PipelineClients:
     a Run that stops at the reviewer never needs a finalizer key and a Run
     resumed at the gate needs no keys at all.
     """
+    # Read through `getattr`: the automation commands share these factories but
+    # deliberately carry no per-model flags, because a scheduled worker should
+    # take its model from configuration rather than from a command line nobody
+    # re-reads after registering the task.
     fake_ai = args.fake_ai
     return PipelineClients(
-        writer=lambda: _writer_client(fake=fake_ai or args.fake_writer, model=args.writer_model),
+        writer=lambda: _writer_client(
+            fake=fake_ai or getattr(args, "fake_writer", False),
+            model=getattr(args, "writer_model", None),
+        ),
         reviewer=lambda: _reviewer_client(
-            fake=fake_ai or args.fake_reviewer, model=args.reviewer_model
+            fake=fake_ai or getattr(args, "fake_reviewer", False),
+            model=getattr(args, "reviewer_model", None),
         ),
         finalizer=lambda: _finalizer_client(
-            fake=fake_ai or args.fake_finalizer, model=args.finalizer_model
+            fake=fake_ai or getattr(args, "fake_finalizer", False),
+            model=getattr(args, "finalizer_model", None),
         ),
         publisher=lambda: _publisher_client(fake=args.fake_publisher),
     )
@@ -1434,6 +1526,382 @@ def _print_mt5_report(report: dict[str, Any], *, stream: Any) -> None:
             print("                   (listed, never substituted)", file=stream)
 
 
+def _worker_context(args: argparse.Namespace) -> WorkerContext:
+    """Assemble a tick's dependencies. Builds no provider client.
+
+    The publisher target is read here, from configuration, and only when
+    unattended publishing is on - so a worker that is not publishing needs no
+    Telegram credentials at all.
+    """
+    settings = AutomationSettings.from_env()
+    if args.automation_dir is not None:
+        settings = replace(settings, automation_dir=args.automation_dir)
+
+    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env()
+    inbox = Inbox(inbox_root)
+    inbox.ensure_layout()
+
+    target: str | None = None
+    if settings.auto_publish_enabled and not args.fake_publisher:
+        target = TelegramSettings.from_env().target_chat
+    elif settings.auto_publish_enabled:
+        # The offline publisher has no destination of its own, so the allowlist
+        # is checked against the stand-in's channel. Nothing leaves the machine.
+        target = settings.auto_publish_allowed_target
+
+    return WorkerContext(
+        inbox=inbox,
+        store=RunStore(args.runs_dir),
+        automation=AutomationStore(settings.automation_dir),
+        settings=settings,
+        market_source=_market_source(args),
+        clients=_pipeline_clients(args),
+        expected_symbol=MarketDataSettings.from_env().canonical_symbol,
+        publisher_target=target,
+    )
+
+
+def _cmd_automation_run_once(args: argparse.Namespace) -> int:
+    """One tick, on purpose.
+
+    Deliberately ignores ``GOLDPIPELINE_AUTOMATION_ENABLED``: a person typing
+    this is the authorisation. The kill switch exists to stop the *scheduler*,
+    not to stop an operator investigating.
+    """
+    if args.dry_run:
+        return _report_dry_run(args)
+    return _report_tick(run_tick(_worker_context(args)), as_json=args.json)
+
+
+def _cmd_automation_worker_tick(args: argparse.Namespace) -> int:
+    """What Task Scheduler runs, every minute.
+
+    Honours the kill switch, so a registered task can be switched off without
+    unregistering it - which matters because unregistering is the step people
+    forget to undo.
+    """
+    settings = AutomationSettings.from_env()
+    if not settings.enabled:
+        if args.json:
+            print(json.dumps({"status": "DISABLED", "reason": AUTOMATION_ENABLED_ENV}, indent=2))
+        else:
+            print(f"Automation is disabled ({AUTOMATION_ENABLED_ENV}). Nothing was done.")
+        return EXIT_OK
+    return _report_tick(run_tick(_worker_context(args)), as_json=args.json)
+
+
+def _report_tick(result: AutomationTickResult, *, as_json: bool) -> int:
+    """Print a tick and choose an exit code a scheduler can live with."""
+    code = _tick_exit_code(result)
+    if as_json:
+        print(result.model_dump_json(indent=2))
+        return code
+
+    stream = sys.stdout if code == EXIT_OK else sys.stderr
+    print(f"Tick: {result.tick_id} ({result.status})", file=stream)
+    print(f"Mode: {result.mode}", file=stream)
+    print(f"Auto publish: {'ON' if result.auto_publish_enabled else 'OFF'}", file=stream)
+
+    for label, items in (
+        ("Reconciled", result.reconciled),
+        ("Resumed", result.resumed_runs),
+        ("Processed", result.processed_events),
+        ("Deferred", result.deferred_events),
+        ("Expired", result.expired_events),
+        ("Blocked", result.blocked_runs),
+    ):
+        for item in items:
+            suffix = f" (retry {item.next_attempt_at:%H:%M})" if item.next_attempt_at else ""
+            print(
+                f"  {label:<11} {item.identifier} {item.outcome}"
+                f"{f' [{item.code}]' if item.code else ''}{suffix}",
+                file=stream,
+            )
+
+    if not result.did_work:
+        print("  nothing to do", file=stream)
+    return code
+
+
+def _tick_exit_code(result: AutomationTickResult) -> int:
+    """Map a tick onto an exit code.
+
+    A deferred event exits zero. It has to: with a minute schedule and a market
+    that is shut two days a week, a non-zero exit for "the market is closed"
+    would paint the Task Scheduler history red for the whole weekend and teach
+    an operator to ignore it.
+    """
+    if result.status is TickStatus.FAILED:
+        return EXIT_INVALID_DATA
+    if result.status is TickStatus.BLOCKED:
+        return EXIT_BLOCKED
+    return EXIT_OK
+
+
+def _report_dry_run(args: argparse.Namespace) -> int:
+    """Report the work a tick would do, having done none of it.
+
+    Reads directories and manifests. It claims no event, creates no Run, calls
+    no provider and writes nothing at all - including the automation state.
+    """
+    context = _worker_context(args)
+    settings = context.settings
+    moment = utc_now()
+
+    pending = [p.stem for p in context.inbox.pending()]
+    deferred = _deferred_summary(context.inbox, moment)
+    resumable: list[dict[str, str]] = []
+    for run_id in context.store.list_run_ids():
+        try:
+            manifest = context.store.open(run_id).load_manifest()
+        except (FileNotFoundError, ValueError, PipelineError):
+            continue
+        if may_resume(manifest.status, settings.auto_publish_enabled):
+            resumable.append({"run_id": run_id, "status": str(manifest.status)})
+
+    mode = PipelineMode.PUBLISH if settings.auto_publish_enabled else DEFAULT_MODE
+    due = [str(item["event_id"]) for item in deferred if item["due"]]
+    waiting = [str(item["event_id"]) for item in deferred if not item["due"]]
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "mode": str(mode),
+                    "auto_publish_enabled": settings.auto_publish_enabled,
+                    "would_resume": resumable,
+                    "pending_events": pending[: settings.max_events_per_tick],
+                    "pending_events_total": len(pending),
+                    "deferred_due": due,
+                    "deferred_waiting": waiting,
+                    "max_events_per_tick": settings.max_events_per_tick,
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+        return EXIT_OK
+
+    print("Dry run: nothing was claimed, created, called or written.")
+    print(f"Mode: {mode}")
+    print(f"Auto publish: {'ON' if settings.auto_publish_enabled else 'OFF'}")
+    print(f"Would resume: {len(resumable)} run(s)")
+    for entry in resumable:
+        print(f"  {entry['run_id']}  {entry['status']}")
+    print(f"Pending events: {len(pending)} (cap {settings.max_events_per_tick} per tick)")
+    for event_id in pending:
+        print(f"  {event_id}")
+    print(f"Deferred due now: {len(due)}")
+    print(f"Deferred waiting: {len(waiting)}")
+    return EXIT_OK
+
+
+def _deferred_summary(inbox: Inbox, moment: datetime) -> list[dict[str, Any]]:
+    """Which deferred events are due, without touching any of them."""
+    directory = inbox.directory(DEFERRED)
+    if not directory.is_dir():
+        return []
+    summary: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.json")):
+        if path.name.endswith(".defer.json"):
+            continue
+        record = read_defer(path)
+        summary.append(
+            {
+                "event_id": path.stem,
+                "due": record is None or record.due(moment),
+                "next_attempt_at": record.next_attempt_at.isoformat() if record else None,
+                "reason_code": record.reason_code if record else None,
+            }
+        )
+    return summary
+
+
+def _cmd_automation_status(args: argparse.Namespace) -> int:
+    """Read-only operational summary. Opens no socket and writes nothing."""
+    settings = AutomationSettings.from_env()
+    if args.automation_dir is not None:
+        settings = replace(settings, automation_dir=args.automation_dir)
+
+    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env()
+    inbox = Inbox(inbox_root)
+    store = RunStore(args.runs_dir)
+    state = AutomationStore(settings.automation_dir).read_state()
+    moment = utc_now()
+
+    counts: dict[str, int] = {}
+    for run_id in store.list_run_ids():
+        try:
+            status = str(store.open(run_id).load_manifest().status)
+        except (FileNotFoundError, ValueError, PipelineError):
+            continue
+        counts[status] = counts.get(status, 0) + 1
+
+    deferred = _deferred_summary(inbox, moment)
+    expired = inbox.directory(EXPIRED)
+    report = {
+        "automation_enabled": settings.enabled,
+        "auto_publish_enabled": settings.auto_publish_enabled,
+        "allowed_target": settings.auto_publish_allowed_target,
+        "last_tick_id": state.last_tick_id,
+        "last_tick_status": state.last_tick_status,
+        "last_tick_completed_at": (
+            state.last_tick_completed_at.isoformat() if state.last_tick_completed_at else None
+        ),
+        "pending_events": len(inbox.pending()),
+        "deferred_events": len(deferred),
+        "expired_events": len(list(expired.glob("*.json"))) if expired.is_dir() else 0,
+        "run_status_counts": counts,
+        "last_error_safe": state.last_error_safe,
+    }
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        return EXIT_OK
+
+    print(f"Automation:        {'enabled' if settings.enabled else 'disabled'}")
+    print(f"Auto publish:      {'ON' if settings.auto_publish_enabled else 'OFF'}")
+    print(f"Last tick:         {state.last_tick_id or 'never'} ({state.last_tick_status or '-'})")
+    if state.last_tick_completed_at:
+        print(f"Last completed:    {state.last_tick_completed_at.isoformat()}")
+    print(f"Pending inbox:     {report['pending_events']}")
+    print(f"Deferred:          {report['deferred_events']}")
+    print(f"Expired:           {report['expired_events']}")
+    print(f"READY_TO_PUBLISH:  {counts.get('READY_TO_PUBLISH', 0)}")
+    print(f"PUBLISH_UNCERTAIN: {counts.get('PUBLISH_UNCERTAIN', 0)}")
+    print(f"PUBLISH_BLOCKED:   {counts.get('PUBLISH_BLOCKED', 0)}")
+    print(f"Last error:        {state.last_error_safe or 'none'}")
+    return EXIT_OK
+
+
+def _cmd_automation_preflight(args: argparse.Namespace) -> int:
+    """Report whether unattended operation is configured, naming no values."""
+    settings = AutomationSettings.from_env()
+    report: dict[str, Any] = {
+        "automation_enabled": settings.enabled,
+        "auto_publish_enabled": settings.auto_publish_enabled,
+        "anthropic": _configured(WriterSettings.from_env),
+        "openai": _configured(ReviewerSettings.from_env),
+        "telegram": _configured(TelegramSettings.from_env),
+        "mt5": _mt5_available(args),
+        "allowed_target": settings.auto_publish_allowed_target,
+        "configured_target": None,
+        "blockers": [],
+    }
+
+    blockers: list[str] = report["blockers"]
+    if report["mt5"] != "available":
+        blockers.append("MT5 is not reachable; new events will defer rather than run")
+    if report["anthropic"] == "missing" or report["openai"] == "missing":
+        # Only a blocker for *new* work. A Run resumed at the gate needs neither.
+        blockers.append("writer/reviewer credentials are missing; new events cannot be drafted")
+
+    if settings.auto_publish_enabled:
+        if report["telegram"] == "missing":
+            blockers.append("unattended publishing is on but Telegram is not configured")
+        else:
+            configured = TelegramSettings.from_env().target_chat
+            report["configured_target"] = configured
+            if settings.auto_publish_allowed_target != configured:
+                blockers.append(
+                    "the allowlisted target and the configured target differ; "
+                    "nothing would be published"
+                )
+
+    report["task_readiness"] = "READY" if not blockers else "NOT_READY"
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        return EXIT_OK if not blockers else EXIT_BLOCKED
+
+    print(f"MT5:               {report['mt5']}")
+    print(f"Anthropic:         {report['anthropic']}")
+    print(f"OpenAI:            {report['openai']}")
+    print(f"Telegram:          {report['telegram']}")
+    print(f"Automation:        {'enabled' if settings.enabled else 'disabled'}")
+    print(f"Auto publish:      {'ON' if settings.auto_publish_enabled else 'OFF'}")
+    print(f"Allowed target:    {settings.auto_publish_allowed_target or '(none)'}")
+    print(f"Configured target: {report['configured_target'] or '(not read)'}")
+    print(f"Task readiness:    {report['task_readiness']}")
+    for blocker in blockers:
+        print(f"  - {blocker}")
+    print("\nNo credential values are printed by this command, only their presence.")
+    return EXIT_OK if not blockers else EXIT_BLOCKED
+
+
+def _configured(build: Any) -> str:
+    """Whether a settings object can be built, without keeping what it holds."""
+    try:
+        build()
+    except PipelineError:
+        return "missing"
+    return "configured"
+
+
+def _mt5_available(args: argparse.Namespace) -> str:
+    """Whether the market source answers, without creating anything."""
+    try:
+        _market_source(args).load()
+    except PipelineError as exc:
+        return f"unavailable ({exc.code})"
+    except _UsageError:
+        return "unavailable (not configured)"
+    return "available"
+
+
+def _cmd_automation_task_plan(args: argparse.Namespace) -> int:
+    """Print the Task Scheduler definition. Registers nothing, ever.
+
+    There is deliberately no ``--apply`` and no install command: registering a
+    task that runs every minute is a decision to make while looking at the
+    definition, not a side effect of printing it.
+    """
+    plan = build_plan(
+        task_name=args.task_name or DEFAULT_TASK_NAME,
+        interval_minutes=args.interval_minutes or DEFAULT_INTERVAL_MINUTES,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "task_name": plan.task_name,
+                    "executable": str(plan.executable),
+                    "arguments": plan.arguments,
+                    "working_directory": str(plan.working_directory),
+                    "interval_minutes": plan.interval_minutes,
+                    "multiple_instances_policy": "IgnoreNew",
+                    "principal": "InteractiveToken",
+                    "executable_exists": plan.executable_exists,
+                    "registered": False,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return EXIT_OK
+
+    if args.xml:
+        print(plan.to_xml())
+        return EXIT_OK
+
+    print(f"Task name:         {plan.task_name}")
+    print(f"Executable:        {plan.executable}")
+    print(f"Arguments:         {plan.arguments}")
+    print(f"Working directory: {plan.working_directory}")
+    print(f"Schedule:          every {plan.interval_minutes} minute(s)")
+    print("Multiple instances: IgnoreNew")
+    print("Principal:         the interactive user (never SYSTEM - MT5 needs a desktop session)")
+    print(f"Interpreter found: {'yes' if plan.executable_exists else 'NO - check the path'}")
+    print("\nThis task is NOT registered. Print the XML with --xml and import it")
+    print("deliberately; no command here writes to Task Scheduler.")
+    print("No credential appears in the definition - the task inherits the")
+    print("environment it is registered in, which is a decision still to be made.")
+    return EXIT_OK
+
+
 def _cmd_show_run(args: argparse.Namespace) -> int:
     store = RunStore(args.runs_dir)
     try:
@@ -1502,6 +1970,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "inbox-submit": _cmd_inbox_submit,
         "inbox-reconcile": _cmd_inbox_reconcile,
         "mt5-check": _cmd_mt5_check,
+        "automation-run-once": _cmd_automation_run_once,
+        "automation-worker-tick": _cmd_automation_worker_tick,
+        "automation-status": _cmd_automation_status,
+        "automation-preflight": _cmd_automation_preflight,
+        "automation-task-plan": _cmd_automation_task_plan,
         "show-run": _cmd_show_run,
         "list-runs": _cmd_list_runs,
     }

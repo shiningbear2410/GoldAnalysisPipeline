@@ -666,10 +666,58 @@ class LedgerError(IngestionError):
     code = "INGESTION_LEDGER_ERROR"
 
 
+# --- automation (Round 9) ------------------------------------------------
+
+
+class AutomationError(PipelineError):
+    """Base class for failures of the automation worker.
+
+    The worker owns scheduling and nothing else: when to look, what to look at
+    next, and when to stop. Every judgement about an article still belongs to
+    the stage that made it, and reaches the worker as a verdict it must respect.
+    """
+
+    code = "AUTOMATION_ERROR"
+
+
+class AutomationConfigurationError(AutomationError):
+    """Automation is misconfigured. Names the setting, never its value."""
+
+    code = "AUTOMATION_CONFIGURATION_ERROR"
+
+
+class AutoPublishNotAllowedError(AutomationError):
+    """Unattended publishing was asked for but is not authorised.
+
+    Raised only where the guard is a hard refusal - an allowlist that is missing
+    or does not match the configured destination. Per-Run refusals, such as a
+    Run being older than the cutoff, are recorded as outcomes rather than
+    raised: they stop one article, not the worker.
+    """
+
+    code = "AUTO_PUBLISH_NOT_ALLOWED"
+
+
+class AutoPublishTargetMismatchError(AutoPublishNotAllowedError):
+    """The allowlisted destination is not the configured one.
+
+    Two settings have to name the same channel: enabling unattended publishing
+    is one decision, and saying where it may publish is a second. Requiring both
+    means a copied environment cannot silently point the pipeline at a channel
+    nobody authorised.
+    """
+
+    code = "AUTO_PUBLISH_TARGET_MISMATCH"
+
+
 __all__ = [
     "AnalysisTextTooLargeError",
     "ArtifactAlreadyExistsError",
     "ArtifactIntegrityError",
+    "AutoPublishNotAllowedError",
+    "AutoPublishTargetMismatchError",
+    "AutomationConfigurationError",
+    "AutomationError",
     "ContextIntegrityError",
     "DuplicateTimestampError",
     "EmptyAnalysisTextError",

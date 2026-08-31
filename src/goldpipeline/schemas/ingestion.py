@@ -86,6 +86,14 @@ class IngestResult(StrictModel):
     )
     payload_sha256: str | None = None
     source_path: str | None = Field(default=None, description="Where the event file ended up.")
+    failure_code: str | None = Field(
+        default=None,
+        description=(
+            "The originating error's own code, structured. A scheduler has to "
+            "tell a closed market from a misconfigured symbol, and parsing that "
+            "out of `detail` would make the difference a formatting accident."
+        ),
+    )
     detail: str | None = None
 
     @property

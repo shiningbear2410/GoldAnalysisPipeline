@@ -11,6 +11,10 @@ runs/*
 inbox/*
 !inbox/.gitkeep
 
+# automation worker state: a dashboard, tick history and backoff records
+automation/*
+!automation/.gitkeep
+
 # python
 __pycache__/
 *.py[cod]
