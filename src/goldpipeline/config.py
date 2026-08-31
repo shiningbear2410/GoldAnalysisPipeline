@@ -16,13 +16,16 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from goldpipeline.domain.errors import (
     FinalizeConfigurationError,
+    MarketDataConfigurationError,
     PublisherConfigurationError,
     ReviewConfigurationError,
     WriterConfigurationError,
 )
+from goldpipeline.schemas.common import normalize_symbol
 
 DEFAULT_MODEL = "claude-opus-5"
 """Writer model used when ``ANTHROPIC_MODEL`` is not set."""
@@ -347,6 +350,123 @@ class TelegramSettings:
         )
 
 
+MT5_SYMBOL_ENV = "GOLDPIPELINE_MT5_SYMBOL"
+CANONICAL_SYMBOL_ENV = "GOLDPIPELINE_CANONICAL_SYMBOL"
+TIMEFRAME_ENV = "GOLDPIPELINE_OHLC_TIMEFRAME"
+BARS_ENV = "GOLDPIPELINE_OHLC_BARS"
+MAX_DATA_AGE_ENV = "GOLDPIPELINE_MAX_DATA_AGE_MINUTES"
+INBOX_DIR_ENV = "GOLDPIPELINE_INBOX_DIR"
+
+DEFAULT_MT5_SYMBOL = "XAUUSD"
+"""Most brokers name gold this. Many do not - hence the setting."""
+
+DEFAULT_TIMEFRAME = "M15"
+DEFAULT_BAR_COUNT = 20
+MIN_BAR_COUNT = 10
+MAX_BAR_COUNT = 500
+"""A ceiling, so no configuration mistake asks a terminal for a million candles."""
+
+DEFAULT_MAX_DATA_AGE_MINUTES = 90
+"""How old the latest closed candle may be before ingestion refuses.
+
+Conservative rather than clever. Gold trades nearly around the clock on
+weekdays, so on a working market this is generous; over a weekend it will refuse,
+which is the right answer - an article quoting Friday's close on Sunday evening
+is stale whether or not the market being shut explains it. Raise it deliberately
+for a backfill; there is no market calendar here and there should not be one yet.
+"""
+
+SUPPORTED_TIMEFRAMES = ("M1", "M5", "M15", "M30", "H1", "H4")
+"""Timeframes this pipeline will fetch.
+
+A small whitelist on purpose. The provider's own timeframe constants are opaque
+integers, and accepting an arbitrary one from configuration - let alone from a
+payload - would mean fetching a resolution nothing downstream was written for.
+"""
+
+
+@dataclass(frozen=True)
+class MarketDataSettings:
+    """Which instrument to fetch, at what resolution, and how much of it.
+
+    No credential lives here. Reading candles from an already-authenticated
+    terminal needs no login, and this pipeline never performs one.
+
+    ``provider_symbol`` and ``canonical_symbol`` are separate because brokers
+    rename things: gold may be ``XAUUSDm``, ``GOLD`` or ``XAUUSD.a`` on the
+    terminal while the article, the context and every downstream check still
+    talk about ``XAUUSD``. Both are recorded, and neither is inferred from the
+    other.
+    """
+
+    provider_symbol: str = DEFAULT_MT5_SYMBOL
+    canonical_symbol: str = DEFAULT_MT5_SYMBOL
+    timeframe: str = DEFAULT_TIMEFRAME
+    bar_count: int = DEFAULT_BAR_COUNT
+    max_data_age_minutes: int = DEFAULT_MAX_DATA_AGE_MINUTES
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> MarketDataSettings:
+        """Build settings from the environment.
+
+        Raises:
+            MarketDataConfigurationError: If a value is missing or unusable.
+        """
+        source = os.environ if env is None else env
+
+        provider_symbol = (source.get(MT5_SYMBOL_ENV) or DEFAULT_MT5_SYMBOL).strip()
+        if not provider_symbol:
+            raise MarketDataConfigurationError(
+                f"{MT5_SYMBOL_ENV} is set but empty; unset it to use the default",
+                setting=MT5_SYMBOL_ENV,
+            )
+
+        canonical = (source.get(CANONICAL_SYMBOL_ENV) or DEFAULT_MT5_SYMBOL).strip()
+        try:
+            canonical_symbol = normalize_symbol(canonical)
+        except ValueError as exc:
+            raise MarketDataConfigurationError(
+                f"{CANONICAL_SYMBOL_ENV} is not a valid instrument symbol",
+                setting=CANONICAL_SYMBOL_ENV,
+            ) from exc
+
+        timeframe = (source.get(TIMEFRAME_ENV) or DEFAULT_TIMEFRAME).strip().upper()
+        if timeframe not in SUPPORTED_TIMEFRAMES:
+            raise MarketDataConfigurationError(
+                f"{TIMEFRAME_ENV} must be one of {', '.join(SUPPORTED_TIMEFRAMES)}",
+                setting=TIMEFRAME_ENV,
+                supported=list(SUPPORTED_TIMEFRAMES),
+            )
+
+        bar_count = _positive_int(source, BARS_ENV, DEFAULT_BAR_COUNT, MarketDataConfigurationError)
+        if not MIN_BAR_COUNT <= bar_count <= MAX_BAR_COUNT:
+            raise MarketDataConfigurationError(
+                f"{BARS_ENV} must be between {MIN_BAR_COUNT} and {MAX_BAR_COUNT}",
+                setting=BARS_ENV,
+                minimum=MIN_BAR_COUNT,
+                maximum=MAX_BAR_COUNT,
+            )
+
+        return cls(
+            provider_symbol=provider_symbol,
+            canonical_symbol=canonical_symbol,
+            timeframe=timeframe,
+            bar_count=bar_count,
+            max_data_age_minutes=_positive_int(
+                source,
+                MAX_DATA_AGE_ENV,
+                DEFAULT_MAX_DATA_AGE_MINUTES,
+                MarketDataConfigurationError,
+            ),
+        )
+
+
+def inbox_dir_from_env(env: dict[str, str] | None = None) -> Path:
+    """Where the analysis inbox lives. Configuration only, never a payload."""
+    source = os.environ if env is None else env
+    return Path((source.get(INBOX_DIR_ENV) or "inbox").strip() or "inbox")
+
+
 def validate_target_chat(target: str) -> str:
     """Check a destination is a shape Telegram recognises, and return it canonically.
 
@@ -378,6 +498,7 @@ ConfigError = (
     | type[ReviewConfigurationError]
     | type[FinalizeConfigurationError]
     | type[PublisherConfigurationError]
+    | type[MarketDataConfigurationError]
 )
 """Which configuration error a helper should raise.
 
@@ -437,21 +558,36 @@ def _non_negative_int(
 
 __all__ = [
     "API_KEY_ENV",
-    "DEFAULT_PUBLISH_TIMEOUT_SECONDS",
+    "BARS_ENV",
+    "CANONICAL_SYMBOL_ENV",
+    "DEFAULT_BAR_COUNT",
+    "DEFAULT_MAX_DATA_AGE_MINUTES",
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_MAX_TOKENS",
     "DEFAULT_MODEL",
+    "DEFAULT_MT5_SYMBOL",
+    "DEFAULT_PUBLISH_TIMEOUT_SECONDS",
     "DEFAULT_REVIEW_MODEL",
+    "DEFAULT_TIMEFRAME",
     "DEFAULT_TIMEOUT_SECONDS",
     "FINALIZER_MODEL_ENV",
+    "FinalizerSettings",
+    "INBOX_DIR_ENV",
+    "MAX_BAR_COUNT",
+    "MAX_DATA_AGE_ENV",
+    "MIN_BAR_COUNT",
     "MODEL_ENV",
+    "MT5_SYMBOL_ENV",
+    "MarketDataSettings",
     "REVIEW_API_KEY_ENV",
     "REVIEW_MODEL_ENV",
-    "FinalizerSettings",
     "ReviewerSettings",
+    "SUPPORTED_TIMEFRAMES",
     "TELEGRAM_TARGET_ENV",
     "TELEGRAM_TOKEN_ENV",
+    "TIMEFRAME_ENV",
     "TelegramSettings",
     "WriterSettings",
+    "inbox_dir_from_env",
     "validate_target_chat",
 ]

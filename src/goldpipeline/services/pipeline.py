@@ -30,7 +30,7 @@ from pathlib import Path
 from goldpipeline.adapters.base import AnalysisSource, MarketDataSource
 from goldpipeline.domain.errors import PipelineError
 from goldpipeline.schemas.context import AnalysisContext
-from goldpipeline.schemas.manifest import RunError, RunManifest, RunStatus
+from goldpipeline.schemas.manifest import RunError, RunManifest, RunProvenance, RunStatus
 from goldpipeline.services.context_builder import build_context
 from goldpipeline.services.normalizer import normalize_analysis, normalize_market_data
 from goldpipeline.storage.run_store import RunDirectory, RunStore
@@ -143,6 +143,14 @@ def _execute(
     # --- capture sources verbatim, before any judgement about them --------
     run.write_source(ANALYSIS_SOURCE_FILENAME, loaded_analysis.raw_payload, manifest)
     run.write_source(MARKET_SOURCE_FILENAME, loaded_market.raw_payload, manifest)
+    # Recorded here rather than by the caller, because whoever loaded a source
+    # is the only one who knows what it took to load it.
+    manifest.provenance = RunProvenance(
+        analysis_origin=loaded_analysis.origin,
+        market_origin=loaded_market.origin,
+        analysis=dict(loaded_analysis.provenance),
+        market=dict(loaded_market.provenance),
+    )
     manifest.record_event("source.capture", "OK", "raw payloads stored")
     run.save_manifest(manifest)
 

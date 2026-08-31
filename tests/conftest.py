@@ -769,3 +769,109 @@ def _writer_returning(article: str) -> Any:
         )
 
     return FakeWriterClient(output_factory=build)
+
+
+# --------------------------------------------------------------------------
+# Round 8 helpers
+# --------------------------------------------------------------------------
+
+INGEST_NOW = datetime(2026, 8, 28, 3, 0, tzinfo=UTC)
+"""Deterministic 'now' for ingestion.
+
+The same instant the generated candle series is aligned to, so an ingested Run
+is byte-identical on every machine and never trips the recency checks.
+"""
+
+SAMPLE_EVENT_ID = "gold-20260828-0300-a1b2c3"
+"""A realistically shaped producer id: date, time, and enough randomness."""
+
+
+def make_event_payload(
+    *,
+    event_id: str = SAMPLE_EVENT_ID,
+    raw_text: str = VIETNAMESE_TEXT,
+    source: str = "gold_analysis_bot",
+    created_at: str = "2026-08-28T03:00:00Z",
+    include_optional: bool = True,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build one inbox payload, the way the producing bot would write it."""
+    payload: dict[str, Any] = {
+        "schema_version": "1",
+        "source": source,
+        "event_id": event_id,
+        "created_at": created_at,
+        "raw_text": raw_text,
+    }
+    if include_optional:
+        payload.update(
+            {
+                "message_date": "2026-08-28T02:58:00Z",
+                "chat_id": -1002145890733,
+                "message_id": 48217,
+                "author": "gold_desk_vn",
+                "metadata": {"strategy": "intraday"},
+            }
+        )
+    payload.update(extra)
+    return payload
+
+
+@pytest.fixture
+def inbox(tmp_path: Path) -> Any:
+    """An isolated inbox, laid out and empty."""
+    from goldpipeline.services.inbox import Inbox
+
+    box = Inbox(tmp_path / "inbox")
+    box.ensure_layout()
+    return box
+
+
+def make_mt5_source(*, module: Any = None, now: datetime | None = None, **overrides: Any) -> Any:
+    """A MetaTrader source wired to the offline module.
+
+    Never touches a terminal, and never imports the vendor package: the fake is
+    injected, which is the whole reason the adapter takes one.
+    """
+    from goldpipeline.adapters.fake_mt5 import FakeMt5Module, make_rates
+    from goldpipeline.adapters.mt5_market import MetaTrader5MarketDataSource
+    from goldpipeline.config import MarketDataSettings
+
+    moment = now or INGEST_NOW
+    settings = MarketDataSettings(**overrides)
+    return MetaTrader5MarketDataSource(
+        settings,
+        module=module
+        if module is not None
+        else FakeMt5Module(
+            known_symbols=(settings.provider_symbol,),
+            rates=make_rates(now=moment, timeframe=settings.timeframe),
+        ),
+        now=moment,
+    )
+
+
+def make_ingestion_context(inbox: Any, runs_dir: Path, *, market_source: Any = None) -> Any:
+    """An ingestion context whose market data comes from the offline module."""
+    from goldpipeline.services.ingestion import IngestionContext
+    from goldpipeline.storage.run_store import RunStore
+
+    return IngestionContext(
+        inbox=inbox,
+        store=RunStore(runs_dir),
+        market_source=market_source if market_source is not None else make_mt5_source(),
+        expected_symbol="XAUUSD",
+    )
+
+
+def submit_event(inbox: Any, payload: dict[str, Any]) -> Path:
+    """Put *payload* in the inbox the way a producer would."""
+    submitted: Path = inbox.submit(payload, event_id=payload["event_id"])
+    return submitted
+
+
+def read_ledger(inbox: Any, event_id: str) -> Any:
+    """Read one ledger entry back through its schema."""
+    from goldpipeline.services.inbox import Ledger
+
+    return Ledger(inbox.directory("index")).read(event_id)

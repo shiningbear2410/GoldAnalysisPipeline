@@ -3,9 +3,10 @@
 Everything a writer model would otherwise have to compute or format itself is
 computed here instead, in Python, exactly once:
 
-* **price formatting** - a fixed 2-decimal convention, so the article never
+* **price formatting** - a minimum 2-decimal convention, so the article never
   shows ``3315.1`` next to ``3312.45``, and the model is never the thing that
-  decides how a number is rounded;
+  decides how a number is written. Digits are padded, never dropped: a broker
+  quoting gold to three decimals keeps all three;
 * **simple arithmetic** - net change over the window, session high/low, the
   length of the current run of up or down closes.
 
@@ -23,26 +24,31 @@ from typing import Any
 from goldpipeline.schemas.context import AnalysisContext
 from goldpipeline.schemas.market import OHLCBar
 
-PRICE_DECIMALS = 2
-"""Display convention for gold prices.
+MIN_PRICE_DECIMALS = 2
+"""Fewest decimals a rendered gold price ever shows.
 
-XAUUSD is quoted to two decimals, so every price rendered into an article or a
-prompt is padded to two: ``3315.1`` shows as ``3315.10``, ``3315`` as
-``3315.00``. Padding a trailing zero does not change the value, and a single
-convention is what stops one paragraph reading ``3315.1`` and the next
-``3315.10``.
+``3315.1`` shows as ``3315.10`` and ``3315`` as ``3315.00``. Padding a trailing
+zero does not change the value, and a single convention is what stops one
+paragraph reading ``3315.1`` and the next ``3315.10``.
 """
 
 
 def format_price(value: Decimal) -> str:
     """Render *value* for display, without changing it.
 
-    Quantisation only ever *adds* digits here: the pipeline rejects prices with
-    more than 8 decimal places, and real gold quotes carry two or three. On the
-    rare three-decimal input, ``ROUND_HALF_UP`` matches how a trading desk would
-    round rather than Python's default banker's rounding.
+    Digits are only ever *added*. A broker that quotes gold to three decimals -
+    and some do, ``4451.824`` - keeps all three, because the downstream gate
+    matches article prices against the context exactly. Rounding here to a house
+    convention of two would produce ``4451.82``: a number that appears nowhere in
+    the data, that the gate would then refuse as unsupported, and that is in any
+    case not the price. The formatting layer pads; it does not decide what a
+    price is.
     """
-    return str(value.quantize(Decimal(1).scaleb(-PRICE_DECIMALS), rounding=ROUND_HALF_UP))
+    exponent = value.as_tuple().exponent
+    natural = -exponent if isinstance(exponent, int) else MIN_PRICE_DECIMALS
+    # Never fewer places than the value already has, so quantize can only pad.
+    places = max(MIN_PRICE_DECIMALS, natural)
+    return str(value.quantize(Decimal(1).scaleb(-places)))
 
 
 def format_signed_price(value: Decimal) -> str:
@@ -205,7 +211,7 @@ def _iso(value: Any) -> str:
 
 
 __all__ = [
-    "PRICE_DECIMALS",
+    "MIN_PRICE_DECIMALS",
     "MarketFacts",
     "build_market_facts",
     "format_price",

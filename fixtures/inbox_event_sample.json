@@ -1,0 +1,15 @@
+{
+  "schema_version": "1",
+  "source": "gold_analysis_bot",
+  "event_id": "gold-20260828-0300-a1b2c3",
+  "created_at": "2026-08-28T03:00:00Z",
+  "message_date": "2026-08-28T02:58:00Z",
+  "raw_text": "Vàng đang giằng co quanh vùng 3.314 sau khi bật lên từ hỗ trợ 3.305.\nKịch bản ưu tiên: chờ điều chỉnh về 3.309 - 3.311 để tìm cơ hội mua lên.\nLưu ý: đây là quan điểm cá nhân, không phải khuyến nghị đầu tư.",
+  "chat_id": -1002145890733,
+  "message_id": 48217,
+  "author": "gold_desk_vn",
+  "metadata": {
+    "chat_title": "Gold Signals VN",
+    "strategy": "intraday"
+  }
+}

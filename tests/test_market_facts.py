@@ -23,25 +23,30 @@ from goldpipeline.services.market_facts import (
         ("3315.20", "3315.20"),
         ("3315", "3315.00"),
         ("3315.00", "3315.00"),
-        ("3315.456", "3315.46"),
-        ("3315.455", "3315.46"),
-        ("3315.454", "3315.45"),
+        ("3315.456", "3315.456"),
+        ("4451.824", "4451.824"),
     ],
 )
 def test_prices_render_with_a_single_convention(raw: str, expected: str) -> None:
-    """Two decimals always. Padding a zero does not change the value."""
+    """At least two decimals. Padding a zero does not change the value."""
     assert format_price(Decimal(raw)) == expected
 
 
 def test_formatting_never_alters_the_value() -> None:
-    for raw in ("3315.2", "3315", "3304.80", "1.5"):
+    for raw in ("3315.2", "3315", "3304.80", "1.5", "4451.824"):
         assert Decimal(format_price(Decimal(raw))) == Decimal(raw)
 
 
-def test_half_up_rounding_matches_desk_convention() -> None:
-    """Python rounds 0.5 to even by default; a trading desk rounds it up."""
-    assert format_price(Decimal("3315.125")) == "3315.13"
-    assert format_price(Decimal("3315.135")) == "3315.14"
+@pytest.mark.parametrize("raw", ["4451.824", "4447.583", "3315.125", "1.23456789"])
+def test_a_third_decimal_is_never_rounded_away(raw: str) -> None:
+    """Brokers that quote gold to three decimals exist, and this pipeline met one.
+
+    Rounding ``4451.824`` to ``4451.82`` would put a number in the article that
+    appears nowhere in the data - which the Round 5 gate then refuses as an
+    unsupported price, correctly and unhelpfully. The formatting layer pads; it
+    does not decide what a price is.
+    """
+    assert format_price(Decimal(raw)) == raw
 
 
 @pytest.mark.parametrize(

@@ -20,6 +20,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Windows-only wheels, and useless without a running terminal, so the MT5
+# market-data source is an extra rather than a hard dependency. Every test runs
+# without it; only `mt5-check` and `--market-source mt5` need it installed.
+mt5 = ["MetaTrader5>=5.0.45; sys_platform == 'win32'"]
 
 [project.scripts]
 goldpipeline = "goldpipeline.cli:main"
@@ -44,3 +48,8 @@ python_version = "3.12"
 strict = true
 files = ["src", "tests"]
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# The vendor ships no type stubs.
+module = ["MetaTrader5"]
+ignore_missing_imports = true

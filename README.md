@@ -2,12 +2,14 @@
 
 Multi-agent pipeline for producing XAUUSD ("Nhận định Vàng") articles.
 
-**This repository is at Round 7: the end-to-end orchestrator.** Round 1 turns a
-raw human analysis plus OHLC data into an immutable **Run** with a
-machine-readable `context.json`; Round 2 writes a Vietnamese XAUUSD commentary
-from it; Round 3 audits that commentary and records a verdict; Round 4 applies
-the audit; Round 5 decides deterministically whether the result may be
-published; Round 6 sends it; Round 7 runs the whole sequence from one command.
+**This repository is at Round 8: live input.** Round 1 turns a raw human
+analysis plus OHLC data into an immutable **Run** with a machine-readable
+`context.json`; Round 2 writes a Vietnamese XAUUSD commentary from it; Round 3
+audits that commentary and records a verdict; Round 4 applies the audit; Round 5
+decides deterministically whether the result may be published; Round 6 sends it;
+Round 7 runs the whole sequence from one command; Round 8 feeds that sequence
+production data - analyses handed over by the existing Gold Analysis Bot, and
+closed XAUUSD candles read from a MetaTrader 5 terminal.
 
 Every stage is still a separate command and still works on its own. The
 orchestrator coordinates those stages; **it does not bypass any gate.** Nothing
@@ -27,6 +29,7 @@ Telegram Gold Bot / raw analysis  +  OHLC market data
         -> Deterministic Validator          <- Round 5
         -> Telegram Publisher               <- Round 6
         (all of the above, from one command) <- Round 7
+        (fed by a durable inbox + MT5)       <- Round 8
 ```
 
 What exists today:
@@ -48,6 +51,8 @@ raw analysis JSON  +  OHLC JSON
                               -> publish_result.json                 (Round 6)
         -> one command drives all of the above, stopping wherever a
            stage declines                                            (Round 7)
+        -> the analysis arrives from a durable inbox and the candles
+           from a live MT5 terminal                                  (Round 8)
 ```
 
 `context.json` is the contract throughout. The writer receives it and nothing
@@ -126,6 +131,11 @@ Without installing, set `PYTHONPATH=src` instead of `pip install -e .`.
 | `publish --run-id <id>` | Send an approved Run to Telegram, once |
 | `pipeline-run` | Create a Run from JSON inputs and drive the whole pipeline |
 | `pipeline-resume --run-id <id>` | Continue an existing Run from the stage it is due for |
+| `pipeline-ingest --analysis <file>` | Submit one analysis event and drive the whole pipeline |
+| `inbox-submit --file <file>` | Place an event in the inbox, atomically. Does not process it |
+| `inbox-process-one` | Claim the oldest waiting event and drive it |
+| `inbox-reconcile [--recover]` | Resolve events an interrupted run left behind |
+| `mt5-check` | Read-only MetaTrader 5 diagnostic |
 | `show-run <run_id>` | Print a Run's status, files and digests |
 | `list-runs` | List Run ids under the runs directory |
 
@@ -812,6 +822,248 @@ beside the events the stages write for themselves; the machine-readable view is
 refused flag combination · `2` unusable data or a stage failure · `3` a gate
 declined, or a delivery was not fully confirmed.
 
+## Live input: the analysis inbox and MetaTrader 5
+
+```
+Existing Gold Analysis Bot                MetaTrader 5 terminal
+        │ writes one JSON event                   │ closed XAUUSD candles
+        ▼                                         ▼
+   inbox/incoming/  ──claim──▶  processing/  ──▶  create Run  ──▶  processed/
+                                     │                              
+                                     └── ledger: event_id → run_id
+```
+
+One command drives the whole thing:
+
+```bash
+python -m goldpipeline pipeline-ingest --analysis fixtures/inbox_event_sample.json --fake-mt5 --fake-ai
+```
+
+```
+Event: gold-20260828-0300-a1b2c3 (INGESTED)
+Run: 20260828_030114_9c1e2a
+Mode: READY_FOR_PUBLISH
+
+WRITER     COMPLETED
+REVIEW     PASS
+FINALIZE   PASSTHROUGH
+GATE       APPROVED
+
+Final status: READY_TO_PUBLISH
+```
+
+Drop `--fake-mt5` to read a real terminal, `--fake-ai` to call real models. The
+default still publishes nothing — Round 7's two-flag friction is unchanged.
+
+### Why there is no second Telegram bot
+
+**The Telegram Bot API does not deliver messages authored by other bots.** A
+second bot watching the channel where the existing Gold Analysis Bot posts would
+receive nothing — not intermittently, not with better permissions, but never. So
+this pipeline does not poll for the producer's output. The producer hands it over
+directly, by writing one JSON file into a directory.
+
+That is also the better design regardless of the API: the handoff is durable,
+auditable and testable without a network.
+
+### The payload
+
+```json
+{
+  "schema_version": "1",
+  "source": "gold_analysis_bot",
+  "event_id": "gold-20260828-0300-a1b2c3",
+  "created_at": "2026-08-28T03:00:00Z",
+  "raw_text": "Vàng đang giằng co quanh vùng ...",
+  "message_date": "2026-08-28T02:58:00Z",
+  "chat_id": -1002145890733,
+  "message_id": 48217,
+  "author": "gold_desk_vn",
+  "metadata": {"strategy": "intraday"}
+}
+```
+
+`source`, `event_id`, `created_at` and `raw_text` are required; the rest is
+optional and, when absent, stays absent.
+
+**The schema is a whitelist, and unknown keys are rejected.** There is no field
+here that changes what the pipeline *does* — no `runs_dir`, no `model`, no
+`target_chat`, no `publish`. A payload carrying one is refused rather than
+ignored. `raw_text` is untrusted content and travels as such all the way to the
+writer's fenced prompt; `metadata` is free-form but nothing ever reads it as
+configuration.
+
+`event_id` must be 8–128 characters of letters, digits, dot, dash or underscore.
+It becomes a file name in the ledger, so it is validated as one.
+
+### Integrating the producing bot
+
+The producer needs no dependency on this package — the contract is a file. Either
+shell out:
+
+```bash
+python -m goldpipeline inbox-submit --file event.json
+```
+
+…or write the same atomic drop directly:
+
+```python
+from goldpipeline.services.inbox import Inbox
+
+Inbox("inbox").submit(payload, event_id=payload["event_id"])
+```
+
+Both write a temporary file beside the target, fsync it, and rename it into
+place, so a consumer never sees a half-written analysis. An operator then drains
+the queue:
+
+```bash
+python -m goldpipeline inbox-process-one
+```
+
+Deciding *when* to run that is Round 9. There is no polling loop here.
+
+### Exactly one Run per event
+
+| Situation | Outcome | Exit |
+| --- | --- | --- |
+| New event | `INGESTED`, one Run created | 0 |
+| Same `event_id`, same bytes | `ALREADY_INGESTED`, names the original Run | 0 |
+| Same `event_id`, **different** bytes | `CONFLICT` — refused, original mapping untouched | 3 |
+| A previous attempt never finished | `UNRESOLVED` — run `inbox-reconcile` first | 3 |
+| Market unavailable | `MARKET_UNAVAILABLE` — no Run, event re-queued | 3 |
+| Payload fails its schema | `INVALID_PAYLOAD` — kept in `failed/` with a reason | 2 |
+
+A replay exits **0** deliberately. A producer that retries after a lost
+acknowledgement must get a calm answer with the original run id, or it will retry
+forever.
+
+A reused id with different content **fails closed**. Accepting the newer payload
+would silently detach an audit trail from the article that was published under
+it. Retrying means resubmitting under a new `event_id`.
+
+### Crash safety
+
+The ledger records the run id *before* the Run is created — the same argument as
+Round 6's publish intent. `create_run` accepts an explicit id, so the id can be
+chosen rather than learned, and an event found stranded in `processing/` names
+exactly one Run. Looking at that Run's manifest then answers whether the work
+happened:
+
+```bash
+python -m goldpipeline inbox-reconcile           # report
+python -m goldpipeline inbox-reconcile --recover # act on it
+```
+
+- Reserved Run exists and normalized → the ledger is completed, the event moves
+  to `processed/`. Nothing is re-run.
+- Reserved Run is missing or failed → the event moves to `failed/`. Retrying
+  means a new `event_id`, which keeps the original mapping and makes the retry
+  visible.
+- Nothing was reserved → no Run can exist, so the event goes back to `incoming/`.
+  This is the only automatic recovery, and it is provably safe.
+
+Nothing is ever deleted. A refused event keeps its payload verbatim and gains a
+`.reason.json` beside it.
+
+### MetaTrader 5
+
+```bash
+pip install -e ".[mt5]"
+```
+
+An **optional extra**: the package ships Windows-only wheels and is useless
+without a terminal, and the entire test suite runs without it. The adapter
+imports it lazily and says so clearly when it is missing.
+
+Prerequisites: the MetaTrader 5 terminal installed, running, and logged in to an
+account. **No login or password is read, needed or stored** — the pipeline
+attaches to the already-authenticated terminal and only reads market data.
+
+```bash
+python -m goldpipeline mt5-check
+```
+
+```
+MT5 terminal:      connected
+Configured symbol: XAUUSD
+Canonical symbol:  XAUUSD
+Timeframe:         M15
+Requested bars:    20
+Returned bars:     20
+Latest closed:     2026-08-28T02:45:00Z
+Latest close:      3305.50
+Data quality:      OK (closed candle, within the age limit)
+```
+
+Read-only, writes no Run, and prints no account details.
+
+**Closed candles only.** `copy_rates_from_pos` counts from zero, and index 0 is
+the bar still moving: its high, low and close all change until the period ends.
+An article quoting it is false before anyone reads it. Two independent mechanisms
+prevent that — the fetch starts at index 1, *and* the returned bar's timestamp is
+checked against its own timeframe duration. The start index is an assumption; the
+arithmetic is a fact, and it is what refuses.
+
+**Symbols are never guessed.** Brokers call gold `XAUUSD`, `XAUUSDm`, `GOLD` and
+`XAUUSD.a`, and those are not always the same instrument. A missing symbol fails
+and lists what the terminal does offer. Where the broker's name differs from the
+canonical one, set both — `GOLDPIPELINE_MT5_SYMBOL=XAUUSDm` and
+`GOLDPIPELINE_CANONICAL_SYMBOL=XAUUSD` — and both are recorded.
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `GOLDPIPELINE_MT5_SYMBOL` | `XAUUSD` | The broker's own name |
+| `GOLDPIPELINE_CANONICAL_SYMBOL` | `XAUUSD` | What the article talks about |
+| `GOLDPIPELINE_OHLC_TIMEFRAME` | `M15` | One of M1, M5, M15, M30, H1, H4 |
+| `GOLDPIPELINE_OHLC_BARS` | `20` | Between 10 and 500 |
+| `GOLDPIPELINE_MAX_DATA_AGE_MINUTES` | `90` | Conservative; a weekend will refuse |
+| `GOLDPIPELINE_INBOX_DIR` | `inbox` | Where events are dropped |
+
+Timestamps are read as the instants they are and stored UTC-aware — never
+reinterpreted through the machine's local timezone. Prices are converted through
+`str` rather than binary float arithmetic and quantized to the precision the
+broker itself declares. Volume prefers `real_volume` where a broker reports it
+and falls back to `tick_volume`, recording which was used.
+
+**Read-only, structurally.** The `Mt5Module` protocol names seven functions and
+every one of them reads. `order_send`, `order_check` and the position APIs are
+not in the protocol, not imported, and not reachable — a test asserts the
+surface, so adding a trading call would take a diff a reviewer would see.
+
+Failures are distinguished rather than lumped together: `MT5_NOT_INSTALLED`,
+`MT5_INITIALIZE_FAILED`, `SYMBOL_NOT_FOUND`, `SYMBOL_NOT_SELECTED`,
+`INSUFFICIENT_BARS`, `STALE_MARKET_DATA`, `FORMING_CANDLE_DETECTED`,
+`MT5_PROVIDER_ERROR`.
+
+### Pairing an analysis with a snapshot
+
+V1 takes the latest closed candles **at ingestion time**. It does not pretend to
+reconstruct the market as it stood when the message was written, and it does not
+quietly fetch historical candles keyed to a Telegram timestamp. Both instants are
+recorded — `analysis_message_at` in the context, `market_retrieved_at` in the
+manifest's provenance — so the gap between them is visible rather than implied.
+
+### Provenance
+
+Every Run records where its inputs came from, in `manifest.provenance`:
+
+```json
+{
+  "analysis_origin": "inbox:gold-20260828-0300-a1b2c3",
+  "market_origin": "metatrader5:XAUUSD:M15",
+  "analysis": {"event_id": "...", "payload_sha256": "1e13fc...", "event_source": "gold_analysis_bot"},
+  "market": {"provider": "metatrader5", "provider_symbol": "XAUUSD",
+             "canonical_symbol": "XAUUSD", "start_pos": 1,
+             "requested_at": "...", "retrieved_at": "...",
+             "latest_candle_at": "2026-08-28T02:45:00Z"}
+}
+```
+
+Together with the ledger's `event_id → payload_sha256 → run_id` mapping, this
+answers the question an audit actually has: *which analysis, and which candles,
+is this article built on?*
+
 ## Run directory structure
 
 ```
@@ -973,15 +1225,18 @@ src/goldpipeline/
                   fencing, integrity, claim resolver, prechecks, content safety,
                   review and finalizer policy, prompt builders, chunking, the
                   run / writer / reviewer / finalizer / publish-gate / publisher
-                  stages, and orchestrator.py + run_lock.py above them
+                  stages, orchestrator.py + run_lock.py above them, and
+                  inbox.py + ingestion.py feeding them
     adapters/     source, writer, reviewer, finalizer and publisher protocols;
-                  JSON file / Anthropic / OpenAI / Telegram / fake
-                  implementations
+                  JSON file / inbox / MetaTrader 5 / Anthropic / OpenAI /
+                  Telegram / fake implementations
     storage/      atomic writes, Run directory lifecycle
     config.py     environment settings; the only place a credential lives
     cli.py        argparse entry point
-fixtures/         realistic XAUUSD M15 sample data, plus an adversarial message
+fixtures/         realistic XAUUSD M15 sample data, a sample inbox event, and
+                  an adversarial message
 runs/             generated Runs (gitignored)
+inbox/            live analysis events and the ingestion ledger (gitignored)
 tests/
 ```
 
@@ -1032,15 +1287,26 @@ resume with terminal publish-side states, lazy client factories, a per-Run
 filesystem lock with no automatic stale-lock recovery, a serializable
 `PipelineExecutionResult`, and `pipeline-run` / `pipeline-resume`.
 
-**Deliberately not built:** live source adapters (Round 8), schedulers and cron
-(Round 9), dashboards, daemons, polling loops, filesystem watchers, automatic
-retry or reconciliation of an `UNCERTAIN` attempt, deleting or editing posted
-messages, databases, queues, a technical-analysis engine (RSI, MACD, ICT, bias,
-trade signals), web or news retrieval, sentiment analysis, and backtesting.
+**Round 8 - live input bridge and MT5 market data.** A durable file-drop inbox
+with atomic submission and claiming, a write-once `event_id -> run_id` ledger
+that reserves the run id before the Run exists, duplicate replay and id-conflict
+handling that fail closed, deterministic reconciliation of interrupted events, a
+read-only MetaTrader 5 source that excludes the forming candle and proves it,
+explicit broker-versus-canonical symbol handling, Run provenance in the manifest,
+and `pipeline-ingest` / `inbox-submit` / `inbox-process-one` / `inbox-reconcile`
+/ `mt5-check`.
+
+**Deliberately not built:** schedulers and cron (Round 9), a second Telegram bot
+reading another bot's messages (the Bot API does not allow it), historical
+snapshots reconstructed at message time, market calendars, dashboards, daemons,
+polling loops, filesystem watchers, automatic retry or reconciliation of an
+`UNCERTAIN` publish attempt, deleting or editing posted messages, databases,
+queues, a technical-analysis engine (RSI, MACD, ICT, bias, trade signals), web or
+news retrieval, sentiment analysis, and backtesting.
 
 `AnalysisContext` describes facts and carries the raw analysis; it holds no
 interpretation. The writer produces prose and an audit trail of the numbers it
 used. The reviewer judges that prose and says what to fix. The finalizer fixes
 it. The gate decides whether the result may be published, and the publisher
-sends it. Round 7 runs that sequence from one command, on demand. Reading fresh
-inputs from live sources is Round 8; running it on a schedule is Round 9.
+sends it. Round 7 runs that sequence from one command, on demand, and Round 8
+feeds it real analyses and real candles. Running it on a schedule is Round 9.

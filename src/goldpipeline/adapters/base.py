@@ -12,7 +12,7 @@ the provider sent, not a re-serialization of our interpretation of it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from goldpipeline.schemas.market import MarketDataInput
@@ -27,6 +27,19 @@ class LoadedSource[ModelT]:
     raw_payload: dict[str, Any]
     origin: str
     """Human-readable description of where this came from, for logs and audit."""
+
+    provenance: dict[str, Any] = field(default_factory=dict)
+    """Adapter-specific facts about *this fetch*, recorded in the Run manifest.
+
+    Where ``raw_payload`` is what the provider said, this is what the adapter
+    knows about the act of asking: which event id, which broker symbol, when the
+    request went out and when the answer came back. It never carries a
+    credential - an adapter that needs a key records the setting's name, not its
+    value.
+
+    Optional, and empty for the file adapters, whose origin path already says
+    everything there is to know.
+    """
 
 
 class AnalysisSource(Protocol):

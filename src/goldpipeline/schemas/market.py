@@ -105,8 +105,25 @@ class MarketDataInput(LenientModel):
             "every candle by hours without anyone noticing."
         ),
     )
+    provider_symbol: str | None = Field(
+        default=None,
+        description=(
+            "The provider's own name for this instrument, when it differs from "
+            "`symbol`. Brokers rename gold - XAUUSDm, GOLD, XAUUSD.a - and the "
+            "two names are recorded separately rather than one being inferred "
+            "from the other. Null when the provider uses the canonical name."
+        ),
+    )
     requested_at: datetime | None = Field(
         default=None, description="When the data was fetched; defaults to ingestion time."
+    )
+    retrieved_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the provider's answer came back. Recorded alongside "
+            "`requested_at` so an audit can tell how long a fetch took, and how "
+            "old the data already was when it arrived."
+        ),
     )
     data_from: datetime | None = Field(
         default=None, description="Declared start of coverage; derived from bars when absent."

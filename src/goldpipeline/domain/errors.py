@@ -541,6 +541,131 @@ class RunNotResumableError(OrchestrationError):
     code = "RUN_NOT_RESUMABLE"
 
 
+# --- live market data (Round 8) ------------------------------------------
+
+
+class MarketDataError(PipelineError):
+    """Base class for failures of a live market data provider."""
+
+    code = "MARKET_DATA_ERROR"
+
+
+class MarketDataConfigurationError(MarketDataError):
+    """Market data is misconfigured. Names the setting, never a credential."""
+
+    code = "MARKET_DATA_CONFIGURATION_ERROR"
+
+
+class Mt5NotInstalledError(MarketDataError):
+    """The MetaTrader5 package is not importable in this interpreter.
+
+    Kept distinct from a connection failure: one is fixed with ``pip``, the
+    other by starting a terminal, and telling an operator the wrong one wastes
+    an afternoon.
+    """
+
+    code = "MT5_NOT_INSTALLED"
+
+
+class Mt5InitializeError(MarketDataError):
+    """The terminal could not be reached. Carries the provider's own code only."""
+
+    code = "MT5_INITIALIZE_FAILED"
+
+
+class Mt5SymbolNotFoundError(MarketDataError):
+    """The configured symbol does not exist on this broker.
+
+    Never resolved by guessing a similar name. ``XAUUSD`` and ``XAUUSD.a`` can
+    be different instruments with different spreads, and quietly substituting
+    one for the other would publish prices nobody asked about.
+    """
+
+    code = "SYMBOL_NOT_FOUND"
+
+
+class Mt5SymbolNotSelectedError(MarketDataError):
+    """The symbol exists but could not be made visible in Market Watch."""
+
+    code = "SYMBOL_NOT_SELECTED"
+
+
+class InsufficientBarsError(MarketDataError):
+    """The provider returned fewer candles than were asked for."""
+
+    code = "INSUFFICIENT_BARS"
+
+
+class StaleMarketDataError(MarketDataError):
+    """The latest closed candle is too old to write about.
+
+    Often means the market is simply closed rather than that anything is
+    broken, so the message says so - but it still stops the Run, because an
+    article quoting Friday's close on Sunday evening is wrong either way.
+    """
+
+    code = "STALE_MARKET_DATA"
+
+
+class FormingCandleError(MarketDataError):
+    """The newest bar has not closed yet.
+
+    The one failure this provider exists to make impossible. A forming candle's
+    high, low and close all still move, so quoting one produces an article that
+    was false by the time anybody read it.
+    """
+
+    code = "FORMING_CANDLE_DETECTED"
+
+
+class Mt5ProviderError(MarketDataError):
+    """The provider failed in a way with no more specific meaning."""
+
+    code = "MT5_PROVIDER_ERROR"
+
+
+# --- ingestion (Round 8) -------------------------------------------------
+
+
+class IngestionError(PipelineError):
+    """Base class for failures of the analysis inbox."""
+
+    code = "INGESTION_ERROR"
+
+
+class InboxPayloadError(IngestionError):
+    """An inbox payload is missing, malformed, or not a shape we accept."""
+
+    code = "INBOX_PAYLOAD_INVALID"
+
+
+class EventConflictError(IngestionError):
+    """An ``event_id`` was reused for different content.
+
+    Fails closed and never overwrites the original mapping. The alternative -
+    accepting the newer payload - would silently detach an audit trail from the
+    article that was actually published under it.
+    """
+
+    code = "EVENT_ID_CONFLICT"
+
+
+class EventUnresolvedError(IngestionError):
+    """A previous attempt at this event never finished, and left a reservation.
+
+    Whether a Run exists for it is knowable but not from here; ``inbox-reconcile``
+    answers it deterministically. Until then the event is not re-ingested.
+    """
+
+    code = "EVENT_UNRESOLVED"
+
+
+class LedgerError(IngestionError):
+    """The ingestion ledger could not be read or written."""
+
+    code = "INGESTION_LEDGER_ERROR"
+
+
 __all__ = [
     "AnalysisTextTooLargeError",
     "ArtifactAlreadyExistsError",
@@ -549,6 +674,8 @@ __all__ = [
     "DuplicateTimestampError",
     "EmptyAnalysisTextError",
     "EmptyBarsError",
+    "EventConflictError",
+    "EventUnresolvedError",
     "FinalizationBlockedError",
     "FinalizeArtifactExistsError",
     "FinalizeConfigurationError",
@@ -557,13 +684,27 @@ __all__ = [
     "FinalizeProviderError",
     "FinalizeResponseError",
     "FinalizeTimeoutError",
+    "FormingCandleError",
+    "InboxPayloadError",
+    "IngestionError",
     "InputValidationError",
+    "InsufficientBarsError",
     "InvalidBarError",
     "LatestBarMismatchError",
+    "LedgerError",
+    "MarketDataConfigurationError",
+    "MarketDataError",
+    "Mt5InitializeError",
+    "Mt5NotInstalledError",
+    "Mt5ProviderError",
+    "Mt5SymbolNotFoundError",
+    "Mt5SymbolNotSelectedError",
     "NaiveTimestampError",
     "NormalizationError",
     "OrchestrationError",
     "PipelineError",
+    "PublishDecisionExistsError",
+    "PublishGateError",
     "PublisherArtifactExistsError",
     "PublisherAuthenticationError",
     "PublisherConfigurationError",
@@ -576,8 +717,6 @@ __all__ = [
     "PublisherRejectedError",
     "PublisherResponseError",
     "PublisherTransportAmbiguousError",
-    "PublishDecisionExistsError",
-    "PublishGateError",
     "ReviewArtifactExistsError",
     "ReviewConfigurationError",
     "ReviewError",
@@ -591,6 +730,7 @@ __all__ = [
     "RunNotReadyError",
     "RunNotResumableError",
     "RunNotReviewableError",
+    "StaleMarketDataError",
     "StorageError",
     "SymbolMismatchError",
     "UnknownTimezoneError",

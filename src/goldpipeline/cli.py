@@ -16,6 +16,7 @@ import sys
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from goldpipeline import PIPELINE_VERSION
 from goldpipeline.adapters.fake_finalizer import FakeFinalizerClient
@@ -24,18 +25,23 @@ from goldpipeline.adapters.fake_reviewer import FakeReviewerClient
 from goldpipeline.adapters.fake_writer import FakeWriterClient
 from goldpipeline.adapters.file_source import JsonFileAnalysisSource, JsonFileMarketDataSource
 from goldpipeline.adapters.finalizer_client import FinalizerClient, LazyFinalizerClient
+from goldpipeline.adapters.inbox_source import parse_event
 from goldpipeline.adapters.publisher_client import PublisherClient
 from goldpipeline.adapters.reviewer_client import ReviewerClient
 from goldpipeline.adapters.writer_client import WriterClient
 from goldpipeline.config import (
+    INBOX_DIR_ENV,
     FinalizerSettings,
+    MarketDataSettings,
     ReviewerSettings,
     TelegramSettings,
     WriterSettings,
+    inbox_dir_from_env,
 )
 from goldpipeline.domain.errors import (
     FinalizationBlockedError,
     FinalizeConfigurationError,
+    MarketDataError,
     PipelineError,
     PublisherConfigurationError,
     ReviewConfigurationError,
@@ -43,9 +49,17 @@ from goldpipeline.domain.errors import (
     WriterConfigurationError,
 )
 from goldpipeline.logging_setup import configure_logging
+from goldpipeline.schemas.ingestion import IngestOutcome, IngestResult
 from goldpipeline.schemas.orchestration import PipelineMode, PipelineStatus
 from goldpipeline.schemas.quality import DataQuality
 from goldpipeline.services.finalizer import finalize_run
+from goldpipeline.services.inbox import Inbox
+from goldpipeline.services.ingestion import (
+    IngestionContext,
+    ingest_file,
+    ingest_next,
+    reconcile,
+)
 from goldpipeline.services.orchestrator import (
     PipelineClients,
     PipelineRunResult,
@@ -292,6 +306,61 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_pipeline_arguments(pipeline_resume)
 
+    ingest = subparsers.add_parser(
+        "pipeline-ingest",
+        help="Submit one analysis payload and drive it through the whole pipeline.",
+    )
+    ingest.add_argument(
+        "--analysis",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="JSON file holding one inbox event.",
+    )
+    _add_ingest_arguments(ingest)
+    _add_pipeline_arguments(ingest)
+
+    process = subparsers.add_parser(
+        "inbox-process-one",
+        help="Claim the oldest waiting inbox event and drive it through the pipeline.",
+    )
+    _add_ingest_arguments(process)
+    _add_pipeline_arguments(process)
+
+    submit = subparsers.add_parser(
+        "inbox-submit",
+        help="Place one analysis payload in the inbox, atomically. Does not process it.",
+    )
+    submit.add_argument("--file", required=True, type=Path, metavar="PATH")
+    submit.add_argument("--inbox-dir", type=Path, default=None)
+    submit.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+
+    reconcile_parser = subparsers.add_parser(
+        "inbox-reconcile",
+        help="Report - and optionally resolve - events left behind by an interrupted run.",
+    )
+    reconcile_parser.add_argument("--inbox-dir", type=Path, default=None)
+    reconcile_parser.add_argument(
+        "--runs-dir", type=Path, default=DEFAULT_RUNS_DIR, help=f"Default: {DEFAULT_RUNS_DIR}."
+    )
+    reconcile_parser.add_argument(
+        "--recover",
+        action="store_true",
+        help="Act on the report instead of only printing it. Never re-runs a stage.",
+    )
+    reconcile_parser.add_argument("--json", action="store_true")
+
+    check = subparsers.add_parser(
+        "mt5-check",
+        help="Read-only MetaTrader 5 diagnostic: symbol, timeframe, latest closed candle.",
+    )
+    check.add_argument(
+        "--fake-mt5",
+        action="store_true",
+        help="Run the diagnostic against the offline stand-in instead of a terminal.",
+    )
+    check.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+
     show = subparsers.add_parser("show-run", help="Print a summary of an existing Run.")
     show.add_argument("run_id", help="Run identifier, e.g. 20260828_022701_a83f2c.")
     show.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
@@ -358,6 +427,39 @@ def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
         "--finalizer-model", default=None, help="Overrides ANTHROPIC_FINALIZER_MODEL."
     )
     parser.add_argument("--json", action="store_true", help="Emit the execution result as JSON.")
+
+
+def _add_ingest_arguments(parser: argparse.ArgumentParser) -> None:
+    """Attach the flags shared by the ingestion commands."""
+    parser.add_argument(
+        "--inbox-dir",
+        type=Path,
+        default=None,
+        help=f"Inbox root. Default: ${INBOX_DIR_ENV} or 'inbox'.",
+    )
+    parser.add_argument(
+        "--market-source",
+        choices=("mt5", "file"),
+        default="mt5",
+        help="Where candles come from. 'file' needs --ohlc. Default: mt5.",
+    )
+    parser.add_argument(
+        "--ohlc",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="JSON file of candles, for --market-source file.",
+    )
+    parser.add_argument(
+        "--fake-mt5",
+        action="store_true",
+        help="Use the offline candle stand-in. No terminal, no market data.",
+    )
+    parser.add_argument(
+        "--normalize-only",
+        action="store_true",
+        help="Stop once the Run exists. Nothing after ingestion runs.",
+    )
 
 
 def _parse_now(value: str) -> datetime:
@@ -1048,6 +1150,290 @@ def _pipeline_exit_code(outcome: PipelineRunResult) -> int:
     return EXIT_BLOCKED
 
 
+def _fake_mt5_module() -> Any:
+    """The offline stand-in behind ``--fake-mt5``.
+
+    It models one plausible broker - one that offers ``XAUUSD`` and a handful of
+    neighbours - rather than agreeing with whatever symbol happens to be
+    configured. That way a misconfigured symbol fails offline exactly as it
+    would against a real terminal, which is most of what the flag is for.
+    """
+    from goldpipeline.adapters.fake_mt5 import FakeMt5Module
+
+    return FakeMt5Module()
+
+
+def _market_source(args: argparse.Namespace) -> Any:
+    """Build the market data source this invocation asked for.
+
+    Nothing is constructed until here, and the MetaTrader package is imported
+    only inside the source it belongs to - so `--market-source file` and
+    `--fake-mt5` work on a machine that has never had a terminal installed.
+    """
+    if args.market_source == "file":
+        if args.ohlc is None:
+            raise _UsageError("--market-source file needs --ohlc PATH")
+        return JsonFileMarketDataSource(args.ohlc)
+
+    settings = MarketDataSettings.from_env()
+
+    from goldpipeline.adapters.mt5_market import MetaTrader5MarketDataSource
+
+    return MetaTrader5MarketDataSource(
+        settings, module=_fake_mt5_module() if args.fake_mt5 else None
+    )
+
+
+def _ingestion_context(args: argparse.Namespace) -> IngestionContext:
+    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env()
+    inbox = Inbox(inbox_root)
+    inbox.ensure_layout()
+    return IngestionContext(
+        inbox=inbox,
+        store=RunStore(args.runs_dir),
+        market_source=_market_source(args),
+        expected_symbol=MarketDataSettings.from_env().canonical_symbol,
+    )
+
+
+def _cmd_pipeline_ingest(args: argparse.Namespace) -> int:
+    # Resolved first, before anything is fetched or written: a refused flag
+    # combination must cost nothing, and must not leave a Run behind.
+    _resolve_mode(args)
+    context = _ingestion_context(args)
+    return _after_ingest(args, ingest_file(context, args.analysis))
+
+
+def _cmd_inbox_process_one(args: argparse.Namespace) -> int:
+    _resolve_mode(args)
+    context = _ingestion_context(args)
+    return _after_ingest(args, ingest_next(context))
+
+
+def _after_ingest(args: argparse.Namespace, result: IngestResult) -> int:
+    """Report an ingestion and, unless told otherwise, continue into the pipeline.
+
+    A replay continues too. The producer's retry may be the first invocation to
+    get past the writer, and refusing to touch an already-ingested Run would
+    strand it at ``NORMALIZED`` forever.
+    """
+    if not result.succeeded or args.normalize_only:
+        return _report_ingest(result, as_json=args.json)
+
+    assert result.run_id is not None
+    mode = _resolve_mode(args)
+    try:
+        outcome = resume_pipeline(
+            run_id=result.run_id,
+            store=RunStore(args.runs_dir),
+            clients=_pipeline_clients(args),
+            mode=mode,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"{exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if args.json:
+        payload = json.loads(outcome.result.model_dump_json())
+        payload["ingest"] = json.loads(result.model_dump_json())
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return _pipeline_exit_code(outcome)
+
+    stream = sys.stdout if outcome.succeeded else sys.stderr
+    print(f"Event: {result.event_id} ({result.outcome})", file=stream)
+    return _report_execution(outcome, as_json=False)
+
+
+def _report_ingest(result: IngestResult, *, as_json: bool) -> int:
+    """Print an ingestion outcome and map it onto an exit code."""
+    code = _ingest_exit_code(result)
+    if as_json:
+        print(result.model_dump_json(indent=2))
+        return code
+
+    # Keyed to the exit code, not to whether a Run appeared: an empty inbox is a
+    # normal, successful answer and does not belong on stderr.
+    stream = sys.stdout if code == EXIT_OK else sys.stderr
+    print(f"Ingestion: {result.outcome}", file=stream)
+    if result.event_id:
+        print(f"Event: {result.event_id}", file=stream)
+    if result.run_id:
+        print(f"Run: {result.run_id}", file=stream)
+    if result.payload_sha256:
+        print(f"Payload SHA-256: {result.payload_sha256}", file=stream)
+    if result.source_path:
+        print(f"Event file: {result.source_path}", file=stream)
+    if result.detail:
+        print(f"Detail: {result.detail}", file=stream)
+    return _ingest_exit_code(result)
+
+
+def _ingest_exit_code(result: IngestResult) -> int:
+    """A refusal is not a crash, and a replay is not a failure."""
+    if result.succeeded or result.outcome is IngestOutcome.NOTHING_TO_DO:
+        return EXIT_OK
+    if result.outcome is IngestOutcome.INVALID_PAYLOAD:
+        return EXIT_INVALID_DATA
+    return EXIT_BLOCKED
+
+
+def _cmd_inbox_submit(args: argparse.Namespace) -> int:
+    """Place a payload in the inbox without processing it."""
+    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env()
+    inbox = Inbox(inbox_root)
+
+    try:
+        payload = json.loads(args.file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        print(f"payload could not be read: {exc}", file=sys.stderr)
+        return EXIT_INVALID_DATA
+    if not isinstance(payload, dict):
+        print("payload must be a JSON object", file=sys.stderr)
+        return EXIT_INVALID_DATA
+
+    event = parse_event(payload)
+    target = inbox.submit(payload, event_id=event.event_id)
+
+    if args.json:
+        print(
+            json.dumps(
+                {"event_id": event.event_id, "path": str(target)}, ensure_ascii=False, indent=2
+            )
+        )
+    else:
+        print(f"Submitted: {event.event_id}")
+        print(f"Waiting at: {target}")
+    return EXIT_OK
+
+
+def _cmd_inbox_reconcile(args: argparse.Namespace) -> int:
+    """Report what happened to events an interrupted run left behind."""
+    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env()
+    inbox = Inbox(inbox_root)
+    inbox.ensure_layout()
+    context = IngestionContext(
+        inbox=inbox,
+        store=RunStore(args.runs_dir),
+        # Reconciliation reads a ledger and some manifests. It never fetches.
+        market_source=_NoMarketSource(),
+    )
+    reports = reconcile(context, recover=args.recover)
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "recovered": args.recover,
+                    "orphans": [
+                        {
+                            "event_id": report.event_id,
+                            "run_id": report.run_id,
+                            "run_status": report.run_status,
+                            "resolution": report.resolution,
+                            "recovered_to": report.recovered_to,
+                        }
+                        for report in reports
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return EXIT_OK
+
+    if not reports:
+        print("No interrupted events. Nothing to reconcile.")
+        return EXIT_OK
+
+    print(f"Interrupted events: {len(reports)}")
+    for report in reports:
+        print(f"  {report.event_id}")
+        print(f"    run:        {report.run_id or '(never reserved)'}")
+        print(f"    resolution: {report.resolution}")
+        if report.recovered_to:
+            print(f"    moved to:   {report.recovered_to}")
+    if not args.recover:
+        print("\nRe-run with --recover to act on this report.")
+    return EXIT_OK
+
+
+class _NoMarketSource:
+    """Stands in where a market source is structurally required but never used."""
+
+    def load(self) -> Any:  # pragma: no cover - calling it is the bug
+        raise AssertionError("this command does not fetch market data")
+
+
+def _cmd_mt5_check(args: argparse.Namespace) -> int:
+    """Read-only terminal diagnostic. Places no order and writes no Run."""
+    settings = MarketDataSettings.from_env()
+
+    from goldpipeline.adapters.mt5_market import MetaTrader5MarketDataSource
+
+    source = MetaTrader5MarketDataSource(
+        settings, module=_fake_mt5_module() if args.fake_mt5 else None
+    )
+
+    report: dict[str, Any] = {
+        "provider_symbol": settings.provider_symbol,
+        "canonical_symbol": settings.canonical_symbol,
+        "timeframe": settings.timeframe,
+        "requested_bars": settings.bar_count,
+        "max_data_age_minutes": settings.max_data_age_minutes,
+        "connected": False,
+    }
+
+    try:
+        loaded = source.load()
+    except MarketDataError as exc:
+        report["error"] = {"code": exc.code, "message": exc.message, "details": exc.details}
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        else:
+            _print_mt5_report(report, stream=sys.stderr)
+        return _classify_failure(exc)
+
+    snapshot = loaded.model
+    report.update(
+        {
+            "connected": True,
+            "symbol_available": True,
+            "returned_bars": len(snapshot.bars),
+            "latest_closed_candle": snapshot.bars[-1].timestamp.isoformat().replace("+00:00", "Z"),
+            "latest_close": str(snapshot.bars[-1].close),
+            "provenance": loaded.provenance,
+        }
+    )
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+    else:
+        _print_mt5_report(report, stream=sys.stdout)
+    return EXIT_OK
+
+
+def _print_mt5_report(report: dict[str, Any], *, stream: Any) -> None:
+    print(
+        f"MT5 terminal:      {'connected' if report['connected'] else 'not reachable'}", file=stream
+    )
+    print(f"Configured symbol: {report['provider_symbol']}", file=stream)
+    print(f"Canonical symbol:  {report['canonical_symbol']}", file=stream)
+    print(f"Timeframe:         {report['timeframe']}", file=stream)
+    print(f"Requested bars:    {report['requested_bars']}", file=stream)
+    if report["connected"]:
+        print(f"Returned bars:     {report['returned_bars']}", file=stream)
+        print(f"Latest closed:     {report['latest_closed_candle']}", file=stream)
+        print(f"Latest close:      {report['latest_close']}", file=stream)
+        print("Data quality:      OK (closed candle, within the age limit)", file=stream)
+    if "error" in report:
+        error = report["error"]
+        print(f"Problem:           [{error['code']}] {error['message']}", file=stream)
+        candidates = error["details"].get("candidates")
+        if candidates:
+            print(f"Symbols offered:   {', '.join(candidates)}", file=stream)
+            print("                   (listed, never substituted)", file=stream)
+
+
 def _cmd_show_run(args: argparse.Namespace) -> int:
     store = RunStore(args.runs_dir)
     try:
@@ -1111,6 +1497,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "publish": _cmd_publish,
         "pipeline-run": _cmd_pipeline_run,
         "pipeline-resume": _cmd_pipeline_resume,
+        "pipeline-ingest": _cmd_pipeline_ingest,
+        "inbox-process-one": _cmd_inbox_process_one,
+        "inbox-submit": _cmd_inbox_submit,
+        "inbox-reconcile": _cmd_inbox_reconcile,
+        "mt5-check": _cmd_mt5_check,
         "show-run": _cmd_show_run,
         "list-runs": _cmd_list_runs,
     }

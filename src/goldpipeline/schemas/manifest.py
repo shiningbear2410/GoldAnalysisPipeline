@@ -106,6 +106,28 @@ class RunError(MutableModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class RunProvenance(MutableModel):
+    """Where a Run's inputs came from, in the words of the adapters that fetched them.
+
+    Separate from the source *files*, which record what a provider said. This
+    records the act of asking: which inbox event, which broker symbol, when the
+    request went out and when the answer came back. Together they answer the
+    question an audit actually has - *which analysis, and which candles, is this
+    article built on?*
+
+    The per-adapter halves are open dictionaries on purpose. A live Telegram
+    reader and a MetaTrader terminal have almost nothing in common to describe,
+    and a union type covering both would grow a branch for every provider ever
+    added. Adapters are expected to keep credentials out of them; the ones here
+    record a setting's name when they need to refer to it, never its value.
+    """
+
+    analysis_origin: str = Field(description="Human-readable source of the analysis.")
+    market_origin: str = Field(description="Human-readable source of the market data.")
+    analysis: dict[str, Any] = Field(default_factory=dict)
+    market: dict[str, Any] = Field(default_factory=dict)
+
+
 class RunManifest(MutableModel):
     """Top-level description of a Run directory."""
 
@@ -122,6 +144,10 @@ class RunManifest(MutableModel):
         default_factory=list, description="Files this pipeline derived."
     )
     events: list[RunEvent] = Field(default_factory=list)
+    provenance: RunProvenance | None = Field(
+        default=None,
+        description="Where the inputs came from. Absent on Runs created before Round 8.",
+    )
     error: RunError | None = None
 
     def record_event(self, stage: str, status: str, message: str | None = None) -> None:
@@ -130,4 +156,12 @@ class RunManifest(MutableModel):
         self.updated_at = utc_now()
 
 
-__all__ = ["ArtifactRef", "MutableModel", "RunError", "RunEvent", "RunManifest", "RunStatus"]
+__all__ = [
+    "ArtifactRef",
+    "MutableModel",
+    "RunError",
+    "RunEvent",
+    "RunManifest",
+    "RunProvenance",
+    "RunStatus",
+]

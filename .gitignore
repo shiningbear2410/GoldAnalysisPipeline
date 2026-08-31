@@ -7,6 +7,10 @@
 runs/*
 !runs/.gitkeep
 
+# the live analysis inbox holds production input and its ledger, not source
+inbox/*
+!inbox/.gitkeep
+
 # python
 __pycache__/
 *.py[cod]
