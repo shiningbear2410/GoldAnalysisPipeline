@@ -981,3 +981,112 @@ def age_run(runs_dir: Path, run_id: str, created_at: datetime) -> None:
     manifest = run.load_manifest()
     manifest.created_at = created_at
     run.save_manifest(manifest)
+
+
+# --------------------------------------------------------------------------
+# Round 9.1 helpers
+# --------------------------------------------------------------------------
+
+
+class _FakeBackend:
+    """Stands in for a keyring backend, named to match a real one."""
+
+    def __init__(self, name: str) -> None:
+        module, _, cls = name.rpartition(".")
+        self.__class__ = type(cls, (_FakeBackend,), {"__module__": module})
+        self._name = name
+
+
+class FakeKeyringModule:
+    """Offline stand-in for the keyring module.
+
+    Every credential test in this repository runs against this, so no test reads,
+    writes or lists an entry in a real credential manager. It models the two
+    behaviours that matter: a backend with a *name* the adapter must judge, and
+    failures raised rather than returned.
+    """
+
+    def __init__(
+        self,
+        stored: dict[tuple[str, str], str] | None = None,
+        *,
+        backend_name: str = "keyring.backends.Windows.WinVaultKeyring",
+        backend_error: Exception | None = None,
+        read_error: Exception | None = None,
+        write_error: Exception | None = None,
+        delete_error: Exception | None = None,
+    ) -> None:
+        self.stored = dict(stored or {})
+        self.backend_name = backend_name
+        self.backend_error = backend_error
+        self.read_error = read_error
+        self.write_error = write_error
+        self.delete_error = delete_error
+        self.reads: list[tuple[str, str]] = []
+        """Every lookup, so a test can assert on entry naming."""
+
+    def get_keyring(self) -> Any:
+        if self.backend_error is not None:
+            raise self.backend_error
+        return _FakeBackend(self.backend_name)
+
+    def get_password(self, service: str, entry: str) -> str | None:
+        self.reads.append((service, entry))
+        if self.read_error is not None:
+            raise self.read_error
+        return self.stored.get((service, entry))
+
+    def set_password(self, service: str, entry: str, value: str) -> None:
+        if self.write_error is not None:
+            raise self.write_error
+        self.stored[(service, entry)] = value
+
+    def delete_password(self, service: str, entry: str) -> None:
+        if self.delete_error is not None:
+            raise self.delete_error
+        if (service, entry) not in self.stored:
+            raise _PasswordDeleteError("not found")
+        del self.stored[(service, entry)]
+
+
+class _PasswordDeleteError(Exception):
+    """Shaped like keyring's own missing-entry error, which the adapter reads."""
+
+
+_PasswordDeleteError.__name__ = "PasswordDeleteError"
+
+
+def fail_backend_module(**kwargs: Any) -> FakeKeyringModule:
+    """keyring's own no-op backend: reports success, stores nothing."""
+    return FakeKeyringModule(backend_name="keyring.backends.fail.Keyring", **kwargs)
+
+
+def plaintext_backend_module(**kwargs: Any) -> FakeKeyringModule:
+    """A backend that would keep credentials in a readable file."""
+    return FakeKeyringModule(backend_name="keyrings.alt.file.PlaintextKeyring", **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def no_real_credential_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every test away from the machine's real credential manager.
+
+    ``keyring`` is installed in this environment, so without this the CLI's
+    composite provider would consult the operating system's actual vault on any
+    miss. That read is harmless, but a suite that touches real credential
+    storage is no longer a suite anyone can run anywhere - so the backend is
+    reported unavailable by default and tests that want a store substitute their
+    own offline one.
+    """
+    from goldpipeline import cli
+    from goldpipeline.adapters.windows_credentials import BackendReport
+
+    monkeypatch.setattr(
+        cli,
+        "inspect_backend",
+        lambda *args, **kwargs: BackendReport(
+            available=False,
+            secure=False,
+            backend="none",
+            detail="tests never reach the machine's credential store",
+        ),
+    )

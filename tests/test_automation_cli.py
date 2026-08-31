@@ -312,7 +312,10 @@ def test_publishing_credentials_are_not_required_when_publishing_is_off(
     """Requirements 46 and 50.
 
     An operator generating articles but not publishing them needs no Telegram
-    credentials, and must not be told otherwise.
+    credentials, and must not be told otherwise. Asserted as the absence of a
+    *Telegram* blocker rather than overall readiness: Round 9.1 added a separate,
+    correct blocker for credentials that live only in this session, and
+    conflating the two would let a real Telegram regression hide behind it.
     """
     from conftest import FAKE_API_KEY, FAKE_OPENAI_KEY
 
@@ -320,13 +323,12 @@ def test_publishing_credentials_are_not_required_when_publishing_is_off(
     monkeypatch.setenv("OPENAI_API_KEY", FAKE_OPENAI_KEY)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
 
-    code = invoke(automation_args(dirs, "automation-preflight", "--json"))
+    invoke(automation_args(dirs, "automation-preflight", "--json"))
     payload = json.loads(capsys.readouterr().out)
 
-    assert code == EXIT_OK
     assert payload["telegram"] == "missing"
-    assert payload["task_readiness"] == "READY"
-    assert payload["blockers"] == []
+    assert not any("Telegram" in blocker for blocker in payload["blockers"])
+    assert not any("publishing" in blocker for blocker in payload["blockers"])
 
 
 def test_a_target_mismatch_shows_up_in_preflight(

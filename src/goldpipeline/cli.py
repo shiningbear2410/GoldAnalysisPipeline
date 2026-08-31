@@ -29,6 +29,15 @@ from goldpipeline.adapters.finalizer_client import FinalizerClient, LazyFinalize
 from goldpipeline.adapters.inbox_source import parse_event
 from goldpipeline.adapters.publisher_client import PublisherClient
 from goldpipeline.adapters.reviewer_client import ReviewerClient
+from goldpipeline.adapters.secrets import (
+    CompositeSecretProvider,
+    EnvironmentSecretProvider,
+    SecretProvider,
+)
+from goldpipeline.adapters.windows_credentials import (
+    WindowsCredentialSecretProvider,
+    inspect_backend,
+)
 from goldpipeline.adapters.writer_client import WriterClient
 from goldpipeline.config import (
     AUTOMATION_ENABLED_ENV,
@@ -42,6 +51,7 @@ from goldpipeline.config import (
     inbox_dir_from_env,
 )
 from goldpipeline.domain.errors import (
+    CredentialNotFoundError,
     FinalizationBlockedError,
     FinalizeConfigurationError,
     MarketDataError,
@@ -57,6 +67,7 @@ from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.ingestion import IngestOutcome, IngestResult
 from goldpipeline.schemas.orchestration import PipelineMode, PipelineStatus
 from goldpipeline.schemas.quality import DataQuality
+from goldpipeline.schemas.secrets import SecretName, SecretSource, SecretStatus
 from goldpipeline.services.automation import (
     DEFERRED,
     EXPIRED,
@@ -420,6 +431,25 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--xml", action="store_true", help="Print the task XML.")
     plan.add_argument("--json", action="store_true", help="Emit the plan as JSON.")
 
+    secrets_status = subparsers.add_parser(
+        "secrets-status",
+        help="Report which credentials are available and from where. Prints no values.",
+    )
+    secrets_status.add_argument("--json", action="store_true")
+
+    secrets_set = subparsers.add_parser(
+        "secrets-set",
+        help="Store one credential in the OS credential manager. Prompts invisibly.",
+    )
+    secrets_set.add_argument("name", choices=sorted(_SECRET_CHOICES))
+    # Deliberately no --value, --token or --api-key: a secret on a command line
+    # lands in shell history and in every process listing on the machine.
+
+    secrets_delete = subparsers.add_parser(
+        "secrets-delete", help="Remove one credential from the OS credential manager."
+    )
+    secrets_delete.add_argument("name", choices=sorted(_SECRET_CHOICES))
+
     show = subparsers.add_parser("show-run", help="Print a summary of an existing Run.")
     show.add_argument("run_id", help="Run identifier, e.g. 20260828_022701_a83f2c.")
     show.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
@@ -706,7 +736,7 @@ def _writer_client(*, fake: bool, model: str | None) -> WriterClient:
     """
     if fake:
         return FakeWriterClient()
-    settings = WriterSettings.from_env(model_override=model)
+    settings = WriterSettings.from_env(model_override=model, secrets=_secret_provider())
     from goldpipeline.adapters.anthropic_writer import AnthropicWriterClient
 
     return AnthropicWriterClient(settings)
@@ -788,7 +818,7 @@ def _reviewer_client(*, fake: bool, model: str | None) -> ReviewerClient:
     """
     if fake:
         return FakeReviewerClient()
-    settings = ReviewerSettings.from_env(model_override=model)
+    settings = ReviewerSettings.from_env(model_override=model, secrets=_secret_provider())
     from goldpipeline.adapters.openai_reviewer import OpenAIReviewerClient
 
     return OpenAIReviewerClient(settings)
@@ -877,7 +907,9 @@ def _finalizer_client(*, fake: bool, model: str | None) -> FinalizerClient:
 
     from goldpipeline.adapters.anthropic_finalizer import AnthropicFinalizerClient
 
-    return AnthropicFinalizerClient(FinalizerSettings.from_env(model_override=model))
+    return AnthropicFinalizerClient(
+        FinalizerSettings.from_env(model_override=model, secrets=_secret_provider())
+    )
 
 
 def _cmd_finalize(args: argparse.Namespace) -> int:
@@ -1033,7 +1065,7 @@ def _publisher_client(*, fake: bool) -> tuple[PublisherClient, str]:
     if fake:
         return FakePublisherClient(), FAKE_TARGET_CHAT
 
-    settings = TelegramSettings.from_env()
+    settings = TelegramSettings.from_env(secrets=_secret_provider())
     from goldpipeline.adapters.telegram_publisher import TelegramPublisherClient
 
     return TelegramPublisherClient(settings), settings.target_chat
@@ -1543,7 +1575,7 @@ def _worker_context(args: argparse.Namespace) -> WorkerContext:
 
     target: str | None = None
     if settings.auto_publish_enabled and not args.fake_publisher:
-        target = TelegramSettings.from_env().target_chat
+        target = TelegramSettings.from_env(secrets=_secret_provider()).target_chat
     elif settings.auto_publish_enabled:
         # The offline publisher has no destination of its own, so the allowlist
         # is checked against the stand-in's channel. Nothing leaves the machine.
@@ -1779,12 +1811,16 @@ def _cmd_automation_status(args: argparse.Namespace) -> int:
 def _cmd_automation_preflight(args: argparse.Namespace) -> int:
     """Report whether unattended operation is configured, naming no values."""
     settings = AutomationSettings.from_env()
+    backend = inspect_backend()
+    statuses = {status.name: status for status in _secret_statuses()}
     report: dict[str, Any] = {
         "automation_enabled": settings.enabled,
         "auto_publish_enabled": settings.auto_publish_enabled,
-        "anthropic": _configured(WriterSettings.from_env),
-        "openai": _configured(ReviewerSettings.from_env),
-        "telegram": _configured(TelegramSettings.from_env),
+        "anthropic": statuses[SecretName.ANTHROPIC_API_KEY].summary,
+        "openai": statuses[SecretName.OPENAI_API_KEY].summary,
+        "telegram": statuses[SecretName.TELEGRAM_BOT_TOKEN].summary,
+        "credential_backend": backend.backend,
+        "credential_backend_secure": backend.secure,
         "mt5": _mt5_available(args),
         "allowed_target": settings.auto_publish_allowed_target,
         "configured_target": None,
@@ -1794,15 +1830,36 @@ def _cmd_automation_preflight(args: argparse.Namespace) -> int:
     blockers: list[str] = report["blockers"]
     if report["mt5"] != "available":
         blockers.append("MT5 is not reachable; new events will defer rather than run")
-    if report["anthropic"] == "missing" or report["openai"] == "missing":
+    if not statuses[SecretName.ANTHROPIC_API_KEY].configured or not (
+        statuses[SecretName.OPENAI_API_KEY].configured
+    ):
         # Only a blocker for *new* work. A Run resumed at the gate needs neither.
         blockers.append("writer/reviewer credentials are missing; new events cannot be drafted")
 
+    if not backend.ready:
+        # Not a blocker on its own - process-environment credentials still
+        # work for a person at a keyboard. It *is* a blocker for a scheduled
+        # task, which inherits no session.
+        blockers.append(
+            "no secure credential store is available, so a scheduled task would find no credentials"
+        )
+
+    session_only = [
+        str(name) for name, status in statuses.items() if status.source is SecretSource.PROCESS_ENV
+    ]
+    if session_only:
+        # The trap this whole round exists to close: variables set with
+        # `$env:` live in one process tree, and Task Scheduler starts a new one.
+        blockers.append(
+            f"{', '.join(session_only)} come from this session only; "
+            "a scheduled task will not see them"
+        )
+
     if settings.auto_publish_enabled:
-        if report["telegram"] == "missing":
+        if not statuses[SecretName.TELEGRAM_BOT_TOKEN].configured:
             blockers.append("unattended publishing is on but Telegram is not configured")
         else:
-            configured = TelegramSettings.from_env().target_chat
+            configured = TelegramSettings.from_env(secrets=_secret_provider()).target_chat
             report["configured_target"] = configured
             if settings.auto_publish_allowed_target != configured:
                 blockers.append(
@@ -1816,6 +1873,8 @@ def _cmd_automation_preflight(args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
         return EXIT_OK if not blockers else EXIT_BLOCKED
 
+    print(f"Credential store:  {backend.backend}")
+    print(f"                   {'secure' if backend.secure else 'NOT trusted'}")
     print(f"MT5:               {report['mt5']}")
     print(f"Anthropic:         {report['anthropic']}")
     print(f"OpenAI:            {report['openai']}")
@@ -1902,6 +1961,139 @@ def _cmd_automation_task_plan(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+_SECRET_CHOICES = {
+    "anthropic": SecretName.ANTHROPIC_API_KEY,
+    "openai": SecretName.OPENAI_API_KEY,
+    "telegram": SecretName.TELEGRAM_BOT_TOKEN,
+}
+"""Short names an operator types, mapped to the credential each stands for."""
+
+
+def _credential_store() -> WindowsCredentialSecretProvider:
+    """The operating system's credential store.
+
+    A single seam, so tests can substitute an offline store without any test in
+    this repository touching a real credential manager.
+    """
+    return WindowsCredentialSecretProvider()
+
+
+def _secret_provider() -> CompositeSecretProvider:
+    """Process environment first, then the OS credential store.
+
+    The credential store is only added when its backend is actually secure and
+    reachable. On a machine without one this degrades to exactly the behaviour
+    every earlier round had - environment variables - rather than raising on
+    every lookup.
+    """
+    providers: list[SecretProvider] = [EnvironmentSecretProvider()]
+    if inspect_backend().ready:
+        providers.append(_credential_store())
+    return CompositeSecretProvider(providers)
+
+
+def _secret_statuses() -> list[SecretStatus]:
+    """Resolve every credential's availability, keeping no value.
+
+    The value returned by the provider is deliberately dropped on the same line
+    it is produced: this function exists to answer "is it there?", and holding
+    the answer any longer than that would be the beginning of a leak.
+    """
+    provider = _secret_provider()
+    statuses: list[SecretStatus] = []
+    for name in SecretName:
+        try:
+            value, source = provider.resolve(name)
+        except PipelineError as exc:
+            statuses.append(
+                SecretStatus(name=name, configured=False, detail=f"[{exc.code}] {exc.message}")
+            )
+            continue
+        statuses.append(SecretStatus(name=name, configured=value is not None, source=source))
+    return statuses
+
+
+def _cmd_secrets_status(args: argparse.Namespace) -> int:
+    """Report credential availability. Never prints a value."""
+    report = inspect_backend()
+    statuses = _secret_statuses()
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "backend": report.backend,
+                    "backend_available": report.available,
+                    "backend_secure": report.secure,
+                    "backend_detail": report.detail,
+                    "secrets": [json.loads(status.model_dump_json()) for status in statuses],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return EXIT_OK
+
+    print(f"Credential backend: {report.backend}")
+    print(f"                    {'secure' if report.secure else 'NOT trusted'} - {report.detail}")
+    print()
+    for status in statuses:
+        print(f"{status.name:<20} {status.summary}")
+        if status.detail:
+            print(f"{'':<20} {status.detail}")
+    print("\nValues are never printed by this command, only their presence and source.")
+    return EXIT_OK
+
+
+def _cmd_secrets_set(args: argparse.Namespace) -> int:
+    """Store one credential, prompting invisibly.
+
+    The secret is typed straight into this process and handed to the credential
+    store. It never appears as an argument, so it cannot reach shell history, a
+    process listing, or a terminal transcript.
+    """
+    import getpass
+
+    name = _SECRET_CHOICES[args.name]
+    report = inspect_backend()
+    if not report.ready:
+        print(f"Credential backend: {report.backend}", file=sys.stderr)
+        print(f"Refusing to store {name}: {report.detail}", file=sys.stderr)
+        print(
+            "Nothing was written. No file or environment variable was created as a fallback.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    print(f"Storing {name} in {report.backend}.")
+    print("The value is not echoed and is not saved to shell history.")
+    try:
+        value = getpass.getpass(f"{name}: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled. Nothing was written.", file=sys.stderr)
+        return EXIT_ERROR
+
+    if not value.strip():
+        print("Empty value. Nothing was written.", file=sys.stderr)
+        return EXIT_INVALID_DATA
+
+    _credential_store().set_secret(name, value)
+    print(f"Stored. {name} is now available to a scheduled task running as this user.")
+    return EXIT_OK
+
+
+def _cmd_secrets_delete(args: argparse.Namespace) -> int:
+    """Remove one credential, and only that one."""
+    name = _SECRET_CHOICES[args.name]
+    try:
+        _credential_store().delete_secret(name)
+    except CredentialNotFoundError:
+        print(f"No stored credential for {name}. Nothing to remove.")
+        return EXIT_OK
+    print(f"Removed {name} from the credential store.")
+    return EXIT_OK
+
+
 def _cmd_show_run(args: argparse.Namespace) -> int:
     store = RunStore(args.runs_dir)
     try:
@@ -1975,6 +2167,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "automation-status": _cmd_automation_status,
         "automation-preflight": _cmd_automation_preflight,
         "automation-task-plan": _cmd_automation_task_plan,
+        "secrets-status": _cmd_secrets_status,
+        "secrets-set": _cmd_secrets_set,
+        "secrets-delete": _cmd_secrets_delete,
         "show-run": _cmd_show_run,
         "list-runs": _cmd_list_runs,
     }

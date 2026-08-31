@@ -710,6 +710,65 @@ class AutoPublishTargetMismatchError(AutoPublishNotAllowedError):
     code = "AUTO_PUBLISH_TARGET_MISMATCH"
 
 
+# --- credentials (Round 9.1) ---------------------------------------------
+
+
+class CredentialError(PipelineError):
+    """Base class for failures of the secure credential store.
+
+    Every message here names a setting, a service, or a backend - never a
+    value, and never the underlying exception's text. A credential store's own
+    errors can quote what they were handling.
+    """
+
+    code = "CREDENTIAL_ERROR"
+
+
+class CredentialBackendUnavailableError(CredentialError):
+    """No credential backend is installed or importable.
+
+    Distinct from an insecure one: this is fixed with ``pip``, that is fixed by
+    changing the machine's configuration, and telling an operator the wrong one
+    wastes an afternoon.
+    """
+
+    code = "CREDENTIAL_BACKEND_UNAVAILABLE"
+
+
+class InsecureCredentialBackendError(CredentialError):
+    """The active backend does not store secrets securely.
+
+    Fails closed rather than falling back. A store that keeps credentials in a
+    plaintext file is worse than no store at all, because it looks like one.
+    """
+
+    code = "INSECURE_CREDENTIAL_BACKEND"
+
+
+class CredentialNotFoundError(CredentialError):
+    """The store has no entry under that name."""
+
+    code = "CREDENTIAL_NOT_FOUND"
+
+
+class CredentialReadError(CredentialError):
+    """The store refused or failed to answer."""
+
+    code = "CREDENTIAL_READ_FAILED"
+
+
+class CredentialWriteError(CredentialError):
+    """The store refused or failed to save an entry."""
+
+    code = "CREDENTIAL_WRITE_FAILED"
+
+
+class CredentialDeleteError(CredentialError):
+    """The store refused or failed to remove an entry."""
+
+    code = "CREDENTIAL_DELETE_FAILED"
+
+
 __all__ = [
     "AnalysisTextTooLargeError",
     "ArtifactAlreadyExistsError",
@@ -719,6 +778,12 @@ __all__ = [
     "AutomationConfigurationError",
     "AutomationError",
     "ContextIntegrityError",
+    "CredentialBackendUnavailableError",
+    "CredentialDeleteError",
+    "CredentialError",
+    "CredentialNotFoundError",
+    "CredentialReadError",
+    "CredentialWriteError",
     "DuplicateTimestampError",
     "EmptyAnalysisTextError",
     "EmptyBarsError",
@@ -736,6 +801,7 @@ __all__ = [
     "InboxPayloadError",
     "IngestionError",
     "InputValidationError",
+    "InsecureCredentialBackendError",
     "InsufficientBarsError",
     "InvalidBarError",
     "LatestBarMismatchError",

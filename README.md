@@ -8,7 +8,8 @@ analysis plus OHLC data into an immutable **Run** with a machine-readable
 audits that commentary and records a verdict; Round 4 applies the audit; Round 5
 decides deterministically whether the result may be published; Round 6 sends it;
 Round 7 runs the whole sequence from one command; Round 8 feeds that sequence
-production data; Round 9 lets a scheduler call it every minute.
+production data; Round 9 lets a scheduler call it every minute, and Round 9.1
+gives that scheduler somewhere safe to get its credentials.
 
 Every stage is still a separate command and still works on its own. The
 orchestrator coordinates those stages; **it does not bypass any gate.** The
@@ -31,6 +32,7 @@ Telegram Gold Bot / raw analysis  +  OHLC market data
         (all of the above, from one command) <- Round 7
         (fed by a durable inbox + MT5)       <- Round 8
         (called every minute by a scheduler) <- Round 9
+        (credentials from the OS vault)      <- Round 9.1
 ```
 
 What exists today:
@@ -144,6 +146,9 @@ Without installing, set `PYTHONPATH=src` instead of `pip install -e .`.
 | `automation-status` | Read-only summary of the queue, Runs and last tick |
 | `automation-preflight` | Report unattended readiness; prints no secret values |
 | `automation-task-plan` | Print the Task Scheduler definition; registers nothing |
+| `secrets-status` | Which credentials are available, and from where |
+| `secrets-set <name>` | Store one credential, prompting invisibly |
+| `secrets-delete <name>` | Remove one credential |
 | `show-run <run_id>` | Print a Run's status, files and digests |
 | `list-runs` | List Run ids under the runs directory |
 
@@ -1248,14 +1253,15 @@ schedule. The task inherits the environment it is registered in.
 
 ### Credentials for unattended running
 
-Nothing here persists a credential, and nothing writes to `setx`, the registry,
-`.env`, or the task XML.
+The task definition holds no credential and never will. Variables set with
+`$env:NAME = "..."` exist only in that PowerShell process tree, and a Task
+Scheduler invocation is a different process that will **not** see them.
 
-Note the trap: variables set with `$env:NAME = "..."` exist only in that
-PowerShell process tree. A Task Scheduler invocation is a different process and
-will **not** see them. Making automation work unattended therefore needs a
-deliberate, persistent credential strategy - which this round does not choose on
-anyone's behalf.
+That is what [Credentials](#credentials) solves: enroll each secret once into
+the operating system's credential store, and the scheduled task - running as the
+same user - finds them. `automation-preflight` reports any credential that is
+session-only as a blocker, precisely so this trap cannot be walked into
+accidentally.
 
 ### Operational state
 
@@ -1292,6 +1298,126 @@ Round 9 builds and tests unattended operation; it does not activate it. No task
 is registered, `GOLDPIPELINE_AUTOMATION_ENABLED` and
 `GOLDPIPELINE_AUTOPUBLISH_ENABLED` both default to false, and no real Telegram
 message was sent while building it.
+
+## Credentials
+
+```bash
+python -m goldpipeline secrets-status
+```
+
+```
+Credential backend: keyring.backends.Windows.WinVaultKeyring
+                    secure - credentials are encrypted by the operating system
+
+ANTHROPIC_API_KEY    configured (Windows Credential Manager)
+OPENAI_API_KEY       configured (Windows Credential Manager)
+TELEGRAM_BOT_TOKEN   missing
+```
+
+**The problem this solves.** A Task Scheduler task runs in a fresh process. It
+inherits neither a PowerShell session's variables nor anything set with
+`$env:` - so a pipeline that works perfectly when you run it by hand finds no
+credentials at all when the scheduler runs it at 3am. Every obvious workaround is
+worse than it looks: `setx` and the registry put the secret where any process on
+the machine can read it and any screenshot can capture it; a `.env` file puts it
+one mistaken `git add` from a public repository; the task XML puts it in a file
+that gets exported and mailed around.
+
+So credentials go into the operating system's credential store, encrypted against
+the user's login and handed back only to that user.
+
+### Resolution order
+
+```
+process environment  →  Windows Credential Manager  →  missing
+```
+
+Environment first, deliberately and in both directions:
+
+- every existing workflow keeps working. Export `ANTHROPIC_API_KEY` in a
+  PowerShell session and you get exactly the behaviour you had before this
+  existed;
+- a temporary override needs no vault surgery. Trying a different key for ten
+  minutes should not mean rewriting a stored credential and remembering to put
+  the old one back.
+
+The direction is one-way. **A value found in the environment is never written
+into the credential store.** Promoting a throwaway override into permanent
+storage because it happened to be present is how a stale key ends up in a vault
+two years later.
+
+Because the two are different in a way that matters, the status reports *which*:
+`configured (process environment)` will not survive into a scheduled task, and
+`configured (Windows Credential Manager)` will.
+
+### What is a credential, and what is not
+
+Only three things are secret:
+
+| Credential | Store entry |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | `GoldAnalysisPipeline` / `anthropic_api_key` |
+| `OPENAI_API_KEY` | `GoldAnalysisPipeline` / `openai_api_key` |
+| `TELEGRAM_BOT_TOKEN` | `GoldAnalysisPipeline` / `telegram_bot_token` |
+
+`TELEGRAM_TARGET_CHAT_ID`, the MT5 symbol, the timeframe and the automation flags
+stay in the environment. They are configuration: knowing which channel the
+pipeline posts to grants nobody the ability to post there, and hiding it in a
+vault would only make it harder to audit against the auto-publish allowlist.
+
+### Enrolling a credential
+
+```powershell
+cd "D:\07. PC Fx\01. GoldAnalysisPipeline"
+.\.venv\Scripts\python.exe -m goldpipeline secrets-set anthropic
+```
+
+The value is prompted for and **not echoed**. There is deliberately no
+`--value`, `--token` or `--api-key`: a secret on a command line lands in shell
+history and in every process listing on the machine, where it outlives the
+terminal it was typed into.
+
+```bash
+python -m goldpipeline secrets-delete telegram
+```
+
+### The backend is checked, not assumed
+
+`import keyring` succeeding proves nothing. Keyring will fall back to a backend
+that stores nothing, and plugins exist that keep credentials in a plaintext file
+- both look like success. So the *active* backend is compared against an
+allowlist of stores the operating system actually encrypts:
+
+| Backend | Verdict |
+| --- | --- |
+| `Windows.WinVaultKeyring`, `macOS.Keyring`, `SecretService`, `libsecret` | trusted |
+| `fail.Keyring`, `null.Keyring`, `chainer` | rejected - stores nothing |
+| any plaintext plugin | rejected |
+| anything else | rejected - fail closed |
+
+An allowlist rather than a blocklist, because the failure mode of getting this
+wrong is silent.
+
+**There is no plaintext fallback.** If the secure store is unavailable, writing a
+credential is refused. Nothing creates a `.env`, sets an environment variable, or
+degrades quietly to something that happens to work.
+
+### Installing the backend
+
+```bash
+pip install -e ".[secrets]"
+```
+
+An extra, not a hard dependency: the whole test suite runs without it, and the
+environment-variable path still works for a person at a keyboard. It is what an
+unattended scheduled task needs.
+
+### Lazy, still
+
+Nothing loads all three credentials. A Run resumed at the gate needs none; the
+writer needs Anthropic only; the reviewer needs OpenAI only; the publisher needs
+Telegram only, and only when unattended publishing is on. The credential store is
+consulted for one entry at the moment a stage is about to use it.
 
 ## Run directory structure
 
@@ -1458,9 +1584,10 @@ src/goldpipeline/
                   inbox.py + ingestion.py feeding them, and
                   automation.py + automation_state.py + task_plan.py
                   driving the whole thing on a schedule
-    adapters/     source, writer, reviewer, finalizer and publisher protocols;
-                  JSON file / inbox / MetaTrader 5 / Anthropic / OpenAI /
-                  Telegram / fake implementations
+    adapters/     source, writer, reviewer, finalizer, publisher and secret
+                  protocols; JSON file / inbox / MetaTrader 5 / Anthropic /
+                  OpenAI / Telegram / Windows Credential Manager / fake
+                  implementations
     storage/      atomic writes, Run directory lifecycle
     config.py     environment settings; the only place a credential lives
     cli.py        argparse entry point
@@ -1528,6 +1655,13 @@ explicit broker-versus-canonical symbol handling, Run provenance in the manifest
 and `pipeline-ingest` / `inbox-submit` / `inbox-process-one` / `inbox-reconcile`
 / `mt5-check`.
 
+**Round 9.1 - secure credential provider.** A one-method `SecretProvider`
+abstraction with environment, OS-credential-store and offline implementations;
+process-environment-first precedence with no write-back; an allowlist-based
+backend trust check that fails closed; `secrets-status` / `secrets-set` /
+`secrets-delete` with hidden entry and no value-bearing flag; credential source
+reporting in `automation-preflight`; and no plaintext fallback anywhere.
+
 **Round 9 - automation worker and Task Scheduler integration.** A finite
 run-once worker with a per-worker intake lock, work prioritised reconcile →
 resume → ingest, an analysis-age limit independent of the market-data limit,
@@ -1538,7 +1672,10 @@ Task Scheduler definition that is never registered, and `automation-run-once` /
 `automation-worker-tick` / `automation-status` / `automation-preflight` /
 `automation-task-plan`.
 
-**Deliberately not built:** a daemon or Windows Service, any long-lived loop, a
+**Deliberately not built:** persistence for non-secret configuration (Round 9.2
+decides that deliberately), automatic enrollment of credentials, reading or
+writing User/Machine environment registry hives, a daemon or Windows Service,
+any long-lived loop, a
 second Telegram bot reading another bot's messages (the Bot API does not allow
 it), historical snapshots reconstructed at message time, market calendars,
 dashboards, filesystem watchers, automatic retry or reconciliation of an

@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from goldpipeline.adapters.secrets import SecretProvider, default_provider
 from goldpipeline.domain.errors import (
     AutomationConfigurationError,
     FinalizeConfigurationError,
@@ -27,6 +28,7 @@ from goldpipeline.domain.errors import (
     WriterConfigurationError,
 )
 from goldpipeline.schemas.common import normalize_symbol
+from goldpipeline.schemas.secrets import SecretName
 
 DEFAULT_MODEL = "claude-opus-5"
 """Writer model used when ``ANTHROPIC_MODEL`` is not set."""
@@ -66,6 +68,22 @@ REVIEW_MAX_TOKENS_ENV = "GOLDPIPELINE_REVIEW_MAX_TOKENS"
 _REDACTED = "***redacted***"
 
 
+def _secret(
+    name: SecretName,
+    secrets: SecretProvider | None,
+    env: dict[str, str] | None,
+) -> str | None:
+    """Resolve one credential through the provider the caller supplied.
+
+    Defaults to environment-only, which is what every round before 9.1 did.
+    Reaching the operating system's credential store is something a caller
+    opts into by passing a composite provider, so importing this module
+    never touches a vault.
+    """
+    provider = secrets if secrets is not None else default_provider(env)
+    return provider.get_secret(name)
+
+
 @dataclass(frozen=True)
 class WriterSettings:
     """Everything the writer stage needs in order to call a provider."""
@@ -96,14 +114,18 @@ class WriterSettings:
         env: dict[str, str] | None = None,
         *,
         model_override: str | None = None,
+        secrets: SecretProvider | None = None,
     ) -> WriterSettings:
-        """Build settings from the environment.
+        """Build settings from the environment and a credential provider.
 
         Args:
-            env: Mapping to read from. Defaults to ``os.environ``; injectable so
-                tests never depend on the developer's real shell.
+            env: Mapping for non-secret values. Defaults to ``os.environ``;
+                injectable so tests never depend on the developer's real shell.
             model_override: Model id from the command line, which wins over the
                 environment.
+            secrets: Where the API key comes from. Defaults to the process
+                environment alone; the CLI passes a provider that falls back to
+                the operating system's credential store.
 
         Raises:
             WriterConfigurationError: If a required value is missing or unusable.
@@ -111,7 +133,7 @@ class WriterSettings:
         """
         source = os.environ if env is None else env
 
-        api_key = (source.get(API_KEY_ENV) or "").strip()
+        api_key = _secret(SecretName.ANTHROPIC_API_KEY, secrets, env)
         if not api_key:
             raise WriterConfigurationError(
                 f"{API_KEY_ENV} is not set; the writer cannot reach the provider",
@@ -165,8 +187,9 @@ class ReviewerSettings:
         env: dict[str, str] | None = None,
         *,
         model_override: str | None = None,
+        secrets: SecretProvider | None = None,
     ) -> ReviewerSettings:
-        """Build settings from the environment.
+        """Build settings from the environment and a credential provider.
 
         Raises:
             ReviewConfigurationError: If a required value is missing or
@@ -174,7 +197,7 @@ class ReviewerSettings:
         """
         source = os.environ if env is None else env
 
-        api_key = (source.get(REVIEW_API_KEY_ENV) or "").strip()
+        api_key = _secret(SecretName.OPENAI_API_KEY, secrets, env)
         if not api_key:
             raise ReviewConfigurationError(
                 f"{REVIEW_API_KEY_ENV} is not set; the reviewer cannot reach the provider",
@@ -236,8 +259,12 @@ class FinalizerSettings:
         env: dict[str, str] | None = None,
         *,
         model_override: str | None = None,
+        secrets: SecretProvider | None = None,
     ) -> FinalizerSettings:
-        """Build settings from the environment.
+        """Build settings from the environment and a credential provider.
+
+        Shares the writer's credential - same vendor, same account - so it
+        resolves the same secret name through the same provider.
 
         Raises:
             FinalizeConfigurationError: If a required value is missing or
@@ -245,7 +272,7 @@ class FinalizerSettings:
         """
         source = os.environ if env is None else env
 
-        api_key = (source.get(API_KEY_ENV) or "").strip()
+        api_key = _secret(SecretName.ANTHROPIC_API_KEY, secrets, env)
         if not api_key:
             raise FinalizeConfigurationError(
                 f"{API_KEY_ENV} is not set; the finalizer cannot reach the provider",
@@ -315,8 +342,18 @@ class TelegramSettings:
     __str__ = __repr__
 
     @classmethod
-    def from_env(cls, env: dict[str, str] | None = None) -> TelegramSettings:
-        """Build settings from the environment.
+    def from_env(
+        cls,
+        env: dict[str, str] | None = None,
+        *,
+        secrets: SecretProvider | None = None,
+    ) -> TelegramSettings:
+        """Build settings from the environment and a credential provider.
+
+        The token is a credential and comes from *secrets*. The destination is
+        not: knowing which channel the pipeline posts to grants nobody the
+        ability to post there, and keeping it in the environment is what lets
+        an operator read it back and check it against the allowlist.
 
         Raises:
             PublisherConfigurationError: If a required value is missing or the
@@ -325,7 +362,7 @@ class TelegramSettings:
         """
         source = os.environ if env is None else env
 
-        token = (source.get(TELEGRAM_TOKEN_ENV) or "").strip()
+        token = _secret(SecretName.TELEGRAM_BOT_TOKEN, secrets, env)
         if not token:
             raise PublisherConfigurationError(
                 f"{TELEGRAM_TOKEN_ENV} is not set; the publisher cannot reach Telegram",

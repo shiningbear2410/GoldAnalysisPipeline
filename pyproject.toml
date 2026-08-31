@@ -24,6 +24,10 @@ dev = ["pytest>=8.0"]
 # market-data source is an extra rather than a hard dependency. Every test runs
 # without it; only `mt5-check` and `--market-source mt5` need it installed.
 mt5 = ["MetaTrader5>=5.0.45; sys_platform == 'win32'"]
+# The OS credential store. An extra because the whole suite runs without it
+# and the environment-variable path still works; it is what an unattended
+# scheduled task needs, since that inherits no session.
+secrets = ["keyring>=25.0"]
 
 [project.scripts]
 goldpipeline = "goldpipeline.cli:main"
