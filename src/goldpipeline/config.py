@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -71,7 +72,7 @@ _REDACTED = "***redacted***"
 def _secret(
     name: SecretName,
     secrets: SecretProvider | None,
-    env: dict[str, str] | None,
+    env: Mapping[str, str] | None,
 ) -> str | None:
     """Resolve one credential through the provider the caller supplied.
 
@@ -111,7 +112,7 @@ class WriterSettings:
     @classmethod
     def from_env(
         cls,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
         *,
         model_override: str | None = None,
         secrets: SecretProvider | None = None,
@@ -184,7 +185,7 @@ class ReviewerSettings:
     @classmethod
     def from_env(
         cls,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
         *,
         model_override: str | None = None,
         secrets: SecretProvider | None = None,
@@ -256,7 +257,7 @@ class FinalizerSettings:
     @classmethod
     def from_env(
         cls,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
         *,
         model_override: str | None = None,
         secrets: SecretProvider | None = None,
@@ -344,7 +345,7 @@ class TelegramSettings:
     @classmethod
     def from_env(
         cls,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
         *,
         secrets: SecretProvider | None = None,
     ) -> TelegramSettings:
@@ -444,7 +445,7 @@ class MarketDataSettings:
     max_data_age_minutes: int = DEFAULT_MAX_DATA_AGE_MINUTES
 
     @classmethod
-    def from_env(cls, env: dict[str, str] | None = None) -> MarketDataSettings:
+    def from_env(cls, env: Mapping[str, str] | None = None) -> MarketDataSettings:
         """Build settings from the environment.
 
         Raises:
@@ -548,7 +549,7 @@ deliberately with the `publish` command.
 """
 
 
-def _flag(source: dict[str, str] | os._Environ[str], name: str, default: bool = False) -> bool:
+def _flag(source: Mapping[str, str], name: str, default: bool = False) -> bool:
     """Read a boolean setting.
 
     Only an explicit affirmative turns something on. Anything unrecognised -
@@ -590,7 +591,7 @@ class AutomationSettings:
     auto_publish_max_run_age_minutes: int = DEFAULT_AUTOPUBLISH_MAX_RUN_AGE_MINUTES
 
     @classmethod
-    def from_env(cls, env: dict[str, str] | None = None) -> AutomationSettings:
+    def from_env(cls, env: Mapping[str, str] | None = None) -> AutomationSettings:
         """Build settings from the environment.
 
         Raises:
@@ -638,7 +639,7 @@ class AutomationSettings:
         )
 
 
-def inbox_dir_from_env(env: dict[str, str] | None = None) -> Path:
+def inbox_dir_from_env(env: Mapping[str, str] | None = None) -> Path:
     """Where the analysis inbox lives. Configuration only, never a payload."""
     source = os.environ if env is None else env
     return Path((source.get(INBOX_DIR_ENV) or "inbox").strip() or "inbox")
@@ -665,7 +666,7 @@ def validate_target_chat(target: str) -> str:
     )
 
 
-def _raw(source: dict[str, str] | os._Environ[str], name: str) -> str | None:
+def _raw(source: Mapping[str, str], name: str) -> str | None:
     value = source.get(name)
     return value.strip() if value and value.strip() else None
 
@@ -687,7 +688,7 @@ being duplicated.
 
 
 def _positive_float(
-    source: dict[str, str] | os._Environ[str],
+    source: Mapping[str, str],
     name: str,
     default: float,
     error: ConfigError = WriterConfigurationError,
@@ -705,7 +706,7 @@ def _positive_float(
 
 
 def _positive_int(
-    source: dict[str, str] | os._Environ[str],
+    source: Mapping[str, str],
     name: str,
     default: int,
     error: ConfigError = WriterConfigurationError,
@@ -717,7 +718,7 @@ def _positive_int(
 
 
 def _non_negative_int(
-    source: dict[str, str] | os._Environ[str],
+    source: Mapping[str, str],
     name: str,
     default: int,
     error: ConfigError = WriterConfigurationError,

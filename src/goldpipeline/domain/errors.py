@@ -769,6 +769,55 @@ class CredentialDeleteError(CredentialError):
     code = "CREDENTIAL_DELETE_FAILED"
 
 
+# --- runtime configuration and task activation (Round 9.2) ---------------
+
+
+class RuntimeConfigError(PipelineError):
+    """The persisted non-secret configuration is unusable.
+
+    Covers a corrupt file, an unknown setting name, and a value the pipeline
+    would refuse at load time. All three fail closed rather than falling back to
+    defaults: a scheduled task silently running on built-in defaults would fetch
+    a symbol and target a channel nobody chose.
+    """
+
+    code = "RUNTIME_CONFIG_ERROR"
+
+
+class SecretNotPersistableError(RuntimeConfigError):
+    """Someone tried to persist a credential as configuration.
+
+    Refused by name rather than merely absent from the schema. "Unknown setting"
+    would be the wrong message: the person needs to be told where an API key
+    actually goes, not that it is misspelt.
+    """
+
+    code = "SECRET_NOT_PERSISTABLE"
+
+
+class TaskSchedulerError(PipelineError):
+    """A Windows Task Scheduler operation failed."""
+
+    code = "TASK_SCHEDULER_ERROR"
+
+
+class TaskSchedulerUnavailableError(TaskSchedulerError):
+    """The Task Scheduler could not be reached at all."""
+
+    code = "TASK_SCHEDULER_UNAVAILABLE"
+
+
+class TaskDefinitionMismatchError(TaskSchedulerError):
+    """A task with this name exists but is not the one we intend.
+
+    Left untouched. It might be an older definition from a previous round or
+    something a person created by hand, and overwriting either on the way past
+    is the kind of helpfulness that loses work.
+    """
+
+    code = "TASK_DEFINITION_MISMATCH"
+
+
 __all__ = [
     "AnalysisTextTooLargeError",
     "ArtifactAlreadyExistsError",
@@ -844,9 +893,14 @@ __all__ = [
     "RunNotReadyError",
     "RunNotResumableError",
     "RunNotReviewableError",
+    "RuntimeConfigError",
+    "SecretNotPersistableError",
     "StaleMarketDataError",
     "StorageError",
     "SymbolMismatchError",
+    "TaskDefinitionMismatchError",
+    "TaskSchedulerError",
+    "TaskSchedulerUnavailableError",
     "UnknownTimezoneError",
     "UntrustworthyRunError",
     "WriterArtifactExistsError",

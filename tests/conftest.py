@@ -1090,3 +1090,49 @@ def no_real_credential_store(monkeypatch: pytest.MonkeyPatch) -> None:
             detail="tests never reach the machine's credential store",
         ),
     )
+
+
+# --------------------------------------------------------------------------
+# Round 9.2 helpers
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def no_real_machine_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep every test away from the machine's real config file and task.
+
+    The CLI resolves both by default, so without this a test run would read the
+    operator's actual persisted configuration and query the real Task Scheduler.
+    Neither is destructive, but a suite whose results depend on one machine's
+    state is no longer a suite anyone can trust.
+    """
+    from goldpipeline import cli
+    from goldpipeline.adapters.config_store import RuntimeConfigStore
+    from goldpipeline.adapters.task_scheduler import FakeTaskScheduler
+
+    store = RuntimeConfigStore(tmp_path / "appdata" / "config.json")
+    scheduler = FakeTaskScheduler()
+    monkeypatch.setattr(cli, "_config_store", lambda: store)
+    monkeypatch.setattr(cli, "_task_scheduler", lambda: scheduler)
+
+
+@pytest.fixture
+def config_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """An isolated persisted-configuration file, wired into the CLI."""
+    from goldpipeline import cli
+    from goldpipeline.adapters.config_store import RuntimeConfigStore
+
+    store = RuntimeConfigStore(tmp_path / "appdata" / "config.json")
+    monkeypatch.setattr(cli, "_config_store", lambda: store)
+    return store
+
+
+@pytest.fixture
+def task_scheduler(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """An offline Task Scheduler, wired into the CLI."""
+    from goldpipeline import cli
+    from goldpipeline.adapters.task_scheduler import FakeTaskScheduler
+
+    scheduler = FakeTaskScheduler()
+    monkeypatch.setattr(cli, "_task_scheduler", lambda: scheduler)
+    return scheduler

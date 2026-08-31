@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
 from goldpipeline.schemas.secrets import SecretName, SecretSource
@@ -70,9 +71,9 @@ class EnvironmentSecretProvider:
     available would promise a scheduled task something that may not be true.
     """
 
-    def __init__(self, env: dict[str, str] | None = None) -> None:
+    def __init__(self, env: Mapping[str, str] | None = None) -> None:
         """Read from *env*, defaulting to the live process environment."""
-        self._env = env
+        self._env: Mapping[str, str] | None = env
 
     @property
     def source(self) -> SecretSource:
@@ -161,7 +162,7 @@ class FakeSecretProvider:
         self._secrets.pop(name, None)
 
 
-def default_provider(env: dict[str, str] | None = None) -> EnvironmentSecretProvider:
+def default_provider(env: Mapping[str, str] | None = None) -> EnvironmentSecretProvider:
     """The provider used when a caller supplies none.
 
     Environment-only, which is precisely the behaviour every round before this

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
@@ -20,6 +21,11 @@ from pathlib import Path
 from typing import Any
 
 from goldpipeline import PIPELINE_VERSION
+from goldpipeline.adapters.config_store import (
+    LayeredConfig,
+    RuntimeConfigStore,
+    parse_key,
+)
 from goldpipeline.adapters.fake_finalizer import FakeFinalizerClient
 from goldpipeline.adapters.fake_publisher import FakePublisherClient
 from goldpipeline.adapters.fake_reviewer import FakeReviewerClient
@@ -33,6 +39,12 @@ from goldpipeline.adapters.secrets import (
     CompositeSecretProvider,
     EnvironmentSecretProvider,
     SecretProvider,
+)
+from goldpipeline.adapters.task_scheduler import (
+    PowerShellTaskScheduler,
+    TaskInfo,
+    TaskSchedulerAdapter,
+    compare,
 )
 from goldpipeline.adapters.windows_credentials import (
     WindowsCredentialSecretProvider,
@@ -67,6 +79,7 @@ from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.ingestion import IngestOutcome, IngestResult
 from goldpipeline.schemas.orchestration import PipelineMode, PipelineStatus
 from goldpipeline.schemas.quality import DataQuality
+from goldpipeline.schemas.runtime_config import ConfigKey, ConfigSource
 from goldpipeline.schemas.secrets import SecretName, SecretSource, SecretStatus
 from goldpipeline.services.automation import (
     DEFERRED,
@@ -450,6 +463,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     secrets_delete.add_argument("name", choices=sorted(_SECRET_CHOICES))
 
+    config_status = subparsers.add_parser(
+        "config-status",
+        help="Show every persistent setting and where its value came from.",
+    )
+    config_status.add_argument("--json", action="store_true")
+
+    config_set = subparsers.add_parser(
+        "config-set", help="Persist one non-secret setting. Credentials are refused."
+    )
+    config_set.add_argument("name", help="Setting name, e.g. TELEGRAM_TARGET_CHAT_ID.")
+    config_set.add_argument("value", help="Value. Non-secret, so an argument is fine.")
+
+    config_delete = subparsers.add_parser(
+        "config-delete", help="Remove one persistent setting, falling back to the default."
+    )
+    config_delete.add_argument("name")
+
+    task_install = subparsers.add_parser(
+        "automation-task-install",
+        help="Register the Windows scheduled task. Prints the plan unless --apply.",
+    )
+    task_install.add_argument("--task-name", default=None)
+    task_install.add_argument("--interval-minutes", type=int, default=None)
+    task_install.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually register it. Without this, nothing on the machine changes.",
+    )
+    task_install.add_argument("--json", action="store_true")
+
+    task_status = subparsers.add_parser(
+        "automation-task-status", help="Read-only status of the registered task."
+    )
+    task_status.add_argument("--task-name", default=None)
+    task_status.add_argument("--json", action="store_true")
+
+    task_remove = subparsers.add_parser(
+        "automation-task-remove",
+        help="Unregister the scheduled task. Prints the plan unless --apply.",
+    )
+    task_remove.add_argument("--task-name", default=None)
+    task_remove.add_argument("--apply", action="store_true")
+    task_remove.add_argument("--json", action="store_true")
+
     show = subparsers.add_parser("show-run", help="Print a summary of an existing Run.")
     show.add_argument("run_id", help="Run identifier, e.g. 20260828_022701_a83f2c.")
     show.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
@@ -736,7 +793,9 @@ def _writer_client(*, fake: bool, model: str | None) -> WriterClient:
     """
     if fake:
         return FakeWriterClient()
-    settings = WriterSettings.from_env(model_override=model, secrets=_secret_provider())
+    settings = WriterSettings.from_env(
+        _config_env(), model_override=model, secrets=_secret_provider()
+    )
     from goldpipeline.adapters.anthropic_writer import AnthropicWriterClient
 
     return AnthropicWriterClient(settings)
@@ -818,7 +877,9 @@ def _reviewer_client(*, fake: bool, model: str | None) -> ReviewerClient:
     """
     if fake:
         return FakeReviewerClient()
-    settings = ReviewerSettings.from_env(model_override=model, secrets=_secret_provider())
+    settings = ReviewerSettings.from_env(
+        _config_env(), model_override=model, secrets=_secret_provider()
+    )
     from goldpipeline.adapters.openai_reviewer import OpenAIReviewerClient
 
     return OpenAIReviewerClient(settings)
@@ -908,7 +969,7 @@ def _finalizer_client(*, fake: bool, model: str | None) -> FinalizerClient:
     from goldpipeline.adapters.anthropic_finalizer import AnthropicFinalizerClient
 
     return AnthropicFinalizerClient(
-        FinalizerSettings.from_env(model_override=model, secrets=_secret_provider())
+        FinalizerSettings.from_env(_config_env(), model_override=model, secrets=_secret_provider())
     )
 
 
@@ -1065,7 +1126,7 @@ def _publisher_client(*, fake: bool) -> tuple[PublisherClient, str]:
     if fake:
         return FakePublisherClient(), FAKE_TARGET_CHAT
 
-    settings = TelegramSettings.from_env(secrets=_secret_provider())
+    settings = TelegramSettings.from_env(_config_env(), secrets=_secret_provider())
     from goldpipeline.adapters.telegram_publisher import TelegramPublisherClient
 
     return TelegramPublisherClient(settings), settings.target_chat
@@ -1299,7 +1360,7 @@ def _market_source(args: argparse.Namespace) -> Any:
             raise _UsageError("--market-source file needs --ohlc PATH")
         return JsonFileMarketDataSource(args.ohlc)
 
-    settings = MarketDataSettings.from_env()
+    settings = MarketDataSettings.from_env(_config_env())
 
     from goldpipeline.adapters.mt5_market import MetaTrader5MarketDataSource
 
@@ -1309,14 +1370,14 @@ def _market_source(args: argparse.Namespace) -> Any:
 
 
 def _ingestion_context(args: argparse.Namespace) -> IngestionContext:
-    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env()
+    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env(_config_env())
     inbox = Inbox(inbox_root)
     inbox.ensure_layout()
     return IngestionContext(
         inbox=inbox,
         store=RunStore(args.runs_dir),
         market_source=_market_source(args),
-        expected_symbol=MarketDataSettings.from_env().canonical_symbol,
+        expected_symbol=MarketDataSettings.from_env(_config_env()).canonical_symbol,
     )
 
 
@@ -1403,7 +1464,7 @@ def _ingest_exit_code(result: IngestResult) -> int:
 
 def _cmd_inbox_submit(args: argparse.Namespace) -> int:
     """Place a payload in the inbox without processing it."""
-    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env()
+    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env(_config_env())
     inbox = Inbox(inbox_root)
 
     try:
@@ -1432,7 +1493,7 @@ def _cmd_inbox_submit(args: argparse.Namespace) -> int:
 
 def _cmd_inbox_reconcile(args: argparse.Namespace) -> int:
     """Report what happened to events an interrupted run left behind."""
-    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env()
+    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env(_config_env())
     inbox = Inbox(inbox_root)
     inbox.ensure_layout()
     context = IngestionContext(
@@ -1490,7 +1551,7 @@ class _NoMarketSource:
 
 def _cmd_mt5_check(args: argparse.Namespace) -> int:
     """Read-only terminal diagnostic. Places no order and writes no Run."""
-    settings = MarketDataSettings.from_env()
+    settings = MarketDataSettings.from_env(_config_env())
 
     from goldpipeline.adapters.mt5_market import MetaTrader5MarketDataSource
 
@@ -1565,17 +1626,17 @@ def _worker_context(args: argparse.Namespace) -> WorkerContext:
     unattended publishing is on - so a worker that is not publishing needs no
     Telegram credentials at all.
     """
-    settings = AutomationSettings.from_env()
+    settings = AutomationSettings.from_env(_config_env())
     if args.automation_dir is not None:
         settings = replace(settings, automation_dir=args.automation_dir)
 
-    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env()
+    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env(_config_env())
     inbox = Inbox(inbox_root)
     inbox.ensure_layout()
 
     target: str | None = None
     if settings.auto_publish_enabled and not args.fake_publisher:
-        target = TelegramSettings.from_env(secrets=_secret_provider()).target_chat
+        target = TelegramSettings.from_env(_config_env(), secrets=_secret_provider()).target_chat
     elif settings.auto_publish_enabled:
         # The offline publisher has no destination of its own, so the allowlist
         # is checked against the stand-in's channel. Nothing leaves the machine.
@@ -1588,7 +1649,7 @@ def _worker_context(args: argparse.Namespace) -> WorkerContext:
         settings=settings,
         market_source=_market_source(args),
         clients=_pipeline_clients(args),
-        expected_symbol=MarketDataSettings.from_env().canonical_symbol,
+        expected_symbol=MarketDataSettings.from_env(_config_env()).canonical_symbol,
         publisher_target=target,
     )
 
@@ -1612,7 +1673,7 @@ def _cmd_automation_worker_tick(args: argparse.Namespace) -> int:
     unregistering it - which matters because unregistering is the step people
     forget to undo.
     """
-    settings = AutomationSettings.from_env()
+    settings = AutomationSettings.from_env(_config_env())
     if not settings.enabled:
         if args.json:
             print(json.dumps({"status": "DISABLED", "reason": AUTOMATION_ENABLED_ENV}, indent=2))
@@ -1753,11 +1814,11 @@ def _deferred_summary(inbox: Inbox, moment: datetime) -> list[dict[str, Any]]:
 
 def _cmd_automation_status(args: argparse.Namespace) -> int:
     """Read-only operational summary. Opens no socket and writes nothing."""
-    settings = AutomationSettings.from_env()
+    settings = AutomationSettings.from_env(_config_env())
     if args.automation_dir is not None:
         settings = replace(settings, automation_dir=args.automation_dir)
 
-    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env()
+    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env(_config_env())
     inbox = Inbox(inbox_root)
     store = RunStore(args.runs_dir)
     state = AutomationStore(settings.automation_dir).read_state()
@@ -1810,7 +1871,7 @@ def _cmd_automation_status(args: argparse.Namespace) -> int:
 
 def _cmd_automation_preflight(args: argparse.Namespace) -> int:
     """Report whether unattended operation is configured, naming no values."""
-    settings = AutomationSettings.from_env()
+    settings = AutomationSettings.from_env(_config_env())
     backend = inspect_backend()
     statuses = {status.name: status for status in _secret_statuses()}
     report: dict[str, Any] = {
@@ -1859,7 +1920,9 @@ def _cmd_automation_preflight(args: argparse.Namespace) -> int:
         if not statuses[SecretName.TELEGRAM_BOT_TOKEN].configured:
             blockers.append("unattended publishing is on but Telegram is not configured")
         else:
-            configured = TelegramSettings.from_env(secrets=_secret_provider()).target_chat
+            configured = TelegramSettings.from_env(
+                _config_env(), secrets=_secret_provider()
+            ).target_chat
             report["configured_target"] = configured
             if settings.auto_publish_allowed_target != configured:
                 blockers.append(
@@ -2094,6 +2157,219 @@ def _cmd_secrets_delete(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _config_store() -> RuntimeConfigStore:
+    """The persisted settings file. A seam, so tests never touch the real one."""
+    return RuntimeConfigStore()
+
+
+def _config_env() -> LayeredConfig:
+    """Non-secret configuration: process environment first, then the file.
+
+    Every settings loader reads through this, so a scheduled task - which
+    inherits no session - still finds the symbol, the timeframe and the flags
+    that a person chose once.
+    """
+    return LayeredConfig(os.environ, _config_store().load())
+
+
+def _cmd_config_status(args: argparse.Namespace) -> int:
+    """Show every persistent setting and which layer supplied it."""
+    layered = _config_env()
+    entries = [layered.resolve(key) for key in ConfigKey]
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "path": str(_config_store().path),
+                    "settings": [json.loads(entry.model_dump_json()) for entry in entries],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return EXIT_OK
+
+    print(f"Config file: {_config_store().path}")
+    print()
+    for entry in entries:
+        print(f"{entry.key:<45} {entry.summary}")
+    print("\nThis file holds no credentials. Those live in the OS credential store.")
+    return EXIT_OK
+
+
+def _cmd_config_set(args: argparse.Namespace) -> int:
+    """Persist one non-secret setting."""
+    key = parse_key(args.name)
+    _config_store().set(key, args.value)
+    entry = _config_env().resolve(key)
+    print(f"Set {key} = {args.value}")
+    if entry.source is ConfigSource.PROCESS_ENV:
+        # Worth saying: the value was written, but something in this shell is
+        # shadowing it, so what the operator just checked is not what a
+        # scheduled task will read.
+        print(
+            f"Note: this session's environment also sets {key}, and that wins here. "
+            "A scheduled task will use the persisted value.",
+            file=sys.stderr,
+        )
+    return EXIT_OK
+
+
+def _cmd_config_delete(args: argparse.Namespace) -> int:
+    """Remove one persistent setting."""
+    key = parse_key(args.name)
+    _config_store().delete(key)
+    print(f"Removed {key}. The built-in default applies unless the environment sets it.")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------
+# the scheduled task
+# --------------------------------------------------------------------------
+
+
+def _task_scheduler() -> TaskSchedulerAdapter:
+    """The real Windows Task Scheduler. A seam, so tests stay offline."""
+    return PowerShellTaskScheduler()
+
+
+def _task_name(args: argparse.Namespace) -> str:
+    return getattr(args, "task_name", None) or DEFAULT_TASK_NAME
+
+
+def _cmd_automation_task_install(args: argparse.Namespace) -> int:
+    """Register the scheduled task, but only when told to twice.
+
+    Printing the plan is the default because registering something that runs
+    every minute deserves to be read first. ``--apply`` is the second word.
+    """
+    plan = build_plan(
+        task_name=_task_name(args),
+        interval_minutes=args.interval_minutes or DEFAULT_INTERVAL_MINUTES,
+    )
+    scheduler = _task_scheduler()
+    existing = scheduler.query(plan.task_name)
+
+    if existing.installed:
+        # Never silently replaced: it may be an older definition, or something a
+        # person created by hand. A match is fine; a mismatch is a refusal.
+        compare(
+            existing,
+            executable=str(plan.executable),
+            arguments=plan.arguments,
+            working_directory=str(plan.working_directory),
+        )
+        if not args.json:
+            print(f"Already installed: {plan.task_name}")
+            print("The registered definition matches. Nothing was changed.")
+        return _report_task(scheduler.query(plan.task_name), plan, as_json=args.json)
+
+    if not args.apply:
+        print(f"Would register: {plan.task_name}")
+        print(f"  Executable:        {plan.executable}")
+        print(f"  Arguments:         {plan.arguments}")
+        print(f"  Working directory: {plan.working_directory}")
+        print(f"  Schedule:          every {plan.interval_minutes} minute(s)")
+        print("  Multiple instances: IgnoreNew")
+        print("  Principal:         the interactive user (never SYSTEM)")
+        print("\nNothing was changed. Re-run with --apply to register it.")
+        return EXIT_OK
+
+    scheduler.install(plan.task_name, plan.to_xml())
+    info = scheduler.query(plan.task_name)
+    if info.runs_as_system:
+        # Registered under the wrong principal: it could not see the MetaTrader
+        # window and could not read credentials stored against the user's login.
+        print(
+            f"Registered as {info.task_user}, which is SYSTEM. That account cannot "
+            "reach the interactive desktop or this user's credentials. Remove it "
+            "with `automation-task-remove --apply` and investigate.",
+            file=sys.stderr,
+        )
+        return EXIT_BLOCKED
+
+    if not args.json:
+        # `--json` means machine-readable, and a prose line in front of the
+        # document is the difference between parsing and a support ticket.
+        print(f"Registered: {plan.task_name}")
+    return _report_task(info, plan, as_json=args.json)
+
+
+def _cmd_automation_task_status(args: argparse.Namespace) -> int:
+    """Read-only status of the registered task."""
+    plan = build_plan(task_name=_task_name(args))
+    info = _task_scheduler().query(plan.task_name)
+    return _report_task(info, plan, as_json=args.json)
+
+
+def _cmd_automation_task_remove(args: argparse.Namespace) -> int:
+    """Unregister the task, when told to twice."""
+    name = _task_name(args)
+    scheduler = _task_scheduler()
+    if not scheduler.query(name).installed:
+        print(f"No task named {name} is registered. Nothing to remove.")
+        return EXIT_OK
+
+    if not args.apply:
+        print(f"Would remove: {name}")
+        print("Nothing was changed. Re-run with --apply to remove it.")
+        return EXIT_OK
+
+    scheduler.remove(name)
+    print(f"Removed: {name}")
+    return EXIT_OK
+
+
+def _report_task(info: TaskInfo, plan: Any, *, as_json: bool) -> int:
+    """Print a task's status. Contains no credential, by construction."""
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "task_name": plan.task_name,
+                    "installed": info.installed,
+                    "enabled": info.enabled,
+                    "state": info.state,
+                    "task_user": info.task_user,
+                    "logon_type": info.logon_type,
+                    "multiple_instances_policy": info.multiple_instances_policy,
+                    "executable": info.executable,
+                    "arguments": info.arguments,
+                    "working_directory": info.working_directory,
+                    "last_run_time": info.last_run_time,
+                    "last_result": info.last_result,
+                    "next_run_time": info.next_run_time,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return EXIT_OK if info.installed else EXIT_BLOCKED
+
+    if not info.installed:
+        print(f"Task: {plan.task_name}")
+        print("Installed: NO")
+        print("\nRegister it with `automation-task-install --apply`.")
+        return EXIT_BLOCKED
+
+    print(f"Task:               {plan.task_name}")
+    print("Installed:          YES")
+    print(f"Enabled:            {'YES' if info.enabled else 'NO'} ({info.state})")
+    print(f"Runs as:            {info.task_user} ({info.logon_type})")
+    print(f"Multiple instances: {info.multiple_instances_policy}")
+    print(f"Executable:         {info.executable}")
+    print(f"Arguments:          {info.arguments}")
+    print(f"Working directory:  {info.working_directory}")
+    print(f"Last run:           {info.last_run_time or 'never'}")
+    print(f"Last result:        {info.last_result if info.last_result is not None else '-'}")
+    print(f"Next run:           {info.next_run_time or '-'}")
+    if info.runs_as_system:
+        print("\nWARNING: this task runs as SYSTEM. It cannot see the MetaTrader")
+        print("window or read this user's credentials.", file=sys.stderr)
+    return EXIT_OK
+
+
 def _cmd_show_run(args: argparse.Namespace) -> int:
     store = RunStore(args.runs_dir)
     try:
@@ -2170,6 +2446,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "secrets-status": _cmd_secrets_status,
         "secrets-set": _cmd_secrets_set,
         "secrets-delete": _cmd_secrets_delete,
+        "config-status": _cmd_config_status,
+        "config-set": _cmd_config_set,
+        "config-delete": _cmd_config_delete,
+        "automation-task-install": _cmd_automation_task_install,
+        "automation-task-status": _cmd_automation_task_status,
+        "automation-task-remove": _cmd_automation_task_remove,
         "show-run": _cmd_show_run,
         "list-runs": _cmd_list_runs,
     }

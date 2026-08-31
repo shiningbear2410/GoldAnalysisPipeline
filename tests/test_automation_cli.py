@@ -381,19 +381,20 @@ def test_the_task_plan_json_names_the_policy(capsys: pytest.CaptureFixture[str])
     assert payload["registered"] is False
 
 
-def test_there_is_no_install_command() -> None:
-    """Requirement 42 of the spec, read strictly.
+def test_task_mutation_requires_an_explicit_apply() -> None:
+    """Requirement 42 of the spec.
 
-    An install command is only permitted behind an explicit ``--apply``. Rather
-    than build one and guard it, this round ships none: registering a
-    minute-by-minute task is a decision to make while reading the XML.
+    Round 9 shipped no install command at all; Round 9.2 adds one behind
+    ``--apply``, which is the form that requirement always permitted. The
+    property that matters is unchanged: nothing on the machine changes unless a
+    second, deliberate word says so, so ``--apply`` must default to false.
     """
     from goldpipeline.cli import build_parser
 
     parser = build_parser()
-    for forbidden in ("automation-task-install", "automation-task-remove"):
-        with pytest.raises(SystemExit):
-            parser.parse_args([forbidden])
+    for command in ("automation-task-install", "automation-task-remove"):
+        assert parser.parse_args([command]).apply is False
+        assert parser.parse_args([command, "--apply"]).apply is True
 
 
 def test_the_plan_command_makes_no_windows_call(monkeypatch: pytest.MonkeyPatch) -> None:
