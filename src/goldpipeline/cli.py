@@ -1884,7 +1884,11 @@ def _cmd_automation_preflight(args: argparse.Namespace) -> int:
         "credential_backend_secure": backend.secure,
         "mt5": _mt5_available(args),
         "allowed_target": settings.auto_publish_allowed_target,
-        "configured_target": None,
+        # The destination is configuration, not a credential, so it is reported
+        # whether or not publishing is on. Reading it needs no Telegram token,
+        # and an operator checking the allowlist should be able to see both
+        # halves of the comparison before enabling anything.
+        "configured_target": _config_env().resolve(ConfigKey.TELEGRAM_TARGET_CHAT_ID).value,
         "blockers": [],
     }
 
@@ -1924,7 +1928,7 @@ def _cmd_automation_preflight(args: argparse.Namespace) -> int:
                 _config_env(), secrets=_secret_provider()
             ).target_chat
             report["configured_target"] = configured
-            if settings.auto_publish_allowed_target != configured:
+            if settings.auto_publish_allowed_target != configured:  # noqa: SIM102
                 blockers.append(
                     "the allowlisted target and the configured target differ; "
                     "nothing would be published"
