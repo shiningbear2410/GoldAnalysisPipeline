@@ -2,14 +2,17 @@
 
 Multi-agent pipeline for producing XAUUSD ("Nhận định Vàng") articles.
 
-**This repository is at Round 6: the Telegram publisher.** Round 1 turns a raw
-human analysis plus OHLC data into an immutable **Run** with a machine-readable
-`context.json`; Round 2 writes a Vietnamese XAUUSD commentary from it; Round 3
-audits that commentary and records a verdict; Round 4 applies the audit; Round 5
-decides deterministically whether the result may be published; Round 6 sends it.
+**This repository is at Round 7: the end-to-end orchestrator.** Round 1 turns a
+raw human analysis plus OHLC data into an immutable **Run** with a
+machine-readable `context.json`; Round 2 writes a Vietnamese XAUUSD commentary
+from it; Round 3 audits that commentary and records a verdict; Round 4 applies
+the audit; Round 5 decides deterministically whether the result may be
+published; Round 6 sends it; Round 7 runs the whole sequence from one command.
 
-Every stage is a separate command. Nothing runs automatically — orchestration is
-Round 7. See [Scope](#scope) for the full boundary.
+Every stage is still a separate command and still works on its own. The
+orchestrator coordinates those stages; **it does not bypass any gate.** Nothing
+runs on a timer — schedulers are Round 9. See [Scope](#scope) for the full
+boundary.
 
 ## What this is
 
@@ -23,6 +26,7 @@ Telegram Gold Bot / raw analysis  +  OHLC market data
         -> Claude Finalizer                 <- Round 4
         -> Deterministic Validator          <- Round 5
         -> Telegram Publisher               <- Round 6
+        (all of the above, from one command) <- Round 7
 ```
 
 What exists today:
@@ -42,6 +46,8 @@ raw analysis JSON  +  OHLC JSON
         -> re-verify approval -> publish_intent.json
                               -> Telegram sendMessage
                               -> publish_result.json                 (Round 6)
+        -> one command drives all of the above, stopping wherever a
+           stage declines                                            (Round 7)
 ```
 
 `context.json` is the contract throughout. The writer receives it and nothing
@@ -118,6 +124,8 @@ Without installing, set `PYTHONPATH=src` instead of `pip install -e .`.
 | `finalize --run-id <id>` | Apply the review and store the final article |
 | `gate-publish --run-id <id>` | Decide deterministically whether it may be published |
 | `publish --run-id <id>` | Send an approved Run to Telegram, once |
+| `pipeline-run` | Create a Run from JSON inputs and drive the whole pipeline |
+| `pipeline-resume --run-id <id>` | Continue an existing Run from the stage it is due for |
 | `show-run <run_id>` | Print a Run's status, files and digests |
 | `list-runs` | List Run ids under the runs directory |
 
@@ -675,6 +683,135 @@ from posting to a stranger's channel.
 Messages are sent as plain text with no `parse_mode`, so no markup parser can
 restyle or swallow text nobody reviewed in that form.
 
+## The orchestrator
+
+```bash
+python -m goldpipeline pipeline-run --telegram fixtures/telegram_sample.json --ohlc fixtures/ohlc_sample.json --symbol XAUUSD --fake-ai --now 2026-08-28T03:00:00Z
+```
+
+```
+Run: 20260828_030114_9c1e2a
+Mode: READY_FOR_PUBLISH
+
+NORMALIZE  COMPLETED
+WRITER     COMPLETED
+REVIEW     PASS
+FINALIZE   PASSTHROUGH
+GATE       APPROVED
+
+Final status: READY_TO_PUBLISH
+Execution: COMPLETED
+```
+
+**The orchestrator coordinates the existing stages. It does not bypass any
+gate.** It holds no business logic of its own: every verdict it reports was
+reached by the stage that already owned that question. What it adds is
+sequencing, a stop policy, and a concurrency guard.
+
+### Modes
+
+The mode is a *ceiling*, not a target — a Run that stops early because a gate
+declined has still honoured its mode.
+
+| Mode | Runs | Stops at |
+| --- | --- | --- |
+| `generate-only` | create → write → review → finalize | `FINALIZED` |
+| `ready-for-publish` *(default)* | …plus the publish gate | `READY_TO_PUBLISH` or `PUBLISH_BLOCKED` |
+| `publish` | …plus the publisher | `PUBLISHED` / `PUBLISH_FAILED` / `PARTIALLY_PUBLISHED` / `PUBLISH_UNCERTAIN` |
+
+The default runs every check and sends nothing. Publishing is always a separate,
+explicit decision:
+
+```bash
+python -m goldpipeline pipeline-run --telegram ... --ohlc ... --fake-ai --publish --fake-publisher
+```
+
+For the real transport, `--publish` alone is not enough — `--confirm-real-publish`
+must be there too. There is deliberately no `--all` and no single flag that both
+builds an article and posts it. Both flags name what they do, and neither can be
+reached by accident. (`--fake-publisher` cannot reach anyone, so it needs no
+confirmation; if both are given, the offline transport wins.)
+
+### Resume
+
+`pipeline-resume` continues a Run from whichever stage its status says is due.
+Completed stages are not repeated, and their artifacts are not rewritten.
+
+| Run status | Next stage |
+| --- | --- |
+| `NORMALIZED` | writer |
+| `DRAFTED` | reviewer |
+| `REVIEWED` | finalizer — unless the verdict was `REJECT` |
+| `FINALIZED` | publish gate |
+| `READY_TO_PUBLISH` | publisher, and only in `publish` mode |
+
+Everything else is terminal:
+
+| Run status | Result | Why |
+| --- | --- | --- |
+| `PUBLISHED` | `ALREADY_COMPLETED` | Done. Zero provider calls, and not an error. |
+| `PUBLISH_BLOCKED` | `BLOCKED` | The decision is immutable. Re-judging needs a new Run. |
+| `PUBLISHING` | `NOT_RESUMABLE` | A send may be in flight, or was interrupted. |
+| `PUBLISH_UNCERTAIN` | `NOT_RESUMABLE` | **Never retried.** Telegram may hold the article. |
+| `PARTIALLY_PUBLISHED` | `NOT_RESUMABLE` | Readers already saw part of it. |
+| `PUBLISH_FAILED` | `NOT_RESUMABLE` | One attempt per Run. Fix the cause, create a new Run. |
+| `FAILED` | `NOT_RESUMABLE` | The Run's own inputs were rejected. |
+
+### Stop conditions
+
+A **business stop** is a stage declining. Nothing broke, retrying will not help,
+and the pipeline returns a result rather than raising:
+
+- **review `REJECT`** — reported as stopping at `REVIEW`, not `FINALIZE`. Round 4
+  would refuse the article anyway, but calling it in order to be refused would
+  name the wrong stage as the one that ended the pipeline. The finalizer, gate
+  and publisher are not called at all.
+- **gate `BLOCKED`** — the publisher is not called.
+- **publish `FAILED` / `PARTIAL` / `UNCERTAIN`** — the outcome is propagated with
+  its own meaning intact. The orchestrator adds no retry of its own.
+
+An **execution failure** — a provider timeout, a missing key, a tampered
+artifact — ends the invocation with status `FAILED` and the stage's own error
+type preserved, so a caller can still tell a provider outage from bad data.
+
+### Lazy provider configuration
+
+Clients are built from factories, called at most once and only when their stage
+is about to run. A Run resumed at the gate needs no API keys at all; a Run
+resumed at the publisher needs Telegram configuration and nothing else; and a
+review that passes never builds a finalizer client, preserving Round 4's
+zero-call passthrough.
+
+### One lock per Run
+
+An orchestrated Run holds `.pipeline.lock` inside its own directory for the
+duration of the invocation, acquired with `O_CREAT | O_EXCL`. Two invocations on
+*different* Runs never contend — there is no global lock.
+
+**A stale lock is never removed automatically.** A lock left by a killed process
+is indistinguishable from one held by a process that is mid-`sendMessage`, and
+this pipeline's most expensive mistake is posting the same article twice. The
+lock records its holder's pid, hostname and start time; clearing it is a
+deliberate human act.
+
+### No execution artifact
+
+There is no `pipeline_execution.json`. A Run is legitimately orchestrated more
+than once over its life — created today, resumed and published tomorrow — and
+artifacts here are write-once, so such a file would have to either fail on the
+second invocation or be overwritten. Both break the model the rest of the rounds
+depend on. The audit trail lives in the manifest's event log (`RUN_CREATED`,
+`WRITER_COMPLETED`, `REVIEW_COMPLETED`, `FINALIZER_COMPLETED`, `GATE_APPROVED` /
+`GATE_BLOCKED`, `PUBLISH_COMPLETED`, `PIPELINE_STOPPED`, `PIPELINE_FAILED`),
+beside the events the stages write for themselves; the machine-readable view is
+`--json`.
+
+### Exit codes
+
+`0` completed or already complete · `1` configuration problem, a locked Run, or a
+refused flag combination · `2` unusable data or a stage failure · `3` a gate
+declined, or a delivery was not fully confirmed.
+
 ## Run directory structure
 
 ```
@@ -688,14 +825,18 @@ runs/
     └── claude_writer.json    # draft metadata            (Round 2)
 ```
 
-Later rounds add `gpt_review.json`, `claude_final.md`, `validation.json` and
-`publish_result.json` to the same directory. No placeholders are created for
-them.
+Later stages add `gpt_review.json` (Round 3), `claude_final.md` and
+`claude_finalizer.json` (Round 4), `publish_decision.json` (Round 5), and
+`publish_intent.json` and `publish_result.json` (Round 6) to the same directory.
+No placeholders are created for them. An orchestrated Run also holds a transient
+`.pipeline.lock` while it is being driven; it is not an artifact and is not
+recorded in the manifest.
 
-A Run's status moves `CREATED -> NORMALIZED -> DRAFTED`. A failed *writer* stage
-leaves the Run at `NORMALIZED` rather than `FAILED`: the inputs are still valid
-and the stage can be retried. `FAILED` is reserved for a Run whose own inputs are
-unusable.
+A Run's status moves `CREATED -> NORMALIZED -> DRAFTED -> REVIEWED -> FINALIZED
+-> READY_TO_PUBLISH | PUBLISH_BLOCKED`, and from `READY_TO_PUBLISH` into the
+publish-side outcomes. A failed *writer* stage leaves the Run at `NORMALIZED`
+rather than `FAILED`: the inputs are still valid and the stage can be retried.
+`FAILED` is reserved for a Run whose own inputs are unusable.
 
 ## Schemas
 
@@ -718,6 +859,7 @@ All schemas are Pydantic models under `src/goldpipeline/schemas/`.
 | `PublishDecision` | The `publish_decision.json` artifact: verdict, checks, blockers, and the digests of all six inputs. |
 | `PublishIntent` | The `publish_intent.json` artifact, written before the first request. |
 | `PublishResult` | The `publish_result.json` artifact: outcome, confirmed message ids, and why an attempt stopped. |
+| `PipelineExecutionResult` | One orchestrator invocation: mode, per-stage outcomes, where it stopped. Returned, never stored. |
 
 ### Two things worth knowing about the data types
 
@@ -829,8 +971,9 @@ src/goldpipeline/
     prompts/      versioned prompt templates + loader
     services/     normalizer, context builder, market facts, source guard,
                   fencing, integrity, claim resolver, prechecks, content safety,
-                  review and finalizer policy, prompt builders, and the run /
-                  writer / reviewer / finalizer / publish-gate orchestration
+                  review and finalizer policy, prompt builders, chunking, the
+                  run / writer / reviewer / finalizer / publish-gate / publisher
+                  stages, and orchestrator.py + run_lock.py above them
     adapters/     source, writer, reviewer, finalizer and publisher protocols;
                   JSON file / Anthropic / OpenAI / Telegram / fake
                   implementations
@@ -883,14 +1026,21 @@ transport, bounded 429 retries, and a policy of never retrying an ambiguous
 delivery. Publisher client protocol with Telegram and offline implementations,
 and `publish`.
 
-**Deliberately not built:** orchestration, schedulers, cron, dashboards,
-automatic retry or reconciliation of an `UNCERTAIN` attempt, deleting or editing
-posted messages, databases, queues, a technical-analysis engine (RSI, MACD, ICT,
-bias, trade signals), web or news retrieval, sentiment analysis, and
-backtesting.
+**Round 7 — end-to-end orchestrator.** Status-driven stage sequencing over the
+existing services, three modes with a non-publishing default, state-aware
+resume with terminal publish-side states, lazy client factories, a per-Run
+filesystem lock with no automatic stale-lock recovery, a serializable
+`PipelineExecutionResult`, and `pipeline-run` / `pipeline-resume`.
+
+**Deliberately not built:** live source adapters (Round 8), schedulers and cron
+(Round 9), dashboards, daemons, polling loops, filesystem watchers, automatic
+retry or reconciliation of an `UNCERTAIN` attempt, deleting or editing posted
+messages, databases, queues, a technical-analysis engine (RSI, MACD, ICT, bias,
+trade signals), web or news retrieval, sentiment analysis, and backtesting.
 
 `AnalysisContext` describes facts and carries the raw analysis; it holds no
 interpretation. The writer produces prose and an audit trail of the numbers it
 used. The reviewer judges that prose and says what to fix. The finalizer fixes
 it. The gate decides whether the result may be published, and the publisher
-sends it. Running the stages together on a schedule is Round 7.
+sends it. Round 7 runs that sequence from one command, on demand. Reading fresh
+inputs from live sources is Round 8; running it on a schedule is Round 9.

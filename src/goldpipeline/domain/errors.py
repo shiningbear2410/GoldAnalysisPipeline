@@ -503,6 +503,44 @@ class PublisherResponseError(PublisherError):
     code = "PUBLISHER_RESPONSE_ERROR"
 
 
+# --- orchestration (Round 7) ---------------------------------------------
+
+
+class OrchestrationError(PipelineError):
+    """Base class for failures of the end-to-end orchestrator.
+
+    Deliberately narrow. The orchestrator owns sequencing and concurrency and
+    nothing else, so the only failures it can originate are about *those*:
+    a Run it must not resume, and a Run someone else is already driving.
+    Everything a stage decides keeps that stage's own error type.
+    """
+
+    code = "ORCHESTRATION_ERROR"
+
+
+class RunLockedError(OrchestrationError):
+    """Another process holds this Run's lock.
+
+    Carries whatever the lock file said about its holder - pid, host, when it
+    was taken - because deciding whether that process is still alive is a
+    judgement for a human. A stale lock is never removed automatically: doing so
+    would turn a crashed publisher into a duplicated article.
+    """
+
+    code = "RUN_LOCKED"
+
+
+class RunNotResumableError(OrchestrationError):
+    """The Run is in a state the orchestrator must not drive forward.
+
+    Every publish-side state except ``READY_TO_PUBLISH`` lands here. The
+    dangerous one is ``PUBLISH_UNCERTAIN``: Telegram may already hold the
+    article, so the safe move is to stop and let a human reconcile.
+    """
+
+    code = "RUN_NOT_RESUMABLE"
+
+
 __all__ = [
     "AnalysisTextTooLargeError",
     "ArtifactAlreadyExistsError",
@@ -524,6 +562,7 @@ __all__ = [
     "LatestBarMismatchError",
     "NaiveTimestampError",
     "NormalizationError",
+    "OrchestrationError",
     "PipelineError",
     "PublisherArtifactExistsError",
     "PublisherAuthenticationError",
@@ -546,9 +585,11 @@ __all__ = [
     "ReviewResponseError",
     "ReviewTimeoutError",
     "RunAlreadyExistsError",
+    "RunLockedError",
     "RunNotFinalizableError",
     "RunNotGateableError",
     "RunNotReadyError",
+    "RunNotResumableError",
     "RunNotReviewableError",
     "StorageError",
     "SymbolMismatchError",

@@ -7,6 +7,7 @@ schema change surfaces in one place instead of thirty.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -616,3 +617,155 @@ def load_publish_intent(run_dir: Path) -> Any:
     return PublishIntent.model_validate_json(
         (Path(run_dir) / "publish_intent.json").read_text(encoding="utf-8")
     )
+
+
+# --------------------------------------------------------------------------
+# Round 7 helpers
+# --------------------------------------------------------------------------
+
+PIPELINE_NOW = BASE_TIME + timedelta(hours=3)
+"""Deterministic 'now' for a whole orchestrated run.
+
+One instant for every stage, shortly after the generated series ends, so an
+orchestrated Run produces the same artifacts on every machine and never trips
+the recency checks.
+"""
+
+
+def exploding_factory(name: str) -> Any:
+    """A client factory that fails if anything ever calls it.
+
+    The sharpest way to state the lazy-configuration requirement: a test asserts
+    that a stage was not reached by proving its client was never *built*, which
+    is also the moment a real client would read a credential.
+    """
+
+    def build() -> Any:
+        raise AssertionError(
+            f"the {name} client was constructed, but this invocation should never need one"
+        )
+
+    return build
+
+
+@dataclass
+class TrackedClients:
+    """The four offline fakes, plus a record of which were handed out.
+
+    ``calls`` on each fake says whether a stage *ran*; ``built`` says whether its
+    client was even constructed. The two are different questions - the second is
+    the one that decides whether an API key had to be present.
+    """
+
+    writer: Any
+    reviewer: Any
+    finalizer: Any
+    publisher: Any
+    target_chat: str = "@fake_offline_channel"
+    built: list[str] = field(default_factory=list)
+
+    def _hand_out(self, name: str, client: Any) -> Any:
+        self.built.append(name)
+        return client
+
+    def as_pipeline_clients(self) -> Any:
+        """Wrap the fakes as the orchestrator's lazy factories."""
+        from goldpipeline.services.orchestrator import PipelineClients
+
+        return PipelineClients(
+            writer=lambda: self._hand_out("writer", self.writer),
+            reviewer=lambda: self._hand_out("reviewer", self.reviewer),
+            finalizer=lambda: self._hand_out("finalizer", self.finalizer),
+            publisher=lambda: (
+                self._hand_out("publisher", self.publisher),
+                self.target_chat,
+            ),
+        )
+
+
+def make_tracked_clients(
+    *,
+    writer: Any = None,
+    reviewer: Any = None,
+    finalizer: Any = None,
+    publisher: Any = None,
+    target_chat: str = "@fake_offline_channel",
+) -> TrackedClients:
+    """Build the four fakes, overriding any of them."""
+    from goldpipeline.adapters.fake_finalizer import FakeFinalizerClient
+    from goldpipeline.adapters.fake_publisher import FakePublisherClient
+    from goldpipeline.adapters.fake_reviewer import FakeReviewerClient
+    from goldpipeline.adapters.fake_writer import FakeWriterClient
+
+    return TrackedClients(
+        writer=writer if writer is not None else FakeWriterClient(),
+        reviewer=reviewer if reviewer is not None else FakeReviewerClient(),
+        finalizer=finalizer if finalizer is not None else FakeFinalizerClient(),
+        publisher=publisher if publisher is not None else FakePublisherClient(),
+        target_chat=target_chat,
+    )
+
+
+@pytest.fixture
+def tracked_clients() -> TrackedClients:
+    """The default set of offline clients for an orchestrated run."""
+    return make_tracked_clients()
+
+
+def run_orchestrated(
+    runs_dir: Path,
+    tmp_path: Path,
+    clients: TrackedClients,
+    *,
+    mode: Any = None,
+    article: str | None = None,
+    analysis: dict[str, Any] | None = None,
+    market: dict[str, Any] | None = None,
+) -> Any:
+    """Drive a fresh Run end to end through the orchestrator.
+
+    Sources are written to disk and read back through the real file adapters, so
+    the test exercises the same path the CLI does rather than a shortcut.
+    """
+    from goldpipeline.adapters.file_source import (
+        JsonFileAnalysisSource,
+        JsonFileMarketDataSource,
+    )
+    from goldpipeline.services.orchestrator import DEFAULT_MODE, run_pipeline
+    from goldpipeline.storage.run_store import RunStore
+
+    if article is not None:
+        clients.writer = _writer_returning(article)
+
+    sources = tmp_path / "sources"
+    sources.mkdir(parents=True, exist_ok=True)
+    analysis_path = write_json(sources / "telegram_input.json", analysis or make_analysis_payload())
+    market_path = write_json(sources / "ohlc.json", market or make_market_payload())
+
+    return run_pipeline(
+        analysis_source=JsonFileAnalysisSource(analysis_path),
+        market_source=JsonFileMarketDataSource(market_path),
+        store=RunStore(runs_dir),
+        clients=clients.as_pipeline_clients(),
+        mode=mode or DEFAULT_MODE,
+        expected_symbol="XAUUSD",
+        now=PIPELINE_NOW,
+    )
+
+
+def _writer_returning(article: str) -> Any:
+    """A fake writer that always drafts *article*, with no claims to check."""
+    from goldpipeline.adapters.fake_writer import FakeWriterClient
+    from goldpipeline.schemas.writer import WriterModelOutput, WriterStatus
+
+    def build(request: Any) -> Any:
+        return WriterModelOutput(
+            run_id=request.run_id,
+            status=WriterStatus.COMPLETED,
+            title="Nhận định vàng",
+            article=article,
+            source_claims=[],
+            warnings=[],
+        )
+
+    return FakeWriterClient(output_factory=build)

@@ -12,6 +12,7 @@ client including the fake.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -66,4 +67,42 @@ class FinalizerClient(Protocol):
         ...
 
 
-__all__ = ["FinalizeRequest", "FinalizeResponse", "FinalizerClient"]
+class LazyFinalizerClient:
+    """A :class:`FinalizerClient` that builds its real client on first use.
+
+    The finalizer only reaches for a client on the ``NEEDS_REVISION`` path: a
+    ``PASS`` is a byte copy and a ``REJECT`` is a refusal. Wrapping the real
+    client this way means an operator finishing a passed Run - or an
+    orchestrator driving one - never has to have an Anthropic key present, while
+    a revision that genuinely needs one still fails clearly and at the moment it
+    matters.
+    """
+
+    def __init__(self, factory: Callable[[], FinalizerClient]) -> None:
+        """Wrap *factory*, which is called at most once."""
+        self._factory = factory
+        self._inner: FinalizerClient | None = None
+
+    def _client(self) -> FinalizerClient:
+        if self._inner is None:
+            self._inner = self._factory()
+        return self._inner
+
+    @property
+    def built(self) -> bool:
+        """Whether the real client has been constructed yet."""
+        return self._inner is not None
+
+    @property
+    def provider(self) -> str:
+        return self._client().provider
+
+    @property
+    def model(self) -> str:
+        return self._client().model
+
+    def finalize(self, request: FinalizeRequest) -> FinalizeResponse:
+        return self._client().finalize(request)
+
+
+__all__ = ["FinalizeRequest", "FinalizeResponse", "FinalizerClient", "LazyFinalizerClient"]
