@@ -1113,14 +1113,101 @@ fresh one turns a backlog into a bill.
 
 ### The two entry points
 
-| Command | For | Kill switch |
-| --- | --- | --- |
-| `automation-worker-tick` | Task Scheduler | Honours `GOLDPIPELINE_AUTOMATION_ENABLED`; does nothing when off |
-| `automation-run-once` | an operator | Ignores it - a person typing the command is the authorisation |
+| Command | For | Configuration | Kill switch |
+| --- | --- | --- | --- |
+| `automation-worker-tick` | Task Scheduler | **Strict**: the persisted file, in full, or it refuses | Honours `GOLDPIPELINE_AUTOMATION_ENABLED`, which must be written down explicitly |
+| `automation-run-once` | an operator | Layered: environment, then file, then defaults | Ignores it - a person typing the command is the authorisation |
 
 The switch exists to stop the *scheduler*, not to stop someone investigating. It
 defaults to **off**, so registering the task is not the same act as switching the
 system on.
+
+### Why the scheduled worker is strict about configuration
+
+This is the one place the two entry points genuinely disagree, and it was paid
+for in production.
+
+The persisted configuration file lives under `%LOCALAPPDATA%`. When a scheduled
+task could not reach it, the layered loader read that as "no settings" and
+filled every value from a built-in default - including
+`GOLDPIPELINE_AUTOMATION_ENABLED=false`. The worker then reported *nothing to
+do* and exited **0**, every minute, for seven hours. Task Scheduler's history
+was green the entire time. Nothing had crashed; nothing had run either.
+
+The failure was not the missing file. It was that **"an operator switched
+automation off" and "the configuration is gone" produced identical evidence**.
+
+So `automation-worker-tick` reads its configuration under a different contract:
+
+* the file must exist, parse as UTF-8 JSON, and declare the expected schema;
+* **every** approved key must be present explicitly - nothing is defaulted;
+* both kill switches especially, because their default is `false`, which is also
+  what an absent file looks like;
+* unknown keys are refused rather than ignored, since an unknown key is usually
+  a misspelt known one;
+* a credential name in the file is refused by name;
+* on Windows, `%LOCALAPPDATA%` is the only production location. If it cannot be
+  resolved the answer is `CONFIG_PATH_UNAVAILABLE`, never a quiet fallback to
+  `~/.config` - a second production path is a second place for the truth to hide.
+
+Any of those failing exits **non-zero** with a specific code
+(`PERSISTENT_CONFIG_NOT_FOUND`, `PERSISTENT_CONFIG_INCOMPLETE`, and so on) and
+touches nothing: no MT5 call, no AI call, no publish, no inbox claim, no Run.
+
+An explicit `false`, by contrast, is a healthy `exit 0` that says which file it
+read. That difference is the whole point.
+
+### Proving which configuration a tick read
+
+`exit 0` says a process ran. It does not say what it ran on. Every tick record
+in `automation/history/` therefore carries:
+
+```text
+config_mode           STRICT_PERSISTENT
+config_path           C:\Users\...\AppData\Local\GoldAnalysisPipeline\config.json
+config_sha256         <digest of that file's exact bytes>
+config_schema_version 1.0.0
+automation_enabled    true
+code_version          0.1.0
+```
+
+A fingerprint, not a copy: the record is written every minute and read during an
+incident, and the settings themselves are already readable in the file it names.
+Nothing in it is a credential, because this store holds none.
+
+`automation-task-status` puts the two side by side:
+
+```text
+Current config SHA: 61d47342...
+Last tick SHA:      61d47342...
+Match:              YES
+```
+
+`NO` means the scheduler is not reading the file you are editing. That single
+line would have turned an evening of diagnosis into a glance.
+
+### Upgrading while a task is registered
+
+**Remove the scheduled task before modifying source.** It runs the working tree
+directly, every minute, so an edit half-saved is an edit the scheduler may
+execute.
+
+```bash
+python -m goldpipeline automation-task-remove --apply
+```
+
+Then modify, test, commit, and only then re-register with
+`automation-task-install --apply`. The order matters: code is committed *before*
+the scheduler can reach it, so whatever runs unattended is a revision that
+exists in history.
+
+A `WORKTREE_DIRTY` runtime guard was considered and **deliberately not built**.
+It would mean shelling out to `git` on every tick - a subprocess and a runtime
+dependency on Git for a worker that otherwise needs neither - to answer a
+question that does not actually establish safety: a clean tree can still be
+mid-upgrade, and a dirty one is often just untracked scratch files. The freeze
+step above is what makes an upgrade safe, and `code_version` on every tick
+records which build did the work.
 
 ```bash
 python -m goldpipeline automation-run-once --dry-run
@@ -1223,6 +1310,22 @@ to be safe to paste into a chat window. Readiness depends on mode: with
 publishing off, Telegram credentials are not required and their absence is not a
 blocker.
 
+Both also report the production configuration through the *strict* contract
+rather than the layered one, so they answer "would the scheduled worker run?"
+instead of "can this shell resolve some settings?":
+
+```text
+Persistent config: FOUND
+  Path:            C:\Users\...\GoldAnalysisPipeline\config.json
+  Schema:          1.0.0
+  SHA-256:         61d47342...
+Scheduled strict:  READY
+```
+
+`MISSING` or `INVALID` becomes a preflight blocker. That check is the one that
+would have caught the seven-hour outage in its first minute: the operator's
+shell had every setting, and the scheduled task had none.
+
 ### The scheduled task
 
 ```bash
@@ -1292,12 +1395,15 @@ A deferred event exits **0** on purpose. With a market that is shut two days a
 week, a non-zero exit for "the market is closed" would paint the Task Scheduler
 history red all weekend and teach an operator to ignore it.
 
-### Not yet switched on
+### Activation status
 
-Round 9 builds and tests unattended operation; it does not activate it. No task
-is registered, `GOLDPIPELINE_AUTOMATION_ENABLED` and
-`GOLDPIPELINE_AUTOPUBLISH_ENABLED` both default to false, and no real Telegram
-message was sent while building it.
+Unattended operation is switched **on**: the task is registered and the worker
+ticks every minute against a complete persisted configuration.
+
+Unattended *publishing* remains **off**. `GOLDPIPELINE_AUTOPUBLISH_ENABLED` is
+explicitly `false`, so every tick runs at the `READY_FOR_PUBLISH` ceiling and no
+Telegram message is sent by the scheduler. Turning that on is a separate
+decision, taken separately.
 
 ## Credentials
 

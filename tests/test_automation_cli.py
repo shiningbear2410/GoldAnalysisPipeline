@@ -134,14 +134,20 @@ def test_a_whole_tick_opens_no_socket(
 
 
 def test_the_scheduled_worker_does_nothing_when_automation_is_off(
-    dirs: dict[str, Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    dirs: dict[str, Path],
+    tmp_path: Path,
+    production_config: Any,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Requirement 50 of the spec.
+    """Requirement 50 of the Round 9 spec, sharpened by Round 9.2.1.
 
-    Off is the default, so registering the task is not the same act as
-    switching the system on.
+    Registering the task is still not the same act as switching the system on.
+    What changed is that "off" must now be written down: the configuration
+    exists, is complete and says false, and the worker reports that it read one
+    rather than that it found nothing.
     """
     submit(dirs, tmp_path)
+    production_config(GOLDPIPELINE_AUTOMATION_ENABLED="false")
     capsys.readouterr()
 
     code = invoke(automation_args(dirs, "automation-worker-tick"))
@@ -150,18 +156,26 @@ def test_the_scheduled_worker_does_nothing_when_automation_is_off(
     assert code == EXIT_OK
     assert "disabled" in out
     assert "GOLDPIPELINE_AUTOMATION_ENABLED" in out
+    assert "validated" in out, "an explicit off is distinguishable from a missing file"
     assert run_ids(dirs) == [], "no Run was created"
 
 
 def test_the_scheduled_worker_runs_when_automation_is_on(
     dirs: dict[str, Path],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    production_config: Any,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """Round 9 requirement 51, restated for Round 9.2.1.
+
+    The switch still turns the worker on; what changed is where it may be read
+    from. An environment variable no longer reaches the scheduled worker,
+    because a scheduled task inherits no session and a value that only exists
+    in a developer's shell is not a production setting.
+    """
     submit(dirs, tmp_path)
+    production_config(GOLDPIPELINE_AUTOMATION_ENABLED="true")
     capsys.readouterr()
-    monkeypatch.setenv("GOLDPIPELINE_AUTOMATION_ENABLED", "true")
 
     code = invoke(automation_args(dirs, "automation-worker-tick", "--json"))
     payload = json.loads(capsys.readouterr().out)
@@ -169,6 +183,32 @@ def test_the_scheduled_worker_runs_when_automation_is_on(
     assert code == EXIT_OK
     assert payload["status"] == "OK"
     assert len(payload["processed_events"]) == 1
+
+
+def test_an_environment_variable_cannot_enable_the_scheduled_worker(
+    dirs: dict[str, Path],
+    tmp_path: Path,
+    production_config: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The other half of the same rule, and the one worth pinning down.
+
+    A session variable saying "on" beside a persisted file saying "off" must
+    resolve to off. Otherwise the fingerprint recorded on the tick would
+    describe a file whose contents did not decide anything.
+    """
+    submit(dirs, tmp_path)
+    production_config(GOLDPIPELINE_AUTOMATION_ENABLED="false")
+    monkeypatch.setenv("GOLDPIPELINE_AUTOMATION_ENABLED", "true")
+    capsys.readouterr()
+
+    code = invoke(automation_args(dirs, "automation-worker-tick", "--json"))
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == EXIT_OK
+    assert payload["status"] == "DISABLED"
+    assert run_ids(dirs) == [], "no Run was created"
 
 
 def test_run_once_ignores_the_kill_switch(

@@ -1105,15 +1105,89 @@ def no_real_machine_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     operator's actual persisted configuration and query the real Task Scheduler.
     Neither is destructive, but a suite whose results depend on one machine's
     state is no longer a suite anyone can trust.
+
+    Both the interactive store and the strict production loader are redirected
+    to the *same* temporary file, because they describe one machine. Redirecting
+    only one would let a test write settings through ``config-set`` and then
+    watch the worker read the operator's real ``%LOCALAPPDATA%`` instead - which
+    is precisely the split-brain this round exists to make impossible.
     """
     from goldpipeline import cli
+    from goldpipeline.adapters import production_config
     from goldpipeline.adapters.config_store import RuntimeConfigStore
     from goldpipeline.adapters.task_scheduler import FakeTaskScheduler
 
-    store = RuntimeConfigStore(tmp_path / "appdata" / "config.json")
+    path = tmp_path / "appdata" / "config.json"
+    store = RuntimeConfigStore(path)
     scheduler = FakeTaskScheduler()
     monkeypatch.setattr(cli, "_config_store", lambda: store)
     monkeypatch.setattr(cli, "_task_scheduler", lambda: scheduler)
+    monkeypatch.setattr(
+        production_config,
+        "production_config_path",
+        lambda env=None, *, windows=None: path,
+    )
+
+
+COMPLETE_PRODUCTION_CONFIG: dict[str, str] = {
+    "TELEGRAM_TARGET_CHAT_ID": "@testchannel",
+    "GOLDPIPELINE_MT5_SYMBOL": "XAUUSD",
+    "GOLDPIPELINE_CANONICAL_SYMBOL": "XAUUSD",
+    "GOLDPIPELINE_OHLC_TIMEFRAME": "M15",
+    "GOLDPIPELINE_OHLC_BARS": "20",
+    "GOLDPIPELINE_MAX_DATA_AGE_MINUTES": "90",
+    "GOLDPIPELINE_MAX_ANALYSIS_EVENT_AGE_MINUTES": "60",
+    "GOLDPIPELINE_DEFER_RETRY_MINUTES": "5",
+    "GOLDPIPELINE_AUTOMATION_MAX_EVENTS_PER_TICK": "3",
+    "GOLDPIPELINE_AUTOMATION_MAX_TICK_MINUTES": "10",
+    "GOLDPIPELINE_AUTOMATION_ENABLED": "false",
+    "GOLDPIPELINE_AUTOPUBLISH_ENABLED": "false",
+    "GOLDPIPELINE_AUTOPUBLISH_ALLOWED_TARGET": "@testchannel",
+    "GOLDPIPELINE_AUTOPUBLISH_MAX_RUN_AGE_MINUTES": "30",
+}
+"""Every approved key, explicitly. Off by default, like the real machine.
+
+Spelled out rather than generated from :class:`ConfigKey` so that a key added
+without a deliberate decision about its production value breaks these tests
+instead of silently inheriting one.
+"""
+
+
+def write_production_config(path: Path, **overrides: str) -> Path:
+    """Write a complete production configuration, with optional changes.
+
+    Passing ``None`` for a key removes it, which is how the incompleteness tests
+    express "this one setting disappeared".
+    """
+    values = dict(COMPLETE_PRODUCTION_CONFIG)
+    for key, value in overrides.items():
+        if value is None:
+            values.pop(key, None)
+        else:
+            values[key] = value
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"schema_version": "1.0.0", "values": values}, indent=2),
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.fixture
+def production_config(tmp_path: Path) -> Any:
+    """A complete production configuration at the guarded path.
+
+    Returns the writer so a test can re-write it with different settings; the
+    path is the one :func:`no_real_machine_state` already redirected both
+    readers to.
+    """
+    path = tmp_path / "appdata" / "config.json"
+
+    def write(**overrides: str) -> Path:
+        return write_production_config(path, **overrides)
+
+    write()
+    return write
 
 
 @pytest.fixture

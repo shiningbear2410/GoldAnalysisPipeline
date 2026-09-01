@@ -81,6 +81,50 @@ TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
 FALSE_VALUES = frozenset({"false", "0", "no", "off"})
 
 
+REQUIRED_PRODUCTION_KEYS = frozenset(ConfigKey)
+"""Every approved setting, all of which a scheduled worker must find explicitly.
+
+Deliberately derived from :class:`ConfigKey` rather than listed again. Two
+reasons, and the second is the important one:
+
+* a hand-written second list drifts from the first, and the drift shows up as a
+  production setting nobody notices is missing;
+* a key added in a later round becomes mandatory by default. That is the safe
+  direction to be wrong in. Forgetting to add a key here would silently
+  reintroduce exactly the defect this module exists to prevent, whereas an
+  over-strict list fails loudly the first time a scheduled tick runs.
+
+Note this is a *production* requirement, not a general one. An operator running
+a command by hand still gets built-in defaults; see :class:`ConfigMode`.
+"""
+
+
+class ConfigMode(StrEnum):
+    """How a process resolved its non-secret configuration.
+
+    Recorded on every tick so an incident does not begin by guessing. The two
+    modes answer different questions and are not interchangeable:
+
+    * ``LAYERED`` - process environment, then the file, then built-in defaults.
+      Right for a person at a keyboard, who may want to override one value for
+      one command without editing the machine's settings.
+    * ``STRICT_PERSISTENT`` - the file, in full, or nothing. Right for an
+      unattended worker, where a missing value is not a request for a sensible
+      default but evidence that something is wrong.
+    """
+
+    LAYERED = "LAYERED"
+    STRICT_PERSISTENT = "STRICT_PERSISTENT"
+
+
+class ProductionConfigStatus(StrEnum):
+    """Health of the production configuration file, for diagnostics."""
+
+    FOUND = "FOUND"
+    MISSING = "MISSING"
+    INVALID = "INVALID"
+
+
 class ConfigSource(StrEnum):
     """Where a resolved setting came from.
 
@@ -106,6 +150,45 @@ class RuntimeConfig(StrictModel):
 
     def get(self, key: ConfigKey) -> str | None:
         return self.values.get(key)
+
+
+class ProductionConfig(StrictModel):
+    """A complete, validated production configuration and the file it came from.
+
+    The fingerprint is what makes a tick record worth reading. "Exit 0" only
+    says a process ran; ``sha256`` says *which configuration it ran on*, so a
+    scheduler quietly reading a different file - or no file - is visible in the
+    history rather than inferred months later.
+    """
+
+    path: str
+    sha256: str = Field(description="SHA-256 of the file's exact bytes.")
+    schema_version: str
+    values: dict[ConfigKey, str]
+
+    def as_mapping(self) -> dict[str, str]:
+        """The settings as the loaders expect them, keyed by variable name."""
+        return {key.value: value for key, value in self.values.items()}
+
+
+class ProductionConfigReport(StrictModel):
+    """Whether unattended operation would find a usable configuration.
+
+    Every field is safe to print: this store holds no credentials, which is the
+    reason it is separate from the vault.
+    """
+
+    status: ProductionConfigStatus
+    path: str | None = None
+    schema_version: str | None = None
+    sha256: str | None = None
+    error_code: str | None = None
+    error: str | None = None
+    missing_keys: list[str] = Field(default_factory=list)
+
+    @property
+    def ready(self) -> bool:
+        return self.status is ProductionConfigStatus.FOUND
 
 
 class ConfigEntry(StrictModel):
@@ -139,10 +222,15 @@ __all__ = [
     "CONFIG_FILENAME",
     "FALSE_VALUES",
     "FORBIDDEN_KEYS",
+    "REQUIRED_PRODUCTION_KEYS",
     "RUNTIME_CONFIG_SCHEMA_VERSION",
     "TRUE_VALUES",
     "ConfigEntry",
     "ConfigKey",
+    "ConfigMode",
     "ConfigSource",
+    "ProductionConfig",
+    "ProductionConfigReport",
+    "ProductionConfigStatus",
     "RuntimeConfig",
 ]

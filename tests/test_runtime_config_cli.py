@@ -256,11 +256,18 @@ def test_preflight_reads_the_persisted_target(
 
 def test_preflight_is_ready_on_persisted_config_and_stored_credentials(
     config_store: Any,
+    production_config: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """What a scheduled task actually needs: nothing session-bound anywhere."""
+    """What a scheduled task actually needs: nothing session-bound anywhere.
+
+    Round 9.2.1 added one more requirement to that list - a complete production
+    configuration - so readiness now depends on the file the worker will read,
+    not merely on the settings this process can resolve.
+    """
+    production_config(TELEGRAM_TARGET_CHAT_ID="@pcfxsn")
     from conftest import FakeKeyringModule
 
     from goldpipeline import cli
@@ -320,9 +327,18 @@ def test_the_worker_reads_persisted_settings(
 
 
 def test_enabling_automation_does_not_enable_publishing(
-    config_store: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    config_store: Any,
+    production_config: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Requirements 18 and 27 of the spec, at the command boundary."""
+    """Requirements 18 and 27 of the Round 9.2 spec, at the command boundary.
+
+    Now started from a complete production configuration, because Round 9.2.1
+    made a partial one a refusal rather than a set of defaults. The point of the
+    test is unchanged: turning automation on says nothing about publishing.
+    """
+    production_config()
     invoke(["config-set", "GOLDPIPELINE_AUTOMATION_ENABLED", "true"])
     capsys.readouterr()
 

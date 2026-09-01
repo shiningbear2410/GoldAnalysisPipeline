@@ -21,8 +21,15 @@ from typing import Literal
 from pydantic import Field
 
 from goldpipeline.schemas.common import StrictModel, UtcDatetime, utc_now
+from goldpipeline.schemas.runtime_config import ConfigMode
 
-AUTOMATION_SCHEMA_VERSION = "1.0.0"
+AUTOMATION_SCHEMA_VERSION = "1.1.0"
+"""Bumped when a tick record gained configuration provenance.
+
+Additive: every new field has a default, so records written by 1.0.0 still
+read. The version moved anyway, because "which fields should I expect in an
+incident?" is a question worth being able to answer from the file itself.
+"""
 
 BACKOFF_MINUTES = (1, 2, 5, 10, 30)
 """Delay after each successive transient failure, then the item is exhausted.
@@ -126,6 +133,32 @@ class AutomationTickResult(StrictModel):
     status: TickStatus
     mode: str = Field(description="Pipeline ceiling this tick ran at.")
     auto_publish_enabled: bool = False
+    automation_enabled: bool = False
+
+    config_mode: ConfigMode | None = Field(
+        default=None, description="How this process resolved its non-secret configuration."
+    )
+    config_path: str | None = Field(
+        default=None, description="The configuration file this tick actually read."
+    )
+    config_sha256: str | None = Field(
+        default=None, description="SHA-256 of that file's bytes. Contains no secret material."
+    )
+    config_schema_version: str | None = None
+    code_version: str | None = Field(
+        default=None, description="Build constant, so an audit names configuration *and* code."
+    )
+    """Provenance, recorded because ``exit 0`` turned out not to mean anything.
+
+    A worker reading no configuration and a worker reading the right one
+    produced identical evidence: green history, nothing done. The fingerprint
+    settles it - if these fields disagree with the operator's file, the
+    scheduler was never reading it.
+
+    Deliberately a fingerprint and not the settings themselves. A tick record is
+    written every minute and read during an incident; both argue for keeping it
+    small, and the file it names is readable by anyone who needs the values.
+    """
 
     reconciled: list[WorkItem] = Field(default_factory=list)
     resumed_runs: list[WorkItem] = Field(default_factory=list)

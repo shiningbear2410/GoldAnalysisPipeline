@@ -14,7 +14,7 @@ import contextlib
 import json
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +33,10 @@ from goldpipeline.adapters.fake_writer import FakeWriterClient
 from goldpipeline.adapters.file_source import JsonFileAnalysisSource, JsonFileMarketDataSource
 from goldpipeline.adapters.finalizer_client import FinalizerClient, LazyFinalizerClient
 from goldpipeline.adapters.inbox_source import parse_event
+from goldpipeline.adapters.production_config import (
+    inspect_production_config,
+    load_production_config,
+)
 from goldpipeline.adapters.publisher_client import PublisherClient
 from goldpipeline.adapters.reviewer_client import ReviewerClient
 from goldpipeline.adapters.secrets import (
@@ -68,6 +72,7 @@ from goldpipeline.domain.errors import (
     FinalizeConfigurationError,
     MarketDataError,
     PipelineError,
+    ProductionConfigError,
     PublisherConfigurationError,
     ReviewConfigurationError,
     RunLockedError,
@@ -79,7 +84,12 @@ from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.ingestion import IngestOutcome, IngestResult
 from goldpipeline.schemas.orchestration import PipelineMode, PipelineStatus
 from goldpipeline.schemas.quality import DataQuality
-from goldpipeline.schemas.runtime_config import ConfigKey, ConfigSource
+from goldpipeline.schemas.runtime_config import (
+    ConfigKey,
+    ConfigMode,
+    ConfigSource,
+    ProductionConfig,
+)
 from goldpipeline.schemas.secrets import SecretName, SecretSource, SecretStatus
 from goldpipeline.services.automation import (
     DEFERRED,
@@ -88,7 +98,7 @@ from goldpipeline.services.automation import (
     may_resume,
     run_tick,
 )
-from goldpipeline.services.automation_state import AutomationStore, read_defer
+from goldpipeline.services.automation_state import AutomationStore, read_defer, read_json
 from goldpipeline.services.finalizer import finalize_run
 from goldpipeline.services.inbox import Inbox
 from goldpipeline.services.ingestion import (
@@ -491,12 +501,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Actually register it. Without this, nothing on the machine changes.",
     )
+    task_install.add_argument("--automation-dir", type=Path, default=None)
+    task_install.add_argument(
+        "--config-file", type=Path, default=None, metavar="PATH", help=argparse.SUPPRESS
+    )
     task_install.add_argument("--json", action="store_true")
 
     task_status = subparsers.add_parser(
         "automation-task-status", help="Read-only status of the registered task."
     )
     task_status.add_argument("--task-name", default=None)
+    task_status.add_argument("--automation-dir", type=Path, default=None)
+    task_status.add_argument(
+        "--config-file", type=Path, default=None, metavar="PATH", help=argparse.SUPPRESS
+    )
     task_status.add_argument("--json", action="store_true")
 
     task_remove = subparsers.add_parser(
@@ -628,6 +646,17 @@ def _add_automation_arguments(parser: argparse.ArgumentParser) -> None:
         "--fake-publisher",
         action="store_true",
         help="Use the offline publisher. Nothing is sent, even with publishing enabled.",
+    )
+    parser.add_argument(
+        "--config-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Read the production configuration from PATH instead of the "
+            "per-user location. For tests and offline smokes; the registered "
+            "task passes no such flag."
+        ),
     )
     parser.add_argument("--json", action="store_true", help="Emit the result as JSON.")
 
@@ -1619,24 +1648,41 @@ def _print_mt5_report(report: dict[str, Any], *, stream: Any) -> None:
             print("                   (listed, never substituted)", file=stream)
 
 
-def _worker_context(args: argparse.Namespace) -> WorkerContext:
+def _worker_context(
+    args: argparse.Namespace,
+    *,
+    env: Mapping[str, str] | None = None,
+    config: ProductionConfig | None = None,
+    config_mode: ConfigMode = ConfigMode.LAYERED,
+) -> WorkerContext:
     """Assemble a tick's dependencies. Builds no provider client.
 
     The publisher target is read here, from configuration, and only when
     unattended publishing is on - so a worker that is not publishing needs no
     Telegram credentials at all.
+
+    Args:
+        args: Parsed command line.
+        env: Settings source. Defaults to the layered view an operator gets.
+            The scheduled worker passes the strict production mapping instead,
+            so the fingerprint recorded on the tick describes exactly the
+            settings that tick ran on rather than a file it merely opened.
+        config: The production configuration behind *env*, recorded on the tick.
+        config_mode: Which contract produced *env*.
     """
-    settings = AutomationSettings.from_env(_config_env())
+    source: Mapping[str, str] = _config_env() if env is None else env
+
+    settings = AutomationSettings.from_env(source)
     if args.automation_dir is not None:
         settings = replace(settings, automation_dir=args.automation_dir)
 
-    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env(_config_env())
+    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env(source)
     inbox = Inbox(inbox_root)
     inbox.ensure_layout()
 
     target: str | None = None
     if settings.auto_publish_enabled and not args.fake_publisher:
-        target = TelegramSettings.from_env(_config_env(), secrets=_secret_provider()).target_chat
+        target = TelegramSettings.from_env(source, secrets=_secret_provider()).target_chat
     elif settings.auto_publish_enabled:
         # The offline publisher has no destination of its own, so the allowlist
         # is checked against the stand-in's channel. Nothing leaves the machine.
@@ -1649,8 +1695,10 @@ def _worker_context(args: argparse.Namespace) -> WorkerContext:
         settings=settings,
         market_source=_market_source(args),
         clients=_pipeline_clients(args),
-        expected_symbol=MarketDataSettings.from_env(_config_env()).canonical_symbol,
+        expected_symbol=MarketDataSettings.from_env(source).canonical_symbol,
         publisher_target=target,
+        config=config,
+        config_mode=config_mode,
     )
 
 
@@ -1667,20 +1715,87 @@ def _cmd_automation_run_once(args: argparse.Namespace) -> int:
 
 
 def _cmd_automation_worker_tick(args: argparse.Namespace) -> int:
-    """What Task Scheduler runs, every minute.
+    """What Task Scheduler runs, every minute. Strict about its configuration.
 
-    Honours the kill switch, so a registered task can be switched off without
-    unregistering it - which matters because unregistering is the step people
-    forget to undo.
+    Unlike every other command, this one refuses to run on built-in defaults.
+    The reason is the defect this behaviour replaces: when the persisted file
+    was unreachable, the layered loader read it as "no settings", defaulted the
+    kill switch to off, and reported a healthy ``exit 0`` every minute for
+    hours. The scheduler history was green throughout. "The operator switched
+    automation off" and "the configuration is gone" produced identical evidence.
+
+    So the file must be present and complete - both kill switches explicitly
+    among them - or nothing happens and the exit code says so. A person
+    investigating still has ``automation-run-once``, which is an operator action
+    and stays layered.
     """
-    settings = AutomationSettings.from_env(_config_env())
+    try:
+        config = load_production_config(args.config_file)
+    except ProductionConfigError as exc:
+        return _report_config_failure(exc, as_json=args.json)
+
+    settings = AutomationSettings.from_env(config.as_mapping())
     if not settings.enabled:
+        # Meaningfully different from the failure above, and reported so: the
+        # configuration was found, read and validated, and it says off.
         if args.json:
-            print(json.dumps({"status": "DISABLED", "reason": AUTOMATION_ENABLED_ENV}, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "status": "DISABLED",
+                        "reason": AUTOMATION_ENABLED_ENV,
+                        "config_mode": str(ConfigMode.STRICT_PERSISTENT),
+                        "config_path": config.path,
+                        "config_sha256": config.sha256,
+                        "config_schema_version": config.schema_version,
+                    },
+                    indent=2,
+                )
+            )
         else:
-            print(f"Automation is disabled ({AUTOMATION_ENABLED_ENV}). Nothing was done.")
+            print(f"Persistent config validated: {config.path}")
+            print(f"Config SHA-256:              {config.sha256}")
+            print(f"Automation is explicitly disabled ({AUTOMATION_ENABLED_ENV}). Nothing to do.")
         return EXIT_OK
-    return _report_tick(run_tick(_worker_context(args)), as_json=args.json)
+
+    context = _worker_context(
+        args,
+        env=config.as_mapping(),
+        config=config,
+        config_mode=ConfigMode.STRICT_PERSISTENT,
+    )
+    return _report_tick(run_tick(context), as_json=args.json)
+
+
+def _report_config_failure(exc: ProductionConfigError, *, as_json: bool) -> int:
+    """Refuse the tick loudly enough that Task Scheduler shows it.
+
+    Non-zero on purpose. ``Last Result: 0`` beside "nothing was done" is the
+    exact combination that hid the original defect, so a worker that cannot read
+    its configuration must never produce it.
+    """
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "status": "CONFIG_ERROR",
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": exc.details,
+                    "config_mode": str(ConfigMode.STRICT_PERSISTENT),
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            ),
+            file=sys.stderr,
+        )
+    else:
+        print(f"Configuration error: [{exc.code}] {exc.message}", file=sys.stderr)
+        for name in exc.details.get("missing", []):
+            print(f"  missing: {name}", file=sys.stderr)
+        print("No pipeline work was attempted.", file=sys.stderr)
+    return EXIT_ERROR
 
 
 def _report_tick(result: AutomationTickResult, *, as_json: bool) -> int:
@@ -1834,10 +1949,16 @@ def _cmd_automation_status(args: argparse.Namespace) -> int:
 
     deferred = _deferred_summary(inbox, moment)
     expired = inbox.directory(EXPIRED)
+    # Reported through the *strict* contract, not the layered one, because this
+    # answers "would the scheduled worker run?" - a question the operator's own
+    # environment cannot be allowed to flatter.
+    config = inspect_production_config(args.config_file)
     report = {
         "automation_enabled": settings.enabled,
         "auto_publish_enabled": settings.auto_publish_enabled,
         "allowed_target": settings.auto_publish_allowed_target,
+        "persistent_config": json.loads(config.model_dump_json()),
+        "scheduled_strict_mode": "READY" if config.ready else "NOT_READY",
         "last_tick_id": state.last_tick_id,
         "last_tick_status": state.last_tick_status,
         "last_tick_completed_at": (
@@ -1854,6 +1975,15 @@ def _cmd_automation_status(args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
         return EXIT_OK
 
+    print(f"Persistent config: {config.status}")
+    print(f"  Path:            {config.path or '(unresolved)'}")
+    print(f"  Schema:          {config.schema_version or '-'}")
+    print(f"  SHA-256:         {config.sha256 or '-'}")
+    if config.error_code:
+        print(f"  Problem:         [{config.error_code}] {config.error}")
+    for name in config.missing_keys:
+        print(f"  missing:         {name}")
+    print(f"Scheduled strict:  {report['scheduled_strict_mode']}")
     print(f"Automation:        {'enabled' if settings.enabled else 'disabled'}")
     print(f"Auto publish:      {'ON' if settings.auto_publish_enabled else 'OFF'}")
     print(f"Last tick:         {state.last_tick_id or 'never'} ({state.last_tick_status or '-'})")
@@ -1873,6 +2003,7 @@ def _cmd_automation_preflight(args: argparse.Namespace) -> int:
     """Report whether unattended operation is configured, naming no values."""
     settings = AutomationSettings.from_env(_config_env())
     backend = inspect_backend()
+    scheduled_config = inspect_production_config(args.config_file)
     statuses = {status.name: status for status in _secret_statuses()}
     report: dict[str, Any] = {
         "automation_enabled": settings.enabled,
@@ -1889,10 +2020,20 @@ def _cmd_automation_preflight(args: argparse.Namespace) -> int:
         # and an operator checking the allowlist should be able to see both
         # halves of the comparison before enabling anything.
         "configured_target": _config_env().resolve(ConfigKey.TELEGRAM_TARGET_CHAT_ID).value,
+        "persistent_config": json.loads(scheduled_config.model_dump_json()),
+        "scheduled_config": "READY" if scheduled_config.ready else "NOT_READY",
         "blockers": [],
     }
 
     blockers: list[str] = report["blockers"]
+    if not scheduled_config.ready:
+        # The single check that would have caught the original defect on day
+        # one: the operator's shell had every setting, and the scheduled task
+        # had none.
+        # The code only. The path and full message travel as structured data
+        # beside this list, and a blocker line that embeds a filesystem path is
+        # both harder to read and easy to match by accident.
+        blockers.append(f"the scheduled worker would refuse to run: {scheduled_config.error_code}")
     if report["mt5"] != "available":
         blockers.append("MT5 is not reachable; new events will defer rather than run")
     if not statuses[SecretName.ANTHROPIC_API_KEY].configured or not (
@@ -1950,6 +2091,11 @@ def _cmd_automation_preflight(args: argparse.Namespace) -> int:
     print(f"Auto publish:      {'ON' if settings.auto_publish_enabled else 'OFF'}")
     print(f"Allowed target:    {settings.auto_publish_allowed_target or '(none)'}")
     print(f"Configured target: {report['configured_target'] or '(not read)'}")
+    print(f"Scheduled config:  {report['scheduled_config']}")
+    print(f"  Path:            {scheduled_config.path or '(unresolved)'}")
+    print(f"  SHA-256:         {scheduled_config.sha256 or '-'}")
+    for name in scheduled_config.missing_keys:
+        print(f"  missing:         {name}")
     print(f"Task readiness:    {report['task_readiness']}")
     for blocker in blockers:
         print(f"  - {blocker}")
@@ -2267,7 +2413,9 @@ def _cmd_automation_task_install(args: argparse.Namespace) -> int:
         if not args.json:
             print(f"Already installed: {plan.task_name}")
             print("The registered definition matches. Nothing was changed.")
-        return _report_task(scheduler.query(plan.task_name), plan, as_json=args.json)
+        return _report_task(
+            scheduler.query(plan.task_name), plan, _config_comparison(args), as_json=args.json
+        )
 
     if not args.apply:
         print(f"Would register: {plan.task_name}")
@@ -2297,14 +2445,57 @@ def _cmd_automation_task_install(args: argparse.Namespace) -> int:
         # `--json` means machine-readable, and a prose line in front of the
         # document is the difference between parsing and a support ticket.
         print(f"Registered: {plan.task_name}")
-    return _report_task(info, plan, as_json=args.json)
+    return _report_task(info, plan, _config_comparison(args), as_json=args.json)
 
 
 def _cmd_automation_task_status(args: argparse.Namespace) -> int:
-    """Read-only status of the registered task."""
+    """Read-only status of the registered task, and which config it last read.
+
+    The comparison at the end is the cheap version of the check that took hours
+    to make by hand: if the scheduler is reading a different configuration from
+    the one an operator is editing, the two fingerprints differ and the answer
+    is on screen rather than inferred.
+    """
     plan = build_plan(task_name=_task_name(args))
     info = _task_scheduler().query(plan.task_name)
-    return _report_task(info, plan, as_json=args.json)
+    return _report_task(info, plan, _config_comparison(args), as_json=args.json)
+
+
+def _config_comparison(args: argparse.Namespace) -> dict[str, str | None]:
+    """Current production config fingerprint beside the last tick's.
+
+    Reads the newest history record. Both sides may legitimately be absent - a
+    machine with no configuration yet, or a task that has never fired - and
+    ``NO_TICK_YET`` says so rather than reporting a mismatch.
+    """
+    current = inspect_production_config(args.config_file)
+
+    settings = AutomationSettings.from_env(_config_env())
+    root = args.automation_dir if args.automation_dir is not None else settings.automation_dir
+    recent = AutomationStore(root).history(limit=1)
+
+    last_sha: str | None = None
+    last_tick: str | None = None
+    if recent:
+        record = read_json(recent[0]) or {}
+        raw_sha = record.get("config_sha256")
+        raw_tick = record.get("tick_id")
+        last_sha = str(raw_sha) if raw_sha else None
+        last_tick = str(raw_tick) if raw_tick else None
+
+    if last_sha is None:
+        match = "NO_TICK_YET"
+    elif current.sha256 is None:
+        match = "NO"
+    else:
+        match = "YES" if last_sha == current.sha256 else "NO"
+
+    return {
+        "current_config_sha256": current.sha256,
+        "last_tick_id": last_tick,
+        "last_tick_config_sha256": last_sha,
+        "config_match": match,
+    }
 
 
 def _cmd_automation_task_remove(args: argparse.Namespace) -> int:
@@ -2325,12 +2516,15 @@ def _cmd_automation_task_remove(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _report_task(info: TaskInfo, plan: Any, *, as_json: bool) -> int:
+def _report_task(
+    info: TaskInfo, plan: Any, comparison: dict[str, str | None], *, as_json: bool
+) -> int:
     """Print a task's status. Contains no credential, by construction."""
     if as_json:
         print(
             json.dumps(
                 {
+                    **comparison,
                     "task_name": plan.task_name,
                     "installed": info.installed,
                     "enabled": info.enabled,
@@ -2354,6 +2548,7 @@ def _report_task(info: TaskInfo, plan: Any, *, as_json: bool) -> int:
     if not info.installed:
         print(f"Task: {plan.task_name}")
         print("Installed: NO")
+        _print_config_comparison(comparison)
         print("\nRegister it with `automation-task-install --apply`.")
         return EXIT_BLOCKED
 
@@ -2368,10 +2563,23 @@ def _report_task(info: TaskInfo, plan: Any, *, as_json: bool) -> int:
     print(f"Last run:           {info.last_run_time or 'never'}")
     print(f"Last result:        {info.last_result if info.last_result is not None else '-'}")
     print(f"Next run:           {info.next_run_time or '-'}")
+    _print_config_comparison(comparison)
     if info.runs_as_system:
         print("\nWARNING: this task runs as SYSTEM. It cannot see the MetaTrader")
         print("window or read this user's credentials.", file=sys.stderr)
     return EXIT_OK
+
+
+def _print_config_comparison(comparison: dict[str, str | None]) -> None:
+    """Show whether the scheduler is reading the configuration on this disk."""
+    print(f"Current config SHA: {comparison['current_config_sha256'] or '(no valid config)'}")
+    print(f"Last tick SHA:      {comparison['last_tick_config_sha256'] or '(none recorded)'}")
+    print(f"Match:              {comparison['config_match']}")
+    if comparison["config_match"] == "NO":
+        print(
+            "\nWARNING: the last scheduled tick did not read the configuration on this disk.",
+            file=sys.stderr,
+        )
 
 
 def _cmd_show_run(args: argparse.Namespace) -> int:

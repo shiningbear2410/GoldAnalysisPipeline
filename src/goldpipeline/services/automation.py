@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from goldpipeline import PIPELINE_VERSION
 from goldpipeline.adapters.base import MarketDataSource
 from goldpipeline.adapters.inbox_source import parse_event
 from goldpipeline.config import AutomationSettings
@@ -74,6 +75,7 @@ from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.ingestion import IngestOutcome, IngestResult
 from goldpipeline.schemas.manifest import RunStatus
 from goldpipeline.schemas.orchestration import PipelineMode, PipelineStatus
+from goldpipeline.schemas.runtime_config import ConfigMode, ProductionConfig
 from goldpipeline.services.automation_state import (
     AutomationStore,
     next_defer,
@@ -149,6 +151,22 @@ class WorkerContext:
     argument that a payload could reach.
     """
 
+    config: ProductionConfig | None = None
+    """The production configuration this context was built from, if any.
+
+    Carried purely so the tick record can name it. The worker never re-reads
+    it - the caller resolved the settings already, and a second read could
+    disagree with the first.
+    """
+
+    config_mode: ConfigMode = ConfigMode.LAYERED
+    """Which contract produced :attr:`settings`.
+
+    Defaults to ``LAYERED`` because that is what an operator running a command
+    by hand gets. The scheduled worker sets ``STRICT_PERSISTENT`` explicitly,
+    and the difference is recorded on every tick.
+    """
+
     elapsed: Callable[[], float] = time.monotonic
     """Source for the tick deadline, in seconds.
 
@@ -167,6 +185,9 @@ class _Tick:
     started_elapsed: float
     mode: PipelineMode
     auto_publish: bool
+    automation_enabled: bool = False
+    config: ProductionConfig | None = None
+    config_mode: ConfigMode = ConfigMode.LAYERED
     reconciled: list[WorkItem] = field(default_factory=list)
     resumed: list[WorkItem] = field(default_factory=list)
     processed: list[WorkItem] = field(default_factory=list)
@@ -183,6 +204,12 @@ class _Tick:
             status=status,
             mode=str(self.mode),
             auto_publish_enabled=self.auto_publish,
+            automation_enabled=self.automation_enabled,
+            config_mode=self.config_mode,
+            config_path=self.config.path if self.config else None,
+            config_sha256=self.config.sha256 if self.config else None,
+            config_schema_version=self.config.schema_version if self.config else None,
+            code_version=PIPELINE_VERSION,
             reconciled=self.reconciled,
             resumed_runs=self.resumed,
             processed_events=self.processed,
@@ -216,6 +243,9 @@ def run_tick(context: WorkerContext, *, now: datetime | None = None) -> Automati
         started_elapsed=context.elapsed(),
         mode=PipelineMode.READY_FOR_PUBLISH,
         auto_publish=False,
+        automation_enabled=context.settings.enabled,
+        config=context.config,
+        config_mode=context.config_mode,
     )
 
     # Resolved before the lock: an unauthorised publish configuration is a

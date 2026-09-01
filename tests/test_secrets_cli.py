@@ -374,11 +374,20 @@ def test_preflight_warns_that_a_session_credential_will_not_survive(
 
 
 def test_preflight_is_ready_when_the_store_holds_everything(
-    store: FakeKeyringModule, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    store: FakeKeyringModule,
+    production_config: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """What a scheduled task actually needs: nothing session-bound."""
+    """What a scheduled task actually needs: nothing session-bound.
+
+    Round 9.2.1 added the production configuration to that list, so readiness
+    now requires the file the worker will read as well as the credentials it
+    will resolve.
+    """
     store.stored[(SERVICE_NAME, "anthropic_api_key")] = FAKE_API_KEY
     store.stored[(SERVICE_NAME, "openai_api_key")] = FAKE_OPENAI_KEY
+    production_config()
 
     invoke(preflight_args(tmp_path, "--json"))
     payload = json.loads(capsys.readouterr().out)

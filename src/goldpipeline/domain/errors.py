@@ -795,6 +795,86 @@ class SecretNotPersistableError(RuntimeConfigError):
     code = "SECRET_NOT_PERSISTABLE"
 
 
+class ProductionConfigError(RuntimeConfigError):
+    """The scheduled worker could not obtain a complete production configuration.
+
+    Distinct from :class:`RuntimeConfigError` because the *response* differs. An
+    operator at a keyboard may reasonably run on defaults; a scheduled task may
+    not. Every subclass here means the same thing to the worker - stop, touch
+    nothing, exit non-zero - and differs only in what a human is told to fix.
+
+    The whole family exists because the alternative was observed in production:
+    a missing file read as "no settings", filled in from built-in defaults, and
+    reported as a healthy ``exit 0`` every minute for hours.
+    """
+
+    code = "PRODUCTION_CONFIG_ERROR"
+
+
+class ConfigPathUnavailableError(ProductionConfigError):
+    """The production configuration path could not be resolved at all.
+
+    On Windows that means ``%LOCALAPPDATA%`` was absent from the environment.
+    Deliberately not softened into "use ``~/.config`` instead": a second
+    production path is a second place for the truth to hide.
+    """
+
+    code = "CONFIG_PATH_UNAVAILABLE"
+
+
+class PersistentConfigNotFoundError(ProductionConfigError):
+    """There is no configuration file where production expects one."""
+
+    code = "PERSISTENT_CONFIG_NOT_FOUND"
+
+
+class PersistentConfigUnreadableError(ProductionConfigError):
+    """The configuration file exists but could not be read."""
+
+    code = "PERSISTENT_CONFIG_UNREADABLE"
+
+
+class PersistentConfigInvalidJsonError(ProductionConfigError):
+    """The configuration file is not valid UTF-8 JSON."""
+
+    code = "PERSISTENT_CONFIG_INVALID_JSON"
+
+
+class PersistentConfigSchemaMismatchError(ProductionConfigError):
+    """The configuration file declares a schema this build does not accept."""
+
+    code = "PERSISTENT_CONFIG_SCHEMA_MISMATCH"
+
+
+class PersistentConfigIncompleteError(ProductionConfigError):
+    """A required production setting is absent.
+
+    Absent, not merely falsy. "The operator switched automation off" and "the
+    configuration disappeared" are different states of the world, and a
+    scheduled worker that cannot tell them apart will report the second as the
+    first for as long as nobody looks.
+    """
+
+    code = "PERSISTENT_CONFIG_INCOMPLETE"
+
+
+class PersistentConfigUnknownKeyError(ProductionConfigError):
+    """The configuration file holds a setting this build does not know.
+
+    Refused rather than ignored: an unknown key is usually a misspelt known one,
+    and silently dropping it means the setting the operator believed they had
+    configured is quietly at its default.
+    """
+
+    code = "PERSISTENT_CONFIG_UNKNOWN_KEY"
+
+
+class PersistentConfigSecretKeyError(ProductionConfigError):
+    """A credential name appeared in the configuration file."""
+
+    code = "PERSISTENT_CONFIG_SECRET_KEY_FORBIDDEN"
+
+
 class TaskSchedulerError(PipelineError):
     """A Windows Task Scheduler operation failed."""
 
@@ -826,6 +906,7 @@ __all__ = [
     "AutoPublishTargetMismatchError",
     "AutomationConfigurationError",
     "AutomationError",
+    "ConfigPathUnavailableError",
     "ContextIntegrityError",
     "CredentialBackendUnavailableError",
     "CredentialDeleteError",
@@ -865,7 +946,15 @@ __all__ = [
     "NaiveTimestampError",
     "NormalizationError",
     "OrchestrationError",
+    "PersistentConfigIncompleteError",
+    "PersistentConfigInvalidJsonError",
+    "PersistentConfigNotFoundError",
+    "PersistentConfigSchemaMismatchError",
+    "PersistentConfigSecretKeyError",
+    "PersistentConfigUnknownKeyError",
+    "PersistentConfigUnreadableError",
     "PipelineError",
+    "ProductionConfigError",
     "PublishDecisionExistsError",
     "PublishGateError",
     "PublisherArtifactExistsError",

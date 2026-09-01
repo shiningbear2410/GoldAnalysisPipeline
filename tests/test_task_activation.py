@@ -477,13 +477,16 @@ def test_nothing_in_the_tests_shells_out(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_a_registered_task_does_nothing_while_automation_is_off(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, production_config: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Requirement 26, and the whole of Phase B.
 
     Registering the task and switching the system on are two separate acts. The
-    scheduler may fire immediately; the worker must decline.
+    scheduler may fire immediately; the worker must decline - and since Round
+    9.2.1 it declines because a complete configuration told it to, not because
+    it failed to find one.
     """
+    production_config(GOLDPIPELINE_AUTOMATION_ENABLED="false")
     code = invoke(
         [
             "automation-worker-tick",
