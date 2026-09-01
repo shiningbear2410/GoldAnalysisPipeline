@@ -13,6 +13,7 @@ import argparse
 import contextlib
 import json
 import os
+import secrets
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -1732,8 +1733,27 @@ def _cmd_automation_worker_tick(args: argparse.Namespace) -> int:
     try:
         config = load_production_config(args.config_file)
     except ProductionConfigError as exc:
+        path = exc.details.get("path")
+        _record_worker_failure(args, code=exc.code, config_path=str(path) if path else None)
         return _report_config_failure(exc, as_json=args.json)
 
+    try:
+        return _run_worker_tick(args, config)
+    except PipelineError as exc:
+        # Recorded before re-raising, because the scheduled worker has no
+        # console: `main` will still choose the exit code, but the reason has to
+        # survive somewhere a person can read it afterwards.
+        _record_worker_failure(args, code=exc.code, config_path=config.path)
+        raise
+    except Exception as exc:
+        # The class name only. An unexpected exception's message can quote back
+        # whatever it was handed, and this record is written unattended.
+        _record_worker_failure(args, code=type(exc).__name__, config_path=config.path)
+        raise
+
+
+def _run_worker_tick(args: argparse.Namespace, config: ProductionConfig) -> int:
+    """The tick itself, once the configuration is known to be complete."""
     settings = AutomationSettings.from_env(config.as_mapping())
     if not settings.enabled:
         # Meaningfully different from the failure above, and reported so: the
@@ -1796,6 +1816,61 @@ def _report_config_failure(exc: ProductionConfigError, *, as_json: bool) -> int:
             print(f"  missing: {name}", file=sys.stderr)
         print("No pipeline work was attempted.", file=sys.stderr)
     return EXIT_ERROR
+
+
+def _record_worker_failure(args: argparse.Namespace, *, code: str, config_path: str | None) -> None:
+    """Leave durable evidence that a scheduled tick refused to run.
+
+    The silent worker has no console, so ``stderr`` reaches nobody. Task
+    Scheduler's ``Last Result`` still says *something failed*, but not which
+    thing, and "non-zero every minute" is not a diagnosis. So the failure is
+    written where every other tick is written: one history record and the
+    dashboard's ``last_error_safe``.
+
+    Two deliberate limits. The record carries a **code**, never a message or a
+    value - it is produced unattended, on a path where something is already
+    wrong. And every error here is swallowed: this runs *because* something
+    failed, and a second failure must not replace the first with a traceback
+    nobody can see either. The exit code has already told the scheduler.
+    """
+    # The automation directory is not one of the strict production settings,
+    # so its default applies even when the configuration could not be read.
+    root = (
+        args.automation_dir
+        if args.automation_dir is not None
+        else AutomationSettings().automation_dir
+    )
+    moment = utc_now()
+    try:
+        store = AutomationStore(root)
+        result = AutomationTickResult(
+            tick_id=secrets.token_hex(4),
+            started_at=moment,
+            completed_at=moment,
+            status=TickStatus.FAILED,
+            mode=str(DEFAULT_MODE),
+            auto_publish_enabled=False,
+            automation_enabled=False,
+            config_mode=ConfigMode.STRICT_PERSISTENT,
+            config_path=config_path,
+            code_version=PIPELINE_VERSION,
+            errors=[code],
+        )
+        store.record_tick(result)
+        state = store.read_state()
+        store.write_state(
+            state.model_copy(
+                update={
+                    "last_tick_id": result.tick_id,
+                    "last_tick_started_at": moment,
+                    "last_tick_completed_at": moment,
+                    "last_tick_status": TickStatus.FAILED,
+                    "last_error_safe": code,
+                }
+            )
+        )
+    except Exception:  # noqa: BLE001 - see the docstring
+        return
 
 
 def _report_tick(result: AutomationTickResult, *, as_json: bool) -> int:

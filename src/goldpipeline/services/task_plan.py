@@ -7,7 +7,24 @@ default:
 **The exact interpreter, never ``python``.** Task Scheduler runs with a PATH
 that has little to do with the one in an operator's shell, and "python" on that
 PATH may be a different interpreter with none of this project's dependencies.
-The plan names ``.venv\\Scripts\\python.exe`` by absolute path.
+The plan names the interpreter inside ``.venv\\Scripts`` by absolute path.
+
+**``pythonw.exe``, not ``python.exe``.** ``python.exe`` is a console-subsystem
+binary: started by Task Scheduler under an interactive token it has no console
+to inherit, so Windows allocates one - and that console is a real, visible
+window. At a one-minute cadence it flickers onto the desktop all day. Measured
+rather than assumed: a probe run as a scheduled task reported
+``GetConsoleWindow() != 0`` with ``IsWindowVisible() == 1`` under ``python.exe``
+and ``GetConsoleWindow() == 0`` under ``pythonw.exe``.
+
+``pythonw.exe`` is the same interpreter built for the GUI subsystem, so no
+console is created at all. Nothing else changes: same module, same arguments,
+same working directory, same exit codes. What *does* change is that
+``sys.stdout`` and ``sys.stderr`` are ``None``, so anything a failing tick
+printed now reaches nobody - which is why the worker records its failures in
+``automation/`` rather than relying on a stream. The Task Scheduler ``Hidden``
+flag was not used: it hides the task from a UI listing and has nothing to do
+with whether the process gets a console window.
 
 **An explicit working directory.** Runs, the inbox and the automation state are
 all resolved relative to the current directory. Without this the worker would
@@ -44,7 +61,11 @@ The *worker* entry point, not ``automation-run-once``: this one honours the kill
 switch, so a registered task can be switched off without unregistering it.
 """
 
+VENV_PYTHONW = Path(".venv") / "Scripts" / "pythonw.exe"
+"""The silent interpreter, and the one the scheduled task uses."""
+
 VENV_PYTHON = Path(".venv") / "Scripts" / "python.exe"
+"""The console interpreter. Only a fallback, for a checkout without ``pythonw``."""
 
 
 @dataclass(frozen=True)
@@ -116,13 +137,26 @@ def build_plan(
 
 
 def _resolve_interpreter(root: Path) -> Path:
-    """Prefer this checkout's virtualenv over whatever is on PATH."""
-    candidate = root / VENV_PYTHON
-    if candidate.is_file():
-        return candidate
+    """Prefer this checkout's silent virtualenv interpreter.
+
+    Order: the virtualenv's ``pythonw.exe``, then its ``python.exe``, then the
+    silent twin of the running interpreter, then the running interpreter itself.
+
+    The console build is kept as a fallback rather than a hard requirement
+    because a working scheduler that flickers is better than no scheduler at
+    all - but on any ordinary checkout the first candidate exists and the task
+    is silent.
+    """
+    for candidate in (root / VENV_PYTHONW, root / VENV_PYTHON):
+        if candidate.is_file():
+            return candidate
+
     # No virtualenv here. Naming the running interpreter is still far better
-    # than "python", which under Task Scheduler could be anything at all.
-    return Path(sys.executable)
+    # than "python", which under Task Scheduler could be anything at all - and
+    # its silent twin usually sits beside it.
+    running = Path(sys.executable)
+    silent = running.with_name("pythonw.exe")
+    return silent if silent.is_file() else running
 
 
 _TEMPLATE = """<?xml version="1.0" encoding="UTF-16"?>
@@ -175,6 +209,7 @@ __all__ = [
     "DEFAULT_INTERVAL_MINUTES",
     "DEFAULT_TASK_NAME",
     "VENV_PYTHON",
+    "VENV_PYTHONW",
     "WORKER_COMMAND",
     "TaskPlan",
     "build_plan",

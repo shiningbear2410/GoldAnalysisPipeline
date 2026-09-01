@@ -1186,6 +1186,51 @@ Match:              YES
 `NO` means the scheduler is not reading the file you are editing. That single
 line would have turned an evening of diagnosis into a glance.
 
+### The scheduled worker runs silently
+
+The task runs `.venv\Scripts\pythonw.exe`, not `python.exe`.
+
+`python.exe` is a console-subsystem binary. Started by Task Scheduler under an
+interactive token it has no console to inherit, so Windows allocates one - and
+that console is a real, visible window, flickering onto the desktop once a
+minute. Measured rather than assumed: a probe registered as a scheduled task
+reported `GetConsoleWindow() != 0` with `IsWindowVisible() == 1` under
+`python.exe`, and `GetConsoleWindow() == 0` under `pythonw.exe`.
+
+The task's `Hidden` flag is **not** the fix and is left `false`. It hides a task
+from a UI listing; it has nothing to do with whether the process gets a console.
+
+Everything else is byte-identical: same module, same arguments, same working
+directory, same `STRICT_PERSISTENT` contract, same exit codes.
+
+**The catch, and why this was not a one-line change.** Under `pythonw.exe` there
+are no standard streams at all - `sys.stdout` and `sys.stderr` are `None`. Every
+message the worker printed now reaches nobody. A refusal that only explained
+itself on stderr would become a bare non-zero exit code repeating every minute,
+which is a smaller version of the defect Round 9.2.1 removed.
+
+So a scheduled tick that refuses to run writes its reason where every other tick
+is written - a `FAILED` history record and `last_error_safe` in `state.json`:
+
+```text
+status              FAILED
+errors              ["PERSISTENT_CONFIG_NOT_FOUND"]
+config_mode         STRICT_PERSISTENT
+```
+
+A code, never a message or a value: the record is produced unattended. And the
+recorder swallows its own errors - it runs because something already failed, and
+a second failure must not replace a clean non-zero exit with a traceback nobody
+can see.
+
+Verified end to end through a real `pythonw.exe` scheduled task:
+
+| Case | `Last Result` | Evidence |
+| --- | --- | --- |
+| healthy tick | `0` | history record, `status=OK`, config SHA |
+| explicitly disabled | `0` | validated config named in the record |
+| missing configuration | `1` | history record, `status=FAILED`, safe code |
+
 ### Upgrading while a task is registered
 
 **Remove the scheduled task before modifying source.** It runs the working tree

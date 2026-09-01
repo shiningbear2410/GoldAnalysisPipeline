@@ -118,8 +118,11 @@ def test_the_registered_definition_names_the_venv_interpreter(
     _, xml = task_scheduler.installed[0]
 
     assert ".venv" in xml
-    assert "python.exe" in xml
+    # Round 9.2.2: the silent build. `python.exe` under an interactive-token
+    # task has no console to inherit, so Windows makes one - and it is visible.
+    assert "pythonw.exe" in xml
     assert "<Command>python<" not in xml
+    assert "<Command>pythonw<" not in xml
 
 
 def test_the_registered_definition_sets_the_working_directory(
