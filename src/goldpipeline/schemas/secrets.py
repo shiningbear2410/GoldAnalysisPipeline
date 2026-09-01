@@ -49,6 +49,32 @@ class SecretName(StrEnum):
         return self.value.lower()
 
 
+REQUIRED_SECRETS = frozenset({SecretName.ANTHROPIC_API_KEY})
+"""Credentials the production pipeline cannot do its work without.
+
+One entry, because every AI stage - Writer, Reviewer and Finalizer - now calls
+Anthropic. They remain three independent requests with three different prompts;
+what they share is an account, not a conversation.
+"""
+
+CONDITIONAL_SECRETS = frozenset({SecretName.TELEGRAM_BOT_TOKEN})
+"""Needed only when the Publisher actually runs.
+
+Absent is not a fault while unattended publishing is off, which is why readiness
+has always been reported against the mode rather than the list.
+"""
+
+OPTIONAL_SECRETS = frozenset({SecretName.OPENAI_API_KEY})
+"""Kept for the optional legacy adapter, and never required.
+
+The Reviewer used OpenAI until Round 9.3.1. The adapter still exists and still
+works if a caller wires it up deliberately, so the credential stays *nameable* -
+but an operator who never wants it must never be asked to create one. Reported
+as "not required" rather than "missing": those are different facts, and only one
+of them is a problem.
+"""
+
+
 class SecretSource(StrEnum):
     """Where a resolved credential came from.
 
@@ -80,9 +106,13 @@ class SecretStatus(StrictModel):
     @property
     def summary(self) -> str:
         """One line an operator can read at a glance."""
-        if not self.configured:
-            return "missing"
-        return f"configured ({_HUMAN[self.source]})"
+        if self.configured:
+            return f"configured ({_HUMAN[self.source]})"
+        if self.name in OPTIONAL_SECRETS:
+            # Not a gap. Saying "missing" here would send an operator hunting
+            # for a credential this pipeline has no use for.
+            return "not required"
+        return "missing"
 
 
 _HUMAN = {
@@ -92,4 +122,11 @@ _HUMAN = {
 }
 
 
-__all__ = ["SecretName", "SecretSource", "SecretStatus"]
+__all__ = [
+    "CONDITIONAL_SECRETS",
+    "OPTIONAL_SECRETS",
+    "REQUIRED_SECRETS",
+    "SecretName",
+    "SecretSource",
+    "SecretStatus",
+]

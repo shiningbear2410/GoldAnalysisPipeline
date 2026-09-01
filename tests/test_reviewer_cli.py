@@ -152,7 +152,8 @@ def test_real_reviewer_without_a_key_fails_before_any_call(
 
     assert code == EXIT_ERROR
     assert "Configuration error" in err
-    assert "OPENAI_API_KEY" in err
+    # Anthropic since Round 9.3.1: one credential covers all three AI stages.
+    assert "ANTHROPIC_API_KEY" in err
     assert not (Path(drafted_run.run_dir) / "gpt_review.json").exists()
 
 

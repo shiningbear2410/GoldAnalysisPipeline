@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from goldpipeline import PIPELINE_VERSION
+from goldpipeline.adapters.anthropic_reviewer import ANTHROPIC_PROVIDER
 from goldpipeline.adapters.config_store import (
     LayeredConfig,
     RuntimeConfigStore,
@@ -91,7 +92,12 @@ from goldpipeline.schemas.runtime_config import (
     ConfigSource,
     ProductionConfig,
 )
-from goldpipeline.schemas.secrets import SecretName, SecretSource, SecretStatus
+from goldpipeline.schemas.secrets import (
+    OPTIONAL_SECRETS,
+    SecretName,
+    SecretSource,
+    SecretStatus,
+)
 from goldpipeline.services.automation import (
     DEFERRED,
     EXPIRED,
@@ -910,9 +916,12 @@ def _reviewer_client(*, fake: bool, model: str | None) -> ReviewerClient:
     settings = ReviewerSettings.from_env(
         _config_env(), model_override=model, secrets=_secret_provider()
     )
-    from goldpipeline.adapters.openai_reviewer import OpenAIReviewerClient
+    # Anthropic since Round 9.3.1. The orchestrator still sees only a
+    # `ReviewerClient`; the legacy OpenAI adapter remains importable for anyone
+    # who wires it up deliberately, but nothing in production selects it.
+    from goldpipeline.adapters.anthropic_reviewer import AnthropicReviewerClient
 
-    return OpenAIReviewerClient(settings)
+    return AnthropicReviewerClient(settings)
 
 
 def _cmd_review_draft(args: argparse.Namespace) -> int:
@@ -2100,6 +2109,9 @@ def _cmd_automation_preflight(args: argparse.Namespace) -> int:
         "blockers": [],
     }
 
+    report["reviewer_provider"] = ANTHROPIC_PROVIDER
+    report["openai"] = statuses[SecretName.OPENAI_API_KEY].summary
+
     blockers: list[str] = report["blockers"]
     if not scheduled_config.ready:
         # The single check that would have caught the original defect on day
@@ -2111,11 +2123,10 @@ def _cmd_automation_preflight(args: argparse.Namespace) -> int:
         blockers.append(f"the scheduled worker would refuse to run: {scheduled_config.error_code}")
     if report["mt5"] != "available":
         blockers.append("MT5 is not reachable; new events will defer rather than run")
-    if not statuses[SecretName.ANTHROPIC_API_KEY].configured or not (
-        statuses[SecretName.OPENAI_API_KEY].configured
-    ):
-        # Only a blocker for *new* work. A Run resumed at the gate needs neither.
-        blockers.append("writer/reviewer credentials are missing; new events cannot be drafted")
+    if not statuses[SecretName.ANTHROPIC_API_KEY].configured:
+        # One credential now covers Writer, Reviewer and Finalizer. Only a
+        # blocker for *new* work: a Run resumed at the gate needs no key at all.
+        blockers.append("the Anthropic credential is missing; new events cannot be drafted")
 
     if not backend.ready:
         # Not a blocker on its own - process-environment credentials still
@@ -2126,7 +2137,9 @@ def _cmd_automation_preflight(args: argparse.Namespace) -> int:
         )
 
     session_only = [
-        str(name) for name, status in statuses.items() if status.source is SecretSource.PROCESS_ENV
+        str(name)
+        for name, status in statuses.items()
+        if status.source is SecretSource.PROCESS_ENV and name not in OPTIONAL_SECRETS
     ]
     if session_only:
         # The trap this whole round exists to close: variables set with
@@ -2160,8 +2173,9 @@ def _cmd_automation_preflight(args: argparse.Namespace) -> int:
     print(f"                   {'secure' if backend.secure else 'NOT trusted'}")
     print(f"MT5:               {report['mt5']}")
     print(f"Anthropic:         {report['anthropic']}")
-    print(f"OpenAI:            {report['openai']}")
+    print(f"Reviewer provider: {report['reviewer_provider']}")
     print(f"Telegram:          {report['telegram']}")
+    print(f"OpenAI:            {report['openai']}")
     print(f"Automation:        {'enabled' if settings.enabled else 'disabled'}")
     print(f"Auto publish:      {'ON' if settings.auto_publish_enabled else 'OFF'}")
     print(f"Allowed target:    {settings.auto_publish_allowed_target or '(none)'}")

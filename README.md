@@ -288,12 +288,50 @@ Issues: 0
 Review: runs/20260828_022701_a83f2c/gpt_review.json
 ```
 
-Drop `--fake-reviewer` to call OpenAI for real. That needs `OPENAI_API_KEY` in
-the environment; `OPENAI_REVIEW_MODEL` (or `--model`) selects the model,
-defaulting to `gpt-5.1`.
+Drop `--fake-reviewer` to call the provider for real. That needs
+`ANTHROPIC_API_KEY` in the environment or the credential store;
+`ANTHROPIC_REVIEWER_MODEL` (or `--model`) selects the model, defaulting to the
+writer's model.
 
 Exit codes match the writer: `0` success, `1` configuration problem, `2` the
 data or the provider answer was unusable.
+
+### One vendor, three independent stages
+
+Since Round 9.3.1 the Writer, the Reviewer and the Finalizer all call Anthropic.
+Production needs exactly one AI credential:
+
+```text
+Writer      -> Anthropic
+Reviewer    -> Anthropic
+Finalizer   -> Anthropic
+Publisher   -> Telegram
+```
+
+`OPENAI_API_KEY` is **not required** and is never a readiness blocker. An
+operator who has no OpenAI account is never asked to create one; `secrets-status`
+reports the slot as `not required` rather than `missing`, because those are
+different facts and only one of them is a problem.
+
+**Sharing a vendor is not sharing a judgement.** It would be easy to read "both
+stages call Claude" as licence to merge them. It is not. The reviewer receives
+the immutable context, the finished draft and the writer's metadata, and answers
+a *different* prompt against a *different* schema in a *separate* request. It
+has to be able to disagree with the draft, and a model asked to critique its own
+answer inside one call does not reliably do that. The independence lives in the
+request boundary, not in the billing account.
+
+The reviewer keeps its own model setting, `ANTHROPIC_REVIEWER_MODEL`, defaulting
+to the writer's model but movable on its own — because two stages that cannot be
+configured apart are one stage.
+
+The artifact is still named `gpt_review.json`. The name is historical and
+deliberately unchanged: it appears in the manifests and digest chains of Runs
+that already exist, and renaming it would invalidate their provenance to buy
+nothing but tidiness.
+
+The OpenAI adapter (`adapters/openai_reviewer.py`) is retained, still tested,
+and selected by nothing. It is there for anyone who wires it up deliberately.
 
 ### What the reviewer does and does not do
 
@@ -1321,10 +1359,27 @@ sixty an hour, so every failure is sorted first:
 | --- | --- | --- |
 | `TERMINAL` | review `REJECT`, gate `BLOCKED`, publish `FAILED` / `PARTIAL` / `UNCERTAIN` | **Never retried.** A stage reached a conclusion; nothing failed |
 | `PERMANENT` | tampered artifacts, unusable payload | Never retried. It will not repair itself |
-| `CONFIGURATION` | a missing API key | 30-minute backoff, never exhausted - a human will fix it, and should not also have to clear a retry file |
-| `TRANSIENT` | provider timeout, 5xx, malformed structured response | 1m → 2m → 5m → 10m → 30m, then exhausted |
+| `CONFIGURATION` | a missing API key, **any deterministic 4xx** | 30-minute backoff, never exhausted - a human will fix it, and should not also have to clear a retry file |
+| `TRANSIENT` | provider timeout, 408, 429, 5xx, malformed structured response | 1m → 2m → 5m → 10m → 30m, then exhausted |
 
-Five attempts over three quarters of an hour, then a person looks. Any successful
+Five attempts over three quarters of an hour, then a person looks.
+
+**Why "any deterministic 4xx" is in that table.** It was not there in Round 9.3,
+and a real scheduled Run paid for the omission. The Anthropic mapping had a
+catch-all turning every `APIStatusError` into a *provider* error, so an
+`HTTP 400 invalid_request_error` - an identity-linked API key that needed a
+workspace header - was retried at one, two and five minutes. Three real requests
+to establish the same certainty three times, and a Run stalled behind a backoff
+that could never expire into success.
+
+The rule now: every 4xx **except 408 and 429** describes the request rather than
+the moment, so it fails closed as `CONFIGURATION`. `408` is the server saying it
+waited too long and `429` that it is busy; both mean "later" rather than "no",
+so both keep the bounded backoff. 5xx is the server's problem and may well pass.
+
+The split lives in `adapters/anthropic_errors.py`, once, and the Writer, the
+Reviewer and the Finalizer all import it - so the three stages cannot come to
+disagree about what a 400 means. Any successful
 advance clears the state, so a Run that recovers does not carry a delay forward.
 
 **Publish outcomes never reach the classifier.** Round 6 decided that an
@@ -1566,7 +1621,7 @@ unattended scheduled task needs.
 ### Lazy, still
 
 Nothing loads all three credentials. A Run resumed at the gate needs none; the
-writer needs Anthropic only; the reviewer needs OpenAI only; the publisher needs
+writer, reviewer and finalizer need Anthropic only; the publisher needs
 Telegram only, and only when unattended publishing is on. The credential store is
 consulted for one entry at the moment a stage is about to use it.
 

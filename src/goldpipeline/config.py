@@ -34,8 +34,16 @@ from goldpipeline.schemas.secrets import SecretName
 DEFAULT_MODEL = "claude-opus-5"
 """Writer model used when ``ANTHROPIC_MODEL`` is not set."""
 
+DEFAULT_REVIEWER_MODEL = DEFAULT_MODEL
+"""Reviewer model used when ``ANTHROPIC_REVIEWER_MODEL`` is not set.
+
+Same model as the Writer by default, and a separate setting on purpose: the two
+stages are independent judgements, and an operator may well want the reviewer on
+a different model without touching the writer.
+"""
+
 DEFAULT_REVIEW_MODEL = "gpt-5.1"
-"""Reviewer model used when ``OPENAI_REVIEW_MODEL`` is not set."""
+"""Legacy OpenAI reviewer default. Retained for the optional legacy adapter."""
 
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_RETRIES = 2
@@ -60,8 +68,15 @@ DEFAULT_PUBLISH_TIMEOUT_SECONDS = 30.0
 """Finite by construction. An unbounded publish call is how a process hangs
 holding an uncommitted publish intent."""
 
+REVIEWER_MODEL_ENV = "ANTHROPIC_REVIEWER_MODEL"
+"""Which model reviews the draft. Non-secret, like every other model setting."""
+
 REVIEW_API_KEY_ENV = "OPENAI_API_KEY"
+"""Legacy. No longer read by production; kept so the legacy adapter's messages
+can still name the setting an operator would have configured."""
+
 REVIEW_MODEL_ENV = "OPENAI_REVIEW_MODEL"
+"""Legacy, as above."""
 REVIEW_TIMEOUT_ENV = "GOLDPIPELINE_REVIEW_TIMEOUT"
 REVIEW_MAX_RETRIES_ENV = "GOLDPIPELINE_REVIEW_MAX_RETRIES"
 REVIEW_MAX_TOKENS_ENV = "GOLDPIPELINE_REVIEW_MAX_TOKENS"
@@ -160,14 +175,15 @@ class WriterSettings:
 class ReviewerSettings:
     """Everything the reviewer stage needs in order to call a provider.
 
-    Deliberately a separate type from :class:`WriterSettings` rather than a
-    shared one with a provider flag: the two stages use different vendors, and
-    a single object holding both credentials would be one object too easy to
-    log by accident.
+    Still a separate type from :class:`WriterSettings` even though both stages
+    now call Anthropic on the same account. The reviewer has its own model, its
+    own timeout and its own token budget, and merging the two would make it
+    fractionally easier to accidentally review a draft with the writer's
+    settings - which is the one thing the review stage exists to avoid.
     """
 
     api_key: str = field(repr=False)
-    model: str = DEFAULT_REVIEW_MODEL
+    model: str = DEFAULT_REVIEWER_MODEL
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_retries: int = DEFAULT_MAX_RETRIES
     max_output_tokens: int = DEFAULT_MAX_TOKENS
@@ -198,18 +214,22 @@ class ReviewerSettings:
         """
         source = os.environ if env is None else env
 
-        api_key = _secret(SecretName.OPENAI_API_KEY, secrets, env)
+        # Anthropic since Round 9.3.1. The reviewer is still an entirely
+        # separate request with its own prompt and its own schema; what changed
+        # is only which account answers it, and that this pipeline no longer
+        # obliges an operator to hold a second vendor's credential.
+        api_key = _secret(SecretName.ANTHROPIC_API_KEY, secrets, env)
         if not api_key:
             raise ReviewConfigurationError(
-                f"{REVIEW_API_KEY_ENV} is not set; the reviewer cannot reach the provider",
-                setting=REVIEW_API_KEY_ENV,
+                f"{API_KEY_ENV} is not set; the reviewer cannot reach the provider",
+                setting=API_KEY_ENV,
             )
 
-        model = (model_override or source.get(REVIEW_MODEL_ENV) or DEFAULT_REVIEW_MODEL).strip()
+        model = (model_override or source.get(REVIEWER_MODEL_ENV) or DEFAULT_REVIEWER_MODEL).strip()
         if not model:
             raise ReviewConfigurationError(
-                f"{REVIEW_MODEL_ENV} is set but empty; unset it to use the default",
-                setting=REVIEW_MODEL_ENV,
+                f"{REVIEWER_MODEL_ENV} is set but empty; unset it to use the default",
+                setting=REVIEWER_MODEL_ENV,
             )
 
         return cls(
@@ -757,7 +777,9 @@ __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_MT5_SYMBOL",
     "DEFAULT_PUBLISH_TIMEOUT_SECONDS",
+    "DEFAULT_REVIEWER_MODEL",
     "DEFAULT_REVIEW_MODEL",
+    "REVIEWER_MODEL_ENV",
     "DEFAULT_TIMEFRAME",
     "DEFAULT_TIMEOUT_SECONDS",
     "DEFER_RETRY_ENV",

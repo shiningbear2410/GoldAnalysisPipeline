@@ -6,14 +6,23 @@ copies drifting apart - one learning about a new failure mode the other does
 not - so the decisions live here once and each stage supplies its own error
 classes.
 
-The mapping itself encodes two judgements worth stating:
+The mapping itself encodes three judgements worth stating:
 
 * **Authentication and model problems are configuration errors, not provider
   errors.** They will fail identically on retry, so they must not look
   transient to a caller deciding whether to try again.
+* **So is every other deterministic 4xx.** This one was learned the hard way. A
+  real scheduled Run met ``HTTP 400 invalid_request_error`` - an identity-linked
+  API key that needed a workspace header - and the catch-all below classified it
+  as a provider fault. The automation layer duly retried it at one, two and five
+  minutes, spending three real requests discovering the same certainty each
+  time. A 4xx means *this request* was wrong; waiting changes nothing about it.
 * **Provider messages are never echoed.** An SDK exception can carry the
   request body back, and these messages end up in a Run's manifest. Every
   message below is written here, not copied from the provider.
+
+The split is here, once, rather than in each stage's adapter, so the Writer, the
+Reviewer and the Finalizer cannot come to disagree about what a 400 means.
 """
 
 from __future__ import annotations
@@ -22,6 +31,23 @@ from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from goldpipeline.domain.errors import PipelineError
+
+RETRYABLE_STATUS_CODES = frozenset({408, 429})
+"""4xx codes that genuinely describe a moment rather than a request.
+
+``408`` is the server saying it waited too long, ``429`` that it is busy. Both
+say "later" rather than "no", so both keep the bounded backoff.
+"""
+
+
+def is_deterministic_status(status_code: int) -> bool:
+    """Whether this HTTP status will produce the same answer on every retry.
+
+    Every 4xx except :data:`RETRYABLE_STATUS_CODES` describes something wrong
+    with the request itself - a bad credential, an unknown model, a malformed
+    body, a missing required header. 5xx is the server's problem and may pass.
+    """
+    return 400 <= status_code < 500 and status_code not in RETRYABLE_STATUS_CODES
 
 
 @dataclass(frozen=True)
@@ -82,6 +108,14 @@ def raise_mapped(
         raise errors.provider("provider rate limit reached", status_code=429) from exc
 
     if isinstance(exc, anthropic.APIStatusError):
+        if is_deterministic_status(exc.status_code):
+            raise errors.configuration(
+                f"provider rejected the request (HTTP {exc.status_code}); "
+                "the same request will be rejected again, so it is not retried. "
+                "Check the credential, the model and the request settings.",
+                status_code=exc.status_code,
+                setting=errors.api_key_setting,
+            ) from exc
         raise errors.provider(
             f"provider returned HTTP {exc.status_code}", status_code=exc.status_code
         ) from exc
@@ -163,9 +197,11 @@ def build_sdk_client(
 
 
 __all__ = [
+    "RETRYABLE_STATUS_CODES",
     "AnthropicErrorMap",
     "build_sdk_client",
     "check_stop_reason",
+    "is_deterministic_status",
     "raise_mapped",
     "usage_fields",
 ]

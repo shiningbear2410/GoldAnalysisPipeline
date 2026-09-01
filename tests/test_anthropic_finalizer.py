@@ -251,7 +251,18 @@ def test_no_mapped_error_leaks_the_key() -> None:
 
 
 def test_the_provider_body_is_not_echoed() -> None:
-    stub = StubClient(error=_http_error(400))
+    """A 500 now, since Round 9.3.1 routes deterministic 4xx elsewhere."""
+    stub = StubClient(error=_http_error(500))
     with pytest.raises(FinalizeProviderError) as exc:
         AnthropicFinalizerClient(settings(), client=stub).finalize(request())
-    assert str(exc.value) == "[FINALIZE_PROVIDER_ERROR] provider returned HTTP 400"
+    assert str(exc.value) == "[FINALIZE_PROVIDER_ERROR] provider returned HTTP 500"
+    assert "boom" not in str(exc.value)
+
+
+def test_a_deterministic_400_is_a_configuration_error() -> None:
+    """The shared mapping applies to every stage, not just the writer."""
+    stub = StubClient(error=_http_error(400))
+    with pytest.raises(FinalizeConfigurationError) as exc:
+        AnthropicFinalizerClient(settings(), client=stub).finalize(request())
+    assert exc.value.details["status_code"] == 400
+    assert "boom" not in str(exc.value)

@@ -276,8 +276,29 @@ def test_no_error_path_leaks_the_key() -> None:
 
 
 def test_provider_body_is_not_echoed_into_the_message() -> None:
-    """Provider payloads can quote the request; this message reaches the manifest."""
-    stub = StubClient(error=_http_error(400))
+    """Provider payloads can quote the request; this message reaches the manifest.
+
+    Uses a 500 because Round 9.3.1 moved deterministic 4xx onto the
+    configuration branch; the property under test is the *message*, and it has
+    to hold on whichever branch is taken.
+    """
+    stub = StubClient(error=_http_error(500))
     with pytest.raises(WriterProviderError) as exc:
         AnthropicWriterClient(settings(), client=stub).generate(request())
-    assert str(exc.value) == "[WRITER_PROVIDER_ERROR] provider returned HTTP 400"
+    assert str(exc.value) == "[WRITER_PROVIDER_ERROR] provider returned HTTP 500"
+    assert "boom" not in str(exc.value)
+
+
+def test_a_deterministic_400_is_a_configuration_error() -> None:
+    """The Round 9.3 production failure, pinned down.
+
+    A real scheduled Run met ``HTTP 400 invalid_request_error`` and the old
+    catch-all called it a provider fault, so the automation layer retried it at
+    one, two and five minutes - three real requests to learn the same certainty
+    three times. A 4xx describes the request, not the moment.
+    """
+    stub = StubClient(error=_http_error(400))
+    with pytest.raises(WriterConfigurationError) as exc:
+        AnthropicWriterClient(settings(), client=stub).generate(request())
+    assert exc.value.details["status_code"] == 400
+    assert "boom" not in str(exc.value), "the provider body is still never echoed"

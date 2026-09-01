@@ -16,7 +16,7 @@ from conftest import FAKE_OPENAI_KEY
 
 from goldpipeline.adapters.openai_reviewer import OpenAIReviewerClient
 from goldpipeline.adapters.reviewer_client import ReviewRequest
-from goldpipeline.config import ReviewerSettings
+from goldpipeline.config import DEFAULT_REVIEW_MODEL, ReviewerSettings
 from goldpipeline.domain.errors import (
     ReviewConfigurationError,
     ReviewProviderError,
@@ -29,7 +29,14 @@ RUN_ID = "20260828_022701_a83f2c"
 
 
 def settings() -> ReviewerSettings:
-    return ReviewerSettings.from_env({"OPENAI_API_KEY": FAKE_OPENAI_KEY})
+    """Settings for the *legacy* adapter, built directly.
+
+    Not through ``from_env``: since Round 9.3.1 that resolves the Anthropic
+    credential, because production no longer has an OpenAI one. This adapter is
+    retained and still tested, but it is now something a caller wires up
+    deliberately rather than anything the pipeline selects.
+    """
+    return ReviewerSettings(api_key=FAKE_OPENAI_KEY, model=DEFAULT_REVIEW_MODEL)
 
 
 def request() -> ReviewRequest:

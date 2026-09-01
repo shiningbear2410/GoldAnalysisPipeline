@@ -343,7 +343,7 @@ def test_preflight_reports_what_is_missing(
     assert payload["mt5"] == "available", "the offline stand-in answers"
     assert payload["anthropic"] == "missing"
     assert payload["task_readiness"] == "NOT_READY"
-    assert any("credentials are missing" in blocker for blocker in payload["blockers"])
+    assert any("Anthropic credential is missing" in blocker for blocker in payload["blockers"])
 
 
 def test_publishing_credentials_are_not_required_when_publishing_is_off(
