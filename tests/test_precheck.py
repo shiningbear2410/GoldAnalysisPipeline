@@ -138,6 +138,37 @@ def test_a_mismatched_claim_is_flagged(runs_dir: Any, tmp_path: Any) -> None:
     assert finding.source_path == "context.price.latest_close"
 
 
+def test_a_claim_resolving_to_an_oversized_context_value_is_clipped(
+    runs_dir: Any, tmp_path: Any
+) -> None:
+    """Round 9.3.2 production incident, reproduced and fixed.
+
+    A claim may cite a free-text context field (``context.raw_analysis.text``)
+    whose resolved value is far longer than a price. Unlike ``SourceClaim.value``,
+    which the writer's own schema already caps at 400 characters, the *resolved*
+    context value carries no such bound - so the precheck must clip it before
+    handing it to ``PrecheckFinding``, which does cap at 400. The uncapped path
+    used to raise a raw ``pydantic.ValidationError`` here instead of reporting
+    the mismatch.
+    """
+    long_text = "Giá vàng đang giằng co quanh vùng hỗ trợ mạnh. " * 20
+    assert len(long_text) > 400
+    analysis = make_analysis_payload(raw_text=long_text)
+    claims = [
+        SourceClaim(type=ClaimType.PRICE, value="9999.00", source="context.raw_analysis.text")
+    ]
+    report = check(runs_dir, tmp_path, CLEAN_ARTICLE, claims=claims, analysis=analysis)
+
+    assert FindingCode.CLAIM_VALUE_MISMATCH in codes(report)
+    finding = next(f for f in report.findings if f.code is FindingCode.CLAIM_VALUE_MISMATCH)
+    assert finding.expected is not None
+    assert len(finding.expected) <= 400
+    assert finding.expected.endswith("…")
+    assert finding.actual == "9999.00"
+    assert finding.source_path == "context.raw_analysis.text"
+    assert len(finding.message) <= 1000
+
+
 def test_an_unresolvable_claim_path_is_flagged(runs_dir: Any, tmp_path: Any) -> None:
     """Requirement 27.10."""
     claims = [

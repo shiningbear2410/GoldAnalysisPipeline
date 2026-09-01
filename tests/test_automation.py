@@ -40,6 +40,7 @@ from goldpipeline.adapters.fake_writer import FakeWriterClient
 from goldpipeline.domain.errors import (
     ArtifactIntegrityError,
     MarketDataConfigurationError,
+    ReviewSchemaError,
     ReviewTimeoutError,
     StaleMarketDataError,
     WriterConfigurationError,
@@ -647,6 +648,7 @@ def test_the_deadline_stops_new_work_without_interrupting_any(
         (WriterConfigurationError("no key"), RetryClass.CONFIGURATION),
         (MarketDataConfigurationError("bad symbol"), RetryClass.CONFIGURATION),
         (ArtifactIntegrityError("tampered"), RetryClass.PERMANENT),
+        (ReviewSchemaError("precheck finding rejected by its own schema"), RetryClass.PERMANENT),
     ],
 )
 def test_failures_are_sorted_into_the_right_bucket(error: Any, expected: RetryClass) -> None:
@@ -839,6 +841,44 @@ def test_a_tampered_run_is_not_auto_retried(
     tick(context)
     record = AutomationStore(automation_dir).read_retry(reviewed.run_id)
 
+    assert record is not None
+    assert record.retry_class is RetryClass.PERMANENT
+    assert record.exhausted
+
+
+def test_a_precheck_schema_failure_does_not_crash_the_tick_or_get_retried(
+    inbox: Inbox,
+    runs_dir: Path,
+    tmp_path: Path,
+    automation_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 9.3.2: the incident that prompted this file's ``ReviewSchemaError``
+    case. A raw ``pydantic.ValidationError`` out of precheck construction must
+    not escape ``run_tick`` as an unclassified exception, must make no
+    provider request, and must not be retried every minute once classified.
+    """
+    from goldpipeline.schemas.review import FindingCode, PrecheckFinding, Severity
+
+    drafted = make_drafted_run(runs_dir, tmp_path)
+
+    def explode(**_: Any) -> Any:
+        PrecheckFinding(
+            code=FindingCode.NO_SOURCE_CLAIMS, severity=Severity.LOW, message="x" * 2000
+        )
+        raise AssertionError("PrecheckFinding must have raised above")
+
+    monkeypatch.setattr("goldpipeline.services.reviewer.run_prechecks", explode)
+
+    clients = make_tracked_clients()
+    context = make_worker_context(inbox, runs_dir, automation_dir, clients=clients)
+
+    result = tick(context)  # must return normally, not raise
+
+    assert result.errors == []
+    assert clients.reviewer.calls == [], "no network request may be attempted"
+
+    record = AutomationStore(automation_dir).read_retry(drafted.run_id)
     assert record is not None
     assert record.retry_class is RetryClass.PERMANENT
     assert record.exhausted

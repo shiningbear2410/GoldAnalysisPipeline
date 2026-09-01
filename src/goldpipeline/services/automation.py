@@ -60,6 +60,7 @@ from goldpipeline.domain.errors import (
     PipelineError,
     PublisherConfigurationError,
     ReviewConfigurationError,
+    ReviewSchemaError,
     RunLockedError,
     WriterConfigurationError,
 )
@@ -621,7 +622,7 @@ def classify(error: PipelineError) -> RetryClass:
     classified ``TERMINAL`` at the call site, which is what keeps Round 6's
     one-attempt rule above any policy written in this module.
     """
-    if isinstance(error, ArtifactIntegrityError | ContextIntegrityError):
+    if isinstance(error, ArtifactIntegrityError | ContextIntegrityError | ReviewSchemaError):
         return RetryClass.PERMANENT
     if isinstance(
         error,

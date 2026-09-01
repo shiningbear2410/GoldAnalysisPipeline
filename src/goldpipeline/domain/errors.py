@@ -277,6 +277,23 @@ class RunNotReviewableError(ReviewError):
     code = "RUN_NOT_REVIEWABLE"
 
 
+class ReviewSchemaError(ReviewError):
+    """A deterministic precheck could not be recorded against its own schema.
+
+    Raised when data pulled from the Run's own artifacts - a claim's resolved
+    value, say - does not fit the constraints ``PrecheckFinding`` declares.
+    This is local computation, not a provider or the network: it happens
+    before ``review.start`` and no request is ever sent. Permanent rather than
+    retried, for the same reason as :class:`ArtifactIntegrityError` - the next
+    attempt reads the same bytes and fails the same way.
+
+    Details never carry the rejected value itself, only where in the schema it
+    was rejected and why.
+    """
+
+    code = "REVIEW_SCHEMA_ERROR"
+
+
 # --- finalizer stage (Round 4) -------------------------------------------
 
 
@@ -974,6 +991,7 @@ __all__ = [
     "ReviewError",
     "ReviewProviderError",
     "ReviewResponseError",
+    "ReviewSchemaError",
     "ReviewTimeoutError",
     "RunAlreadyExistsError",
     "RunLockedError",

@@ -37,6 +37,7 @@ from goldpipeline.domain.errors import (
     ArtifactIntegrityError,
     ReviewArtifactExistsError,
     ReviewError,
+    ReviewSchemaError,
     RunNotReviewableError,
 )
 from goldpipeline.prompts import DEFAULT_REVIEWER_PROMPT
@@ -168,9 +169,26 @@ def _execute(
     logger.info("run=%s stage=review.start status=OK model=%s", run.run_id, client.model)
     manifest.record_event("review.start", "OK", f"provider={client.provider} model={client.model}")
 
-    report = run_prechecks(
-        context=inputs.context, writer_result=inputs.writer_result, article=inputs.article
-    )
+    try:
+        report = run_prechecks(
+            context=inputs.context, writer_result=inputs.writer_result, article=inputs.article
+        )
+    except PydanticValidationError as exc:
+        # A deterministic finding built from the Run's own artifacts - a
+        # claim's resolved value, most likely - did not fit the schema
+        # PrecheckFinding declares. This is local computation, not the
+        # network: no request has been sent, and the same bytes will fail the
+        # same way on the next attempt. Never persist the rejected value
+        # itself, only where in the schema it was rejected.
+        raise ReviewSchemaError(
+            f"run {run.run_id}: a deterministic precheck finding failed its own schema",
+            run_id=run.run_id,
+            phase="PREPARE",
+            errors=[
+                {"loc": ".".join(str(part) for part in err["loc"]), "type": err["type"]}
+                for err in exc.errors()
+            ],
+        ) from exc
     logger.info(
         "run=%s stage=review.precheck status=OK findings=%d blocking=%d",
         run.run_id,

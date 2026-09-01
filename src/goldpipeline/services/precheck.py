@@ -219,6 +219,30 @@ def run_prechecks(
 # claims
 # --------------------------------------------------------------------------
 
+_FINDING_VALUE_CHARS = 400
+"""Mirrors ``PrecheckFinding.expected``/``.actual`` (schemas/review.py).
+
+``item.claim.value`` is already bounded by ``SourceClaim`` at the same limit,
+but ``item.resolved`` is whatever ``render_value`` stringified from the
+context - which can be a path into a free-text field, unbounded by anything
+the claim's own schema enforces. It must be clipped here, at the point a
+context-derived string is about to become a strict model field, rather than
+by widening the field or restricting which context paths a claim may cite.
+"""
+
+_FINDING_SOURCE_PATH_CHARS = 200
+"""Mirrors ``PrecheckFinding.source_path``."""
+
+_FINDING_MESSAGE_CHARS = 1000
+"""Mirrors ``PrecheckFinding.message``."""
+
+
+def _clip(value: str, limit: int) -> str:
+    """Truncate *value* to *limit* characters, marking that it was cut."""
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "…"
+
 
 def _check_claims(resolved: list[ResolvedClaim]) -> list[PrecheckFinding]:
     if not resolved:
@@ -240,26 +264,31 @@ def _check_claims(resolved: list[ResolvedClaim]) -> list[PrecheckFinding]:
                 PrecheckFinding(
                     code=FindingCode.CLAIM_SOURCE_NOT_FOUND,
                     severity=Severity.HIGH,
-                    message=(
+                    message=_clip(
                         f"Claim cites {item.claim.source!r}, which does not resolve in the "
-                        f"context: {item.error}"
+                        f"context: {item.error}",
+                        _FINDING_MESSAGE_CHARS,
                     ),
-                    source_path=item.claim.source,
-                    actual=item.claim.value,
+                    source_path=_clip(item.claim.source, _FINDING_SOURCE_PATH_CHARS),
+                    actual=_clip(item.claim.value, _FINDING_VALUE_CHARS),
                 )
             )
         elif not item.matches:
+            resolved_value = item.resolved if item.resolved is not None else ""
             findings.append(
                 PrecheckFinding(
                     code=FindingCode.CLAIM_VALUE_MISMATCH,
                     severity=Severity.HIGH,
-                    message=(
+                    message=_clip(
                         f"Claim states {item.claim.value!r} for {item.claim.source}, but the "
-                        f"context holds {item.resolved!r}."
+                        f"context holds {resolved_value!r}.",
+                        _FINDING_MESSAGE_CHARS,
                     ),
-                    source_path=item.claim.source,
-                    expected=item.resolved,
-                    actual=item.claim.value,
+                    source_path=_clip(item.claim.source, _FINDING_SOURCE_PATH_CHARS),
+                    expected=_clip(resolved_value, _FINDING_VALUE_CHARS)
+                    if item.resolved is not None
+                    else None,
+                    actual=_clip(item.claim.value, _FINDING_VALUE_CHARS),
                 )
             )
     return findings

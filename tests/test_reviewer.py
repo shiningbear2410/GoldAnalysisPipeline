@@ -31,6 +31,7 @@ from goldpipeline.schemas.review import (
     Evidence,
     FindingCode,
     IssueCategory,
+    PrecheckFinding,
     ReviewIssue,
     ReviewModelOutput,
     ReviewStatus,
@@ -477,6 +478,96 @@ def test_a_failure_leaves_the_run_retryable(drafted_run: Any, runs_dir: Path) ->
     retried = run_reviewer(runs_dir, drafted_run.run_id)
     assert retried.succeeded
     assert retried.status is RunStatus.REVIEWED
+
+
+# --- Round 9.3.2: raw ValidationError from precheck construction ----------
+
+
+def test_a_precheck_schema_failure_never_escapes_as_a_bare_validation_error(
+    drafted_run: Any, runs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deterministic finding built from the Run's own artifacts can, in
+    principle, fail its own schema (Round 9.3.2's incident: a claim resolved
+    to a context value long enough to violate ``PrecheckFinding``'s own
+    ``max_length``). That must become a typed, permanent :class:`ReviewError`
+    - never a raw ``pydantic.ValidationError`` reaching the caller - and it
+    must happen before any provider request.
+    """
+
+    def explode(**_: Any) -> Any:
+        # A real ValidationError, not a stand-in: this is what PrecheckFinding
+        # itself raises when a field exceeds its declared length.
+        PrecheckFinding(
+            code=FindingCode.NO_SOURCE_CLAIMS, severity=Severity.LOW, message="x" * 2000
+        )
+        raise AssertionError("PrecheckFinding must have raised above")
+
+    monkeypatch.setattr("goldpipeline.services.reviewer.run_prechecks", explode)
+
+    client = FakeReviewerClient()
+    result = run_reviewer(runs_dir, drafted_run.run_id, client=client)
+
+    assert not result.succeeded
+    assert result.error is not None
+    assert result.error.code == "REVIEW_SCHEMA_ERROR"
+    assert result.error.details.get("phase") == "PREPARE"
+    assert client.calls == [], "no network request may be attempted"
+    assert not (Path(drafted_run.run_dir) / REVIEW_FILENAME).exists()
+
+
+def test_a_precheck_schema_failure_records_review_start_and_the_typed_code(
+    drafted_run: Any, runs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-progress ``review.start`` checkpoint is only durable once the
+    manifest is saved; before Round 9.3.2 a raw exception here meant it was
+    silently lost. Both events must now reach disk.
+    """
+
+    def explode(**_: Any) -> Any:
+        PrecheckFinding(
+            code=FindingCode.NO_SOURCE_CLAIMS, severity=Severity.LOW, message="x" * 2000
+        )
+        raise AssertionError("PrecheckFinding must have raised above")
+
+    monkeypatch.setattr("goldpipeline.services.reviewer.run_prechecks", explode)
+    run_reviewer(runs_dir, drafted_run.run_id, client=FakeReviewerClient())
+
+    manifest = RunStore(runs_dir).open(drafted_run.run_id).load_manifest()
+    assert manifest.status is RunStatus.DRAFTED
+    assert manifest.error is not None
+    assert manifest.error.code == "REVIEW_SCHEMA_ERROR"
+
+    stages = [event.stage for event in manifest.events]
+    assert "review.start" in stages
+    assert "review.failed" in stages
+
+
+def test_a_precheck_schema_failure_records_no_rejected_value(
+    drafted_run: Any, runs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the schema location and error type may be recorded - never the
+    value pydantic rejected, which could be article or prompt content.
+    """
+    rejected_value = "x" * 2000
+
+    def explode(**_: Any) -> Any:
+        PrecheckFinding(
+            code=FindingCode.NO_SOURCE_CLAIMS, severity=Severity.LOW, message=rejected_value
+        )
+        raise AssertionError("PrecheckFinding must have raised above")
+
+    monkeypatch.setattr("goldpipeline.services.reviewer.run_prechecks", explode)
+    run_reviewer(runs_dir, drafted_run.run_id, client=FakeReviewerClient())
+
+    manifest = RunStore(runs_dir).open(drafted_run.run_id).load_manifest()
+    assert manifest.error is not None
+    payload = json.dumps(manifest.error.details)
+    assert rejected_value not in payload
+
+    entries = manifest.error.details.get("errors")
+    assert entries, "sanitized pydantic error locations must be recorded"
+    for entry in entries:
+        assert set(entry) == {"loc", "type"}
 
 
 # --- idempotency ----------------------------------------------------------
