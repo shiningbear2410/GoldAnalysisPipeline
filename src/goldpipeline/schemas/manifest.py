@@ -17,6 +17,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from goldpipeline import CONTEXT_SCHEMA_VERSION, PIPELINE_VERSION
+from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import UtcDatetime, utc_now
 
 
@@ -122,6 +123,13 @@ class RunProvenance(MutableModel):
     record a setting's name when they need to refer to it, never its value.
     """
 
+    article_type: ArticleType = Field(
+        default=ArticleType.ANALYSIS,
+        description=(
+            "Which product mode this Run was created for. Defaults to ANALYSIS, "
+            "which is what every Run written before article types existed was."
+        ),
+    )
     analysis_origin: str = Field(description="Human-readable source of the analysis.")
     market_origin: str = Field(description="Human-readable source of the market data.")
     analysis: dict[str, Any] = Field(default_factory=dict)

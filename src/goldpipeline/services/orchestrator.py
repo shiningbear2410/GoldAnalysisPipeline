@@ -49,7 +49,12 @@ from goldpipeline.adapters.finalizer_client import FinalizerClient, LazyFinalize
 from goldpipeline.adapters.publisher_client import PublisherClient
 from goldpipeline.adapters.reviewer_client import ReviewerClient
 from goldpipeline.adapters.writer_client import WriterClient
-from goldpipeline.domain.errors import PipelineError, RunNotResumableError
+from goldpipeline.domain.errors import (
+    ArticleTypeNotReadyError,
+    PipelineError,
+    RunNotResumableError,
+)
+from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.manifest import RunStatus
 from goldpipeline.schemas.orchestration import (
@@ -64,6 +69,7 @@ from goldpipeline.schemas.orchestration import (
 from goldpipeline.schemas.publish import Decision
 from goldpipeline.schemas.publisher import PublishStatus
 from goldpipeline.schemas.review import ReviewStatus
+from goldpipeline.services.article_routing import writer_prompt_for
 from goldpipeline.services.finalizer import finalize_run, load_verified_inputs
 from goldpipeline.services.pipeline import create_run
 from goldpipeline.services.publish_gate import gate_publish
@@ -430,10 +436,24 @@ def _run_write(
     now: datetime | None,
 ) -> PipelineRunResult | None:
     started = utc_now()
+
+    # Routing decided here, before a client is built or a provider is called.
+    # An article type with no implementation stops the Run at this line: the
+    # writer, reviewer, finalizer, gate and publisher all sit behind it, so a
+    # mode that is not ready costs nothing and produces nothing. It is never
+    # substituted with ANALYSIS - writing a different article than the one asked
+    # for is a silent wrong answer, and refusing is a visible one.
+    try:
+        prompt_id = writer_prompt_for(_article_type_of(store, execution.run_id))
+    except ArticleTypeNotReadyError as exc:
+        execution.record(PipelineStage.WRITE, started, StageOutcome.FAILED)
+        return _fail(store, execution, PipelineStage.WRITE, exc)
+
     result = write_draft(
         run_id=execution.run_id,
         store=store,
         client=_require(clients.writer, "writer")(),
+        prompt_version=prompt_id,
         now=now,
     )
 
@@ -618,6 +638,19 @@ _RUNNERS: dict[PipelineStage, _Runner] = {
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
+
+
+def _article_type_of(store: RunStore, run_id: str) -> ArticleType:
+    """The product mode this Run was created for.
+
+    Read from the manifest rather than passed along, so a resumed Run routes the
+    same way the original did. A Run written before article types existed has no
+    provenance or no field, and both mean ANALYSIS - which is what it was.
+    """
+    manifest = store.open(run_id).load_manifest()
+    if manifest.provenance is None:
+        return ArticleType.ANALYSIS
+    return manifest.provenance.article_type
 
 
 def _check_resumed_verdict(

@@ -441,3 +441,66 @@ class TestRestartSafety:
         )
         assert report.submitted == []
         assert report.duplicate == ["remote_event_00000001"]
+
+
+# --------------------------------------------------- remote article-type policy
+class TestRemoteArticleTypePolicy:
+    """A remote producer may ask for ANALYSIS and nothing else.
+
+    Enforced at the intake boundary rather than in the schema, because only this
+    layer knows the event arrived over a network. The event cannot be asked: a
+    producer describing its own origin is describing what it would like believed.
+    """
+
+    def run(self, payloads: list[dict], inbox: Inbox, ledger: Ledger):
+        return intake(transport=FakeTransport([payloads]), inbox=inbox, ledger=ledger, limit=10)
+
+    def test_remote_analysis_is_admitted(self, inbox: Inbox, ledger: Ledger) -> None:
+        payload = {**event_payload(), "article_type": "ANALYSIS"}
+        report = self.run([payload], inbox, ledger)
+        assert report.submitted == ["remote_event_00000001"]
+        assert report.rejected == []
+
+    def test_an_absent_article_type_is_admitted_as_analysis(
+        self, inbox: Inbox, ledger: Ledger
+    ) -> None:
+        report = self.run([event_payload()], inbox, ledger)
+        assert report.submitted == ["remote_event_00000001"]
+
+    @pytest.mark.parametrize("kind", ["TRADE_PLAN", "NEWS_DIGEST"])
+    def test_other_types_are_refused(self, inbox: Inbox, ledger: Ledger, kind: str) -> None:
+        payload = {**event_payload(), "article_type": kind}
+        report = self.run([payload], inbox, ledger)
+
+        assert report.submitted == []
+        assert len(report.rejected) == 1
+        assert report.rejected[0].event_id == "remote_event_00000001"
+        assert kind in report.rejected[0].reason
+
+    @pytest.mark.parametrize("kind", ["TRADE_PLAN", "NEWS_DIGEST"])
+    def test_no_inbox_file_is_created(self, inbox: Inbox, ledger: Ledger, kind: str) -> None:
+        """Refused before submit(), so nothing durable exists for it."""
+        self.run([{**event_payload(), "article_type": kind}], inbox, ledger)
+        assert list(inbox.directory(INCOMING).glob("*.json")) == []
+
+    @pytest.mark.parametrize("kind", ["TRADE_PLAN", "NEWS_DIGEST"])
+    def test_no_ledger_entry_is_created(self, inbox: Inbox, ledger: Ledger, kind: str) -> None:
+        self.run([{**event_payload(), "article_type": kind}], inbox, ledger)
+        assert ledger.read("remote_event_00000001") is None
+
+    def test_a_refused_event_does_not_spoil_its_neighbours(
+        self, inbox: Inbox, ledger: Ledger
+    ) -> None:
+        batch = [
+            {**event_payload("remote_event_00000001"), "article_type": "TRADE_PLAN"},
+            event_payload("remote_event_00000002"),
+        ]
+        report = self.run(batch, inbox, ledger)
+        assert report.submitted == ["remote_event_00000002"]
+        assert len(report.rejected) == 1
+
+    def test_the_rejection_carries_no_analysis_text(self, inbox: Inbox, ledger: Ledger) -> None:
+        secret = "noi dung phan tich rieng tu"
+        payload = {**event_payload(text=secret), "article_type": "NEWS_DIGEST"}
+        report = self.run([payload], inbox, ledger)
+        assert secret not in repr(report)

@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.market import MarketDataInput
 from goldpipeline.schemas.telegram import TelegramAnalysisInput
 
@@ -27,6 +28,15 @@ class LoadedSource[ModelT]:
     raw_payload: dict[str, Any]
     origin: str
     """Human-readable description of where this came from, for logs and audit."""
+
+    article_type: ArticleType = ArticleType.ANALYSIS
+    """Which product mode this source asked for.
+
+    Typed rather than a key in ``provenance`` because routing reads it: a
+    stringly-typed lookup in an open dictionary is exactly the shape that ends
+    up defaulting silently when the key is spelled differently. File adapters
+    leave it at ``ANALYSIS``, which is what they have always produced.
+    """
 
     provenance: dict[str, Any] = field(default_factory=dict)
     """Adapter-specific facts about *this fetch*, recorded in the Run manifest.

@@ -51,6 +51,7 @@ from goldpipeline.adapters.inbox_source import parse_event
 from goldpipeline.adapters.publisher_client import PublisherClient
 from goldpipeline.config import AutomationSettings, IngestSettings, ReviewDeliverySettings
 from goldpipeline.domain.errors import (
+    ArticleTypeNotReadyError,
     ArtifactIntegrityError,
     AutoPublishNotAllowedError,
     AutoPublishTargetMismatchError,
@@ -464,11 +465,23 @@ def _fetch_remote_events(context: WorkerContext, tick: _Tick) -> None:
     tick.remote_duplicate = len(report.duplicate)
     tick.remote_invalid = report.invalid
     tick.remote_conflict = len(report.conflicts)
+    tick.remote_invalid += len(report.rejected)
 
     for event_id in report.submitted:
         tick.remote_items.append(
             WorkItem(kind="event", identifier=event_id, outcome=WorkOutcome.INGESTED)
         )
+    for rejection in report.rejected:
+        tick.remote_items.append(
+            WorkItem(
+                kind="event",
+                identifier=rejection.event_id,
+                outcome=WorkOutcome.SKIPPED,
+                code="REMOTE_ARTICLE_TYPE_NOT_ALLOWED",
+                detail=rejection.reason,
+            )
+        )
+
     for conflict in report.conflicts:
         # Named individually, because a reused event_id is the one remote
         # outcome a human has to look at. The digests are safe to record: they
@@ -844,7 +857,10 @@ def classify(error: PipelineError) -> RetryClass:
         return RetryClass.CONFIGURATION
     if isinstance(error, MarketDataError):
         return RetryClass.TRANSIENT
-    if isinstance(error, InboxPayloadError):
+    if isinstance(error, InboxPayloadError | ArticleTypeNotReadyError):
+        # An unimplemented article type becomes available when code ships, not
+        # when a scheduler tries again. Retrying it every minute would burn a
+        # backoff budget on a fact that cannot change without a deploy.
         return RetryClass.PERMANENT
     return RetryClass.TRANSIENT
 

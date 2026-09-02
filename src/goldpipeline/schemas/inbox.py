@@ -8,10 +8,25 @@ directly, by writing one JSON file into a directory this pipeline watches.
 
 **The payload is a whitelist, and it is data.** ``extra="forbid"`` is doing real
 work here: it means a producer cannot smuggle a ``runs_dir``, a ``model``, a
-``target_chat`` or a ``publish`` flag into the pipeline by adding a key. There is
-no field in this schema that changes what the pipeline *does* - only fields that
-say what the analyst wrote. ``raw_text`` in particular is untrusted content and
-travels as such all the way to the writer's fenced prompt.
+``target_chat`` or a ``publish`` flag into the pipeline by adding a key.
+``raw_text`` in particular is untrusted content and travels as such all the way
+to the writer's fenced prompt.
+
+**One field does influence behaviour, and it is worth being exact about it.**
+Until article types existed, nothing in this schema changed what the pipeline
+*did*. ``article_type`` changes that, so the invariant is now narrower rather
+than quietly false:
+
+    A producer may select one value from a closed, code-defined enum of product
+    modes. It may not select anything else.
+
+Concretely, no field here can name a prompt, a prompt id, a model, a provider,
+a reviewer, a finalizer, a Telegram destination, a publish behaviour, a
+filesystem path, or a pipeline stage. ``article_type`` chooses among three
+modes whose implementations are chosen by
+:mod:`goldpipeline.services.article_routing`, in application code, from a table
+a producer cannot reach. The worst a hostile producer can do with it is ask for
+a mode that is refused.
 """
 
 from __future__ import annotations
@@ -21,6 +36,7 @@ from typing import Any, Literal
 
 from pydantic import Field, field_validator
 
+from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import StrictModel, UtcDatetime
 from goldpipeline.schemas.telegram import MAX_RAW_TEXT_CHARS
 
@@ -58,6 +74,13 @@ class AnalysisEvent(StrictModel):
         default=None, description="When the underlying message was posted, if different."
     )
     raw_text: str = Field(description="Verbatim analysis text. UNTRUSTED user content.")
+    article_type: ArticleType = Field(
+        default=ArticleType.ANALYSIS,
+        description=(
+            "Which product mode to produce. Closed enum; an unknown value is refused. "
+            "Defaults to ANALYSIS so events written before this field existed still load."
+        ),
+    )
     chat_id: int | str | None = None
     message_id: int | None = None
     author: str | None = Field(

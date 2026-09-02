@@ -146,6 +146,7 @@ def _execute(
     # Recorded here rather than by the caller, because whoever loaded a source
     # is the only one who knows what it took to load it.
     manifest.provenance = RunProvenance(
+        article_type=loaded_analysis.article_type,
         analysis_origin=loaded_analysis.origin,
         market_origin=loaded_market.origin,
         analysis=dict(loaded_analysis.provenance),

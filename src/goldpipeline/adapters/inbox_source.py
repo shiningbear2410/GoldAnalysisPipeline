@@ -92,6 +92,7 @@ class InboxAnalysisSource:
             model=model,
             raw_payload=payload,
             origin=self._origin,
+            article_type=event.article_type,
             provenance={
                 "kind": "inbox",
                 "event_id": event.event_id,
@@ -99,6 +100,7 @@ class InboxAnalysisSource:
                 "event_created_at": event.created_at.isoformat().replace("+00:00", "Z"),
                 "payload_sha256": sha256_bytes(self._raw),
                 "raw_text_chars": len(event.raw_text),
+                "article_type": str(event.article_type),
             },
         )
 

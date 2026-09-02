@@ -683,6 +683,35 @@ class LedgerError(IngestionError):
     code = "INGESTION_LEDGER_ERROR"
 
 
+# --- article types -------------------------------------------------------
+
+
+class ArticleTypeNotReadyError(PipelineError):
+    """A valid article type whose implementation does not exist yet.
+
+    Raised *before* any provider is called, so a Run in an unfinished mode costs
+    nothing and produces nothing. Deliberately not a fallback to ``ANALYSIS``:
+    quietly writing a different kind of article than the one asked for is worse
+    than refusing, because the refusal is visible and the substitution is not.
+
+    Permanent by nature - the mode becomes available when code ships, not when a
+    scheduler tries again.
+    """
+
+    code = "ARTICLE_TYPE_NOT_READY"
+
+
+class RemoteArticleTypeNotAllowedError(PipelineError):
+    """A remote producer offered an article type only local producers may use.
+
+    The restriction lives at the transport boundary because that is the only
+    layer that knows an event arrived over a network rather than from a local
+    process. An event cannot be trusted to describe its own origin.
+    """
+
+    code = "REMOTE_ARTICLE_TYPE_NOT_ALLOWED"
+
+
 # --- remote intake (optional upstream source) ----------------------------
 
 
@@ -965,6 +994,7 @@ class TaskDefinitionMismatchError(TaskSchedulerError):
 
 __all__ = [
     "AnalysisTextTooLargeError",
+    "ArticleTypeNotReadyError",
     "ArtifactAlreadyExistsError",
     "ArtifactIntegrityError",
     "AutoPublishNotAllowedError",
@@ -1045,6 +1075,7 @@ __all__ = [
     "RunLockedError",
     "RunNotFinalizableError",
     "RunNotGateableError",
+    "RemoteArticleTypeNotAllowedError",
     "RemoteIntakeConfigurationError",
     "RemoteIntakeError",
     "RemoteIntakeResponseError",

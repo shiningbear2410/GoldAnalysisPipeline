@@ -13,6 +13,11 @@ ledger records - so a producer may hand back the same event on every poll for a
 week and it will be admitted once. Nothing here invents a second notion of
 payload identity; there is exactly one, and it lives in the ledger.
 
+**Remote producers may only ask for ANALYSIS.** The restriction lives here
+rather than in the schema because only this layer knows the event arrived
+over a network; a local producer added later may legitimately request all
+three modes through the same inbox.
+
 **Per-event admission, not per-batch.** One malformed event does not discard the
 valid ones beside it. That mirrors the inbox: each file is accepted or refused on
 its own, and a refusal is written down rather than allowed to spoil its
@@ -28,6 +33,7 @@ from dataclasses import dataclass, field
 from goldpipeline.adapters.event_transport import EventTransport
 from goldpipeline.adapters.inbox_source import parse_event
 from goldpipeline.domain.errors import InboxPayloadError, LedgerError
+from goldpipeline.services.article_routing import REMOTE_ALLOWED_TYPES
 from goldpipeline.services.inbox import FAILED, INCOMING, PROCESSED, PROCESSING, Inbox, Ledger
 from goldpipeline.storage.atomic import encode_json, sha256_bytes
 
@@ -52,6 +58,14 @@ class IntakeConflict:
     where: str
 
 
+@dataclass(frozen=True)
+class RejectedEvent:
+    """One event refused by policy rather than by schema."""
+
+    event_id: str
+    reason: str
+
+
 @dataclass
 class IntakeReport:
     """What one intake pass did. Counts and ids only - never analysis text."""
@@ -61,6 +75,7 @@ class IntakeReport:
     duplicate: list[str] = field(default_factory=list)
     invalid: int = 0
     conflicts: list[IntakeConflict] = field(default_factory=list)
+    rejected: list[RejectedEvent] = field(default_factory=list)
 
     @property
     def admitted(self) -> int:
@@ -87,12 +102,13 @@ def intake(
         _admit_one(payload, inbox=inbox, ledger=ledger, report=report)
 
     logger.info(
-        "intake.pass received=%d submitted=%d duplicate=%d invalid=%d conflict=%d",
+        "intake.pass received=%d submitted=%d duplicate=%d invalid=%d conflict=%d rejected=%d",
         report.received,
         len(report.submitted),
         len(report.duplicate),
         report.invalid,
         len(report.conflicts),
+        len(report.rejected),
     )
     return report
 
@@ -113,6 +129,24 @@ def _admit_one(
         # still contains the analyst's text.
         report.invalid += 1
         logger.warning("intake.invalid_event refused by schema validation")
+        return
+
+    if event.article_type not in REMOTE_ALLOWED_TYPES:
+        # Enforced here because this is the only layer that knows the event came
+        # over a network. The payload cannot be asked - a producer describing its
+        # own origin is describing what it would like to be believed. Refused
+        # before submit(), so no inbox file and no Run ever exist for it.
+        report.rejected.append(
+            RejectedEvent(
+                event_id=event.event_id,
+                reason=f"remote producers may not request {event.article_type}",
+            )
+        )
+        logger.warning(
+            "intake.article_type_refused event=%s type=%s",
+            event.event_id,
+            event.article_type,
+        )
         return
 
     event_id = event.event_id
@@ -199,4 +233,4 @@ def _existing_copy(inbox: Inbox, event_id: str) -> tuple[str, bytes | None] | No
     return None
 
 
-__all__ = ["IntakeConflict", "IntakeReport", "intake"]
+__all__ = ["IntakeConflict", "IntakeReport", "RejectedEvent", "intake"]
