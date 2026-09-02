@@ -48,13 +48,31 @@ UtcDatetime = Annotated[
 ]
 """An aware datetime, serialized as ``...Z``. Coercion is applied by validators."""
 
-Price = Annotated[Decimal, Field(gt=0)]
+
+class NumericRole(StrEnum):
+    """What a declared number *means*, carried in the annotation itself.
+
+    The deterministic scanner has to answer "is this literal an absolute market
+    price, or a distance?" and the only trustworthy answer is the one the schema
+    already gives. Reading it from the annotation means the classification cannot
+    drift from the field definition, and a new numeric field declares its own
+    meaning rather than waiting to be added to a list somewhere else.
+
+    Deliberately not inferred from the value. 14.25 is a plausible ATR and a
+    plausible price; only the declaration distinguishes them.
+    """
+
+    PRICE = "PRICE"
+    MAGNITUDE = "MAGNITUDE"
+
+
+Price = Annotated[Decimal, Field(gt=0), NumericRole.PRICE]
 """A strictly positive price. Serialized by pydantic as a JSON string."""
 
 Volume = Annotated[Decimal, Field(ge=0)]
 """A non-negative traded volume."""
 
-Magnitude = Annotated[Decimal, Field(ge=0)]
+Magnitude = Annotated[Decimal, Field(ge=0), NumericRole.MAGNITUDE]
 """A non-negative *distance* in price units - never a price.
 
 Deliberately a distinct type from :data:`Price`, though the runtime constraint is
@@ -63,7 +81,7 @@ of number, and a scanner that cannot tell them apart reports the first as a pric
 that does not exist in the market data. That exact confusion has already
 produced a false ``NUMBER_OUTSIDE_MARKET_RANGE`` finding on a derived value.
 
-Annotating the difference here means a later round can distinguish them by
+Annotating the difference here means the numeric scanner distinguishes them by
 reading the schema, rather than by guessing from the value.
 """
 

@@ -151,13 +151,80 @@ class MarketFacts:
         }
 
 
+@dataclass(frozen=True)
+class DerivedValue:
+    """One deterministic arithmetic fact about the window.
+
+    Typed, so the numeric scanner can tell a distance from a price without
+    inspecting the number. Computed here and nowhere else: the prompt's fact
+    sheet and the scanner must agree about what the net change *is*, and two
+    implementations of one formula is how they stop agreeing.
+    """
+
+    kind: str
+    value: Decimal
+    semantic: str
+    inputs: tuple[str, ...]
+
+
+def derived_values(context: AnalysisContext) -> list[DerivedValue]:
+    """The closed set of derived numbers the article may state uncited.
+
+    Three formulas, each reproducible from ``context.json`` by hand:
+
+    * ``NET_CHANGE`` - last close minus first open, a signed distance;
+    * ``NET_CHANGE_PERCENT`` - that change over the first open, as a percentage;
+    * ``WINDOW_RANGE`` - highest high minus lowest low, a distance.
+
+    Deliberately *not* here: the distance between two arbitrary declared prices.
+    Eighty candle values admit thousands of pairwise differences, and blessing
+    all of them would let almost any number through - the exact failure mode
+    this catalog exists to avoid. A distance that matters can be cited, or
+    declared as its own field.
+    """
+    bars = context.ohlc.bars
+    if not bars:
+        return []
+
+    first, latest = bars[0], bars[-1]
+    net_change = latest.close - first.open
+    high = max(bar.high for bar in bars)
+    low = min(bar.low for bar in bars)
+
+    values = [
+        DerivedValue(
+            kind="NET_CHANGE",
+            value=net_change,
+            semantic="MAGNITUDE",
+            inputs=("context.ohlc.bars[-1].close", "context.ohlc.bars[0].open"),
+        ),
+        DerivedValue(
+            kind="WINDOW_RANGE",
+            value=high - low,
+            semantic="MAGNITUDE",
+            inputs=("window high", "window low"),
+        ),
+    ]
+    if first.open:
+        values.append(
+            DerivedValue(
+                kind="NET_CHANGE_PERCENT",
+                value=net_change / first.open * Decimal(100),
+                semantic="PERCENTAGE",
+                inputs=("NET_CHANGE", "context.ohlc.bars[0].open"),
+            )
+        )
+    return values
+
+
 def build_market_facts(context: AnalysisContext) -> MarketFacts:
     """Derive the formatted fact sheet for *context*."""
     bars = context.ohlc.bars
-    first, latest = bars[0], bars[-1]
+    first = bars[0]
 
-    net_change = latest.close - first.open
-    percent = (net_change / first.open * Decimal(100)) if first.open else Decimal(0)
+    derived = {item.kind: item.value for item in derived_values(context)}
+    net_change = derived["NET_CHANGE"]
+    percent = derived.get("NET_CHANGE_PERCENT", Decimal(0))
     direction, run_length = _closing_run(bars)
 
     return MarketFacts(

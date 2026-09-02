@@ -24,6 +24,7 @@ that can block a PASS.
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -37,14 +38,27 @@ from goldpipeline.schemas.review import (
     Severity,
 )
 from goldpipeline.schemas.writer import WriterResult
-from goldpipeline.services.claim_resolver import ResolvedClaim, verify_claims
-from goldpipeline.services.market_facts import format_price
+from goldpipeline.services.claim_resolver import (
+    ClaimPathError,
+    ResolvedClaim,
+    resolve_path,
+    verify_claims,
+)
+from goldpipeline.services.market_facts import derived_values, format_price
+from goldpipeline.services.numeric_semantics import (
+    KnownNumber,
+    SemanticType,
+    classify_path,
+    rendered_as,
+)
 from goldpipeline.services.source_guard import (
     PRICE_TOLERANCE,
     RANGE_TOLERANCE,
     NumberMatch,
     extract_numbers,
 )
+
+logger = logging.getLogger(__name__)
 
 OUTSIDE_RANGE_TOLERANCE = Decimal("0.05")
 """How far outside the candle range a number may sit before it is called wrong.
@@ -204,11 +218,15 @@ def run_prechecks(
 
     report = PrecheckReport(market_low=low, market_high=high)
 
+    # Resolved either way: the numeric check needs to know which claims actually
+    # hold, and a caller switching off claim *findings* must not thereby switch
+    # off the verification that keeps a fabricated citation from blessing a number.
+    resolved = verify_claims(context, list(writer_result.source_claims))
     if check_claims:
-        report.resolved_claims = verify_claims(context, list(writer_result.source_claims))
-        report.findings.extend(_check_claims(report.resolved_claims))
+        report.resolved_claims = resolved
+        report.findings.extend(_check_claims(resolved))
 
-    report.findings.extend(_check_numbers(context, writer_result, article, low, high))
+    report.findings.extend(_check_numbers(context, resolved, article, low, high))
     report.findings.extend(_check_symbols(context, article))
     report.findings.extend(_check_indicators(article))
     report.findings.extend(_check_risk_language(article))
@@ -299,51 +317,157 @@ def _check_claims(resolved: list[ResolvedClaim]) -> list[PrecheckFinding]:
 # --------------------------------------------------------------------------
 
 
-def _allowed_values(
+def known_numbers(
     context: AnalysisContext,
-    writer_result: WriterResult,
+    resolved: list[ResolvedClaim],
     low: Decimal,
     high: Decimal,
-) -> set[Decimal]:
-    """Every number the article is entitled to state.
+) -> list[KnownNumber]:
+    """Every number the article is entitled to state, each with its meaning.
 
-    Analyst levels count only when they sit near the market. An out-of-range
-    number in the source is exactly what Round 2 warned about, and repeating it
-    in the article is worth flagging rather than waving through.
+    Four sources, in descending order of how much they prove:
+
+    * **candle values** - absolute prices, by definition;
+    * **verified source claims** - the writer named a path, the path resolves,
+      and the resolved value matches the claim. The path's declared type says
+      whether the number is a price or a distance. An unresolved or mismatched
+      claim contributes nothing: a fabricated citation must never make a number
+      safe, and before this it did;
+    * **derived facts** - the closed formula catalog in
+      :mod:`goldpipeline.services.market_facts`, typed as magnitudes and
+      percentages rather than prices;
+    * **analyst levels near the market** - unchanged from Round 3.
+
+    Notably absent: ``context.levels.atr`` and zone widths. They are real, but
+    admitting them unconditionally would let ``entry 14.25`` pass because the
+    ATR happens to be 14.25. They are accepted only through a claim that says
+    what they are.
     """
-    allowed: set[Decimal] = set()
-    for bar in context.ohlc.bars:
-        allowed.update({bar.open, bar.high, bar.low, bar.close})
+    known: list[KnownNumber] = []
 
-    for claim in writer_result.source_claims:
-        try:
-            allowed.add(Decimal(claim.value.replace(",", "")))
-        except (ArithmeticError, ValueError):
-            continue
+    for index, bar in enumerate(context.ohlc.bars):
+        for leaf in ("open", "high", "low", "close"):
+            known.append(
+                KnownNumber(
+                    value=getattr(bar, leaf),
+                    semantic=SemanticType.ABSOLUTE_PRICE,
+                    origin=f"context.ohlc.bars[{index}].{leaf}",
+                )
+            )
+
+    known.extend(_verified_claim_numbers(context, resolved))
+
+    for derived in derived_values(context):
+        known.append(
+            KnownNumber(
+                value=derived.value,
+                semantic=SemanticType(derived.semantic),
+                origin=f"derived:{derived.kind}",
+            )
+        )
+        if derived.semantic == SemanticType.MAGNITUDE and derived.value < 0:
+            # A fall of 66.14 is written "66.14" as often as "-66.14"; the sign
+            # lives in the prose, which is not this scanner's business.
+            known.append(
+                KnownNumber(
+                    value=-derived.value,
+                    semantic=SemanticType.MAGNITUDE,
+                    origin=f"derived:{derived.kind}:abs",
+                )
+            )
 
     margin = max((high - low) * RANGE_TOLERANCE, high * PRICE_TOLERANCE)
     for match in extract_numbers(context.raw_analysis.text):
         if low - margin <= match.value <= high + margin:
-            allowed.add(match.value)
+            known.append(
+                KnownNumber(
+                    value=match.value,
+                    semantic=SemanticType.ABSOLUTE_PRICE,
+                    origin="analyst note (in range)",
+                )
+            )
 
-    return allowed
+    return known
+
+
+def _verified_claim_numbers(
+    context: AnalysisContext, resolved: list[ResolvedClaim]
+) -> list[KnownNumber]:
+    """Numbers vouched for by a claim that actually holds.
+
+    Only ``ResolvedClaim.ok`` counts - the path resolved *and* the value agreed.
+    That is the existing verification, reused rather than re-implemented, so
+    there is one definition of "this claim holds".
+
+    Before this, every claim's value was added to the allowed set whether or not
+    it resolved. A writer could therefore make any number safe by asserting it,
+    which is precisely what a source claim is supposed to prevent.
+    """
+    verified: list[KnownNumber] = []
+    for item in resolved:
+        if not item.ok:
+            continue
+
+        semantic = classify_path(context, item.claim.source)
+        if semantic is SemanticType.UNKNOWN_PRICE_LIKE:
+            continue
+
+        try:
+            actual = resolve_path(context, item.claim.source)
+        except ClaimPathError:  # pragma: no cover - ok implies it resolved
+            continue
+        if isinstance(actual, Decimal):
+            verified.append(KnownNumber(value=actual, semantic=semantic, origin=item.claim.source))
+
+        try:
+            verified.append(
+                KnownNumber(
+                    value=Decimal(item.claim.value.replace(",", "")),
+                    semantic=semantic,
+                    origin=item.claim.source,
+                )
+            )
+        except (ArithmeticError, ValueError):
+            continue
+    return verified
+
+
+def _accounted_for(match: NumberMatch, known: list[KnownNumber]) -> KnownNumber | None:
+    """The first known value this literal faithfully renders, if any.
+
+    Matching is on the *printed* precision, so ``4373.13`` accepts a stored
+    ``4373.127`` without accepting a stored ``4373.14``.
+    """
+    for candidate in known:
+        if candidate.value == match.value or rendered_as(candidate.value, match.literal):
+            return candidate
+    return None
 
 
 def _check_numbers(
     context: AnalysisContext,
-    writer_result: WriterResult,
+    resolved: list[ResolvedClaim],
     article: str,
     low: Decimal,
     high: Decimal,
 ) -> list[PrecheckFinding]:
-    allowed = _allowed_values(context, writer_result, low, high)
+    known = known_numbers(context, resolved, low, high)
     outer = max((high - low) * RANGE_TOLERANCE, high * OUTSIDE_RANGE_TOLERANCE)
 
     findings: list[PrecheckFinding] = []
     reported: set[Decimal] = set()
 
     for match in extract_numbers(article):
-        if match.value in allowed or match.value in reported:
+        if match.value in reported:
+            continue
+        accounted = _accounted_for(match, known)
+        if accounted is not None:
+            logger.debug(
+                "precheck.number accepted=%s as=%s via=%s",
+                match.literal,
+                accounted.semantic,
+                accounted.origin,
+            )
             continue
         if _is_year(match) or _has_unit_suffix(article, match.end):
             continue
