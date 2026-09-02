@@ -77,6 +77,8 @@ from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.ingestion import IngestOutcome, IngestResult
 from goldpipeline.schemas.manifest import RunStatus
 from goldpipeline.schemas.orchestration import PipelineMode, PipelineStatus
+from goldpipeline.schemas.review_delivery import INTENT_FILENAME as REVIEW_INTENT_FILENAME
+from goldpipeline.schemas.review_delivery import RESULT_FILENAME as REVIEW_RESULT_FILENAME
 from goldpipeline.schemas.review_delivery import ReviewDeliveryStatus
 from goldpipeline.schemas.runtime_config import ConfigMode, ProductionConfig
 from goldpipeline.services.automation_state import (
@@ -95,7 +97,7 @@ from goldpipeline.services.orchestrator import (
 from goldpipeline.services.review_delivery import deliver_review, is_eligible
 from goldpipeline.services.run_lock import WORKER_LOCK_FILENAME, RunLock
 from goldpipeline.storage.atomic import encode_json
-from goldpipeline.storage.run_store import RunStore
+from goldpipeline.storage.run_store import RunDirectory, RunStore
 
 logger = logging.getLogger(__name__)
 
@@ -537,11 +539,15 @@ def _deliver_reviews(context: WorkerContext, tick: _Tick, moment: datetime) -> N
         except (FileNotFoundError, ValueError, PipelineError):
             continue
 
-        if (
-            is_eligible(run, manifest, now=moment, max_run_age_minutes=settings.max_run_age_minutes)
-            is not None
-        ):
+        reason = is_eligible(
+            run, manifest, now=moment, max_run_age_minutes=settings.max_run_age_minutes
+        )
+        if reason is not None and not _has_orphan_intent(run):
             continue
+
+        # An orphaned intent is deliberately *not* skipped. `deliver_review`
+        # closes it as UNCERTAIN without sending anything, which is what stops a
+        # Run being stuck ineligible forever after one failed attempt.
 
         try:
             client, target = context.review_client()
@@ -577,6 +583,11 @@ def _deliver_reviews(context: WorkerContext, tick: _Tick, moment: datetime) -> N
                 detail="review copy; the Run remains READY_TO_PUBLISH",
             )
         )
+
+
+def _has_orphan_intent(run: RunDirectory) -> bool:
+    """An intent with no result: a previous attempt that never recorded itself."""
+    return run.has_artifact(REVIEW_INTENT_FILENAME) and not run.has_artifact(REVIEW_RESULT_FILENAME)
 
 
 def may_resume(status: RunStatus, auto_publish: bool) -> bool:

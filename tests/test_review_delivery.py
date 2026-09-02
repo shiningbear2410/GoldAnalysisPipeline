@@ -30,7 +30,9 @@ from conftest import CLEAN_ARTICLE, make_published_ready_run
 from goldpipeline.adapters.publisher_client import SendOutcome, SendRequest
 from goldpipeline.config import ReviewDeliverySettings
 from goldpipeline.domain.errors import (
+    PublisherAuthenticationError,
     PublisherConfigurationError,
+    PublisherPermissionError,
     PublisherRateLimitError,
     PublisherRejectedError,
     PublisherTransportAmbiguousError,
@@ -305,7 +307,8 @@ def test_an_ambiguous_transport_failure_becomes_uncertain(runs_dir: Any, tmp_pat
     assert outcome.status is ReviewDeliveryStatus.UNCERTAIN
     assert outcome.result is not None
     assert outcome.result.failure is not None
-    assert outcome.result.failure.safe_code == "TRANSPORT_AMBIGUOUS"
+    assert outcome.result.failure.safe_code == "PUBLISHER_TRANSPORT_AMBIGUOUS"
+    assert outcome.result.failure.category.value == "TRANSPORT_AMBIGUOUS"
 
 
 def test_an_uncertain_delivery_is_never_retried(runs_dir: Any, tmp_path: Path) -> None:
@@ -636,3 +639,79 @@ def test_the_tick_never_publishes(
     run_dir = run_dir_of(runs_dir, run.run_id)
     assert not (run_dir / "publish_intent.json").exists()
     assert not (run_dir / "publish_result.json").exists()
+
+
+# --- regressions found by the first live send -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (PublisherPermissionError("forbidden"), "PUBLISHER_PERMISSION_ERROR"),
+        (PublisherAuthenticationError("bad token"), "PUBLISHER_AUTHENTICATION_ERROR"),
+        (PublisherRejectedError("chat not found"), "PUBLISHER_REJECTED"),
+    ],
+    ids=["permission", "authentication", "rejected"],
+)
+def test_every_refusal_still_records_a_result(
+    error: Exception, expected_code: str, runs_dir: Any, tmp_path: Path
+) -> None:
+    """The bug the first real send found.
+
+    ``_send`` originally caught three exception types and Telegram raised a
+    fourth: a 403, because a bot may not open a conversation with a user who has
+    never messaged it. The exception escaped, no result was written, and the
+    orphaned intent then made the Run permanently ineligible. Every refusal must
+    end in a durable result.
+    """
+    run = ready_run(runs_dir, tmp_path)
+
+    outcome = deliver(runs_dir, run.run_id, always_raises(error))
+
+    assert outcome.status is ReviewDeliveryStatus.FAILED
+    assert (run_dir_of(runs_dir, run.run_id) / RESULT_FILENAME).exists()
+    assert outcome.result is not None
+    assert outcome.result.failure is not None
+    assert outcome.result.failure.safe_code == expected_code
+    assert outcome.result.confirmed_count == 0
+
+
+def test_a_refused_delivery_is_not_retried_next_tick(runs_dir: Any, tmp_path: Path) -> None:
+    """A recorded refusal closes the Run for delivery, like any other outcome."""
+    run = ready_run(runs_dir, tmp_path)
+    deliver(runs_dir, run.run_id, always_raises(PublisherPermissionError("forbidden")))
+
+    second = RecordingClient()
+    outcome = deliver(runs_dir, run.run_id, second)
+
+    assert outcome.status is ReviewDeliveryStatus.SKIPPED
+    assert second.calls == 0
+
+
+def test_the_worker_closes_an_orphaned_intent(
+    inbox: Any, runs_dir: Path, automation_dir: Path, tmp_path: Path
+) -> None:
+    """The second half of the same production failure.
+
+    With an intent and no result the Run is ineligible, so a worker that skipped
+    every ineligible Run could never close it - leaving it stuck forever after
+    one bad attempt. The orphan is the one ineligibility the worker must act on.
+    """
+    from goldpipeline.services.automation import run_tick
+
+    run = ready_run(runs_dir, tmp_path)
+    run_dir = run_dir_of(runs_dir, run.run_id)
+
+    # Simulate the crash window: an intent committed, no result.
+    deliver(runs_dir, run.run_id, always_raises(PublisherTransportAmbiguousError("boom")))
+    (run_dir / RESULT_FILENAME).unlink()
+    assert (run_dir / INTENT_FILENAME).exists()
+
+    client = RecordingClient()
+    result = run_tick(worker_with_review(inbox, runs_dir, automation_dir, client))
+
+    assert client.calls == 0, "an orphan is closed, never resent"
+    assert (run_dir / RESULT_FILENAME).exists()
+    stored = json.loads((run_dir / RESULT_FILENAME).read_text(encoding="utf-8"))
+    assert stored["status"] == ReviewDeliveryStatus.UNCERTAIN.value
+    assert len(result.review_deliveries) == 1

@@ -41,8 +41,12 @@ from datetime import datetime, timedelta
 
 from goldpipeline.adapters.publisher_client import PublisherClient, SendRequest
 from goldpipeline.domain.errors import (
+    PublisherAuthenticationError,
+    PublisherError,
+    PublisherPermissionError,
     PublisherRateLimitError,
     PublisherRejectedError,
+    PublisherResponseError,
     PublisherTransportAmbiguousError,
 )
 from goldpipeline.schemas.common import utc_now
@@ -350,7 +354,7 @@ def _send(
                 warnings.append(f"Chunk {index} was rate limited; waited {delay:g}s.")
                 sleep(delay)
                 continue
-            except PublisherTransportAmbiguousError:
+            except (PublisherTransportAmbiguousError, PublisherResponseError) as exc:
                 # The dangerous one. It may have arrived; never send it again.
                 logger.error(
                     "run=%s attempt=%s chunk=%d stage=review_delivery status=UNCERTAIN",
@@ -362,8 +366,12 @@ def _send(
                     status=ReviewDeliveryStatus.UNCERTAIN,
                     messages=messages,
                     failure=PublishFailure(
-                        category=FailureCategory.TRANSPORT_AMBIGUOUS,
-                        safe_code="TRANSPORT_AMBIGUOUS",
+                        category=(
+                            FailureCategory.RESPONSE_INVALID
+                            if isinstance(exc, PublisherResponseError)
+                            else FailureCategory.TRANSPORT_AMBIGUOUS
+                        ),
+                        safe_code=exc.code,
                         safe_message=(
                             "The transport did not confirm this chunk. It is not resent, "
                             "because a duplicate review copy cannot be withdrawn."
@@ -372,16 +380,28 @@ def _send(
                     ),
                     warnings=warnings,
                 )
-            except PublisherRejectedError as exc:
+            except (
+                PublisherAuthenticationError,
+                PublisherPermissionError,
+                PublisherRejectedError,
+            ) as exc:
+                # An explicit refusal: nothing was delivered, and that is certain.
+                #
+                # Every one of these must be caught here. Letting one escape
+                # leaves the intent committed with no result, which makes the
+                # Run permanently ineligible - a real production failure this
+                # module hit on its first live send, when Telegram answered 403
+                # because a bot may not open a conversation with a user who has
+                # never messaged it.
                 return _Delivery(
                     status=(
                         ReviewDeliveryStatus.PARTIAL if messages else ReviewDeliveryStatus.FAILED
                     ),
                     messages=messages,
                     failure=PublishFailure(
-                        category=FailureCategory.REJECTED,
+                        category=_category_for(exc),
                         safe_code=exc.code,
-                        safe_message="The provider refused the request. Nothing was delivered.",
+                        safe_message=exc.message,
                         failed_chunk_index=index,
                     ),
                     warnings=warnings,
@@ -467,6 +487,15 @@ def _record_uncertain(
         ),
     )
     return _commit(run, manifest, result)
+
+
+def _category_for(exc: PublisherError) -> FailureCategory:
+    """Same mapping the publisher uses, for the same reasons."""
+    if isinstance(exc, PublisherAuthenticationError):
+        return FailureCategory.AUTHENTICATION
+    if isinstance(exc, PublisherPermissionError):
+        return FailureCategory.PERMISSION
+    return FailureCategory.REJECTED
 
 
 __all__ = [
