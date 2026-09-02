@@ -54,6 +54,19 @@ Price = Annotated[Decimal, Field(gt=0)]
 Volume = Annotated[Decimal, Field(ge=0)]
 """A non-negative traded volume."""
 
+Magnitude = Annotated[Decimal, Field(ge=0)]
+"""A non-negative *distance* in price units - never a price.
+
+Deliberately a distinct type from :data:`Price`, though the runtime constraint is
+nearly the same. An ATR of ``5.23`` and a price of ``5.23`` are different kinds
+of number, and a scanner that cannot tell them apart reports the first as a price
+that does not exist in the market data. That exact confusion has already
+produced a false ``NUMBER_OUTSIDE_MARKET_RANGE`` finding on a derived value.
+
+Annotating the difference here means a later round can distinguish them by
+reading the schema, rather than by guessing from the value.
+"""
+
 
 class Timeframe(StrEnum):
     """Chart timeframes the pipeline understands."""

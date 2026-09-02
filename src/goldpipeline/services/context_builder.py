@@ -18,6 +18,7 @@ from goldpipeline.schemas.context import (
     ContextTiming,
 )
 from goldpipeline.schemas.quality import DataQuality
+from goldpipeline.services.levels import build_levels
 from goldpipeline.services.normalizer import NormalizedAnalysis, NormalizedMarketData
 
 
@@ -77,6 +78,7 @@ def build_context(
             author=message.author.model_dump() if message.author else None,
         ),
         ohlc=ContextOHLC(bar_count=snapshot.bar_count, bars=list(snapshot.bars)),
+        levels=build_levels(list(snapshot.bars)),
         data_quality=quality,
     )
 

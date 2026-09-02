@@ -68,6 +68,19 @@ EXCLUDED_PATHS = frozenset(
         f"{ROOT}.raw_analysis.handling",
         f"{ROOT}.raw_analysis.trust_level",
         f"{ROOT}.schema_version",
+        # The window extremes are already a specific bar's high/low, and that
+        # bar has a real address. Offering both invites a writer to cite one
+        # and state the other - the same class of defect this module exists to
+        # prevent, in a new place.
+        f"{ROOT}.levels.window_high",
+        f"{ROOT}.levels.window_high_at",
+        f"{ROOT}.levels.window_low",
+        f"{ROOT}.levels.window_low_at",
+        # Plumbing: how the block was computed, not a fact about the market.
+        f"{ROOT}.levels.method_version",
+        f"{ROOT}.levels.bars_considered",
+        f"{ROOT}.levels.atr_period",
+        f"{ROOT}.levels.pivot_window",
     }
 )
 """Resolvable paths that are nonetheless not offered as claim sources.
