@@ -683,6 +683,42 @@ class LedgerError(IngestionError):
     code = "INGESTION_LEDGER_ERROR"
 
 
+# --- news collection -----------------------------------------------------
+
+
+class NewsError(PipelineError):
+    """Base class for failures of the news collector."""
+
+    code = "NEWS_ERROR"
+
+
+class NewsFetchError(NewsError):
+    """A public preview page could not be retrieved.
+
+    Per source. One channel being unreachable says nothing about the others, so
+    this is caught per channel and recorded rather than ending the collection.
+    """
+
+    code = "NEWS_FETCH_ERROR"
+
+
+class NewsParseError(NewsError):
+    """A page was retrieved but contains no recognisable message.
+
+    Usually means the markup changed. Reported loudly rather than treated as an
+    empty channel: "nothing published" and "we can no longer read this" look
+    identical in an item count and are not the same problem.
+    """
+
+    code = "NEWS_PARSE_ERROR"
+
+
+class NewsConfigurationError(NewsError):
+    """The collector's settings are unusable - no sources, absurd bounds."""
+
+    code = "NEWS_CONFIGURATION_ERROR"
+
+
 # --- article types -------------------------------------------------------
 
 
@@ -1039,6 +1075,10 @@ __all__ = [
     "Mt5SymbolNotFoundError",
     "Mt5SymbolNotSelectedError",
     "NaiveTimestampError",
+    "NewsConfigurationError",
+    "NewsError",
+    "NewsFetchError",
+    "NewsParseError",
     "NormalizationError",
     "OrchestrationError",
     "PersistentConfigIncompleteError",
