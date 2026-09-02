@@ -68,7 +68,7 @@ def test_json_output_reports_the_essentials(
     assert payload["status"] == "DRAFTED"
     assert payload["writer_status"] == "COMPLETED"
     assert payload["provider"] == "fake"
-    assert payload["prompt_version"] == "gold_writer_v1"
+    assert payload["prompt_version"] == "gold_writer_v2"
     assert payload["article_chars"] > 0
 
 

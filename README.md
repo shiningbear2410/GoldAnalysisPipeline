@@ -265,6 +265,69 @@ called. Retrying after a *failure* is allowed, because no artifacts exist.
 behind a `__repr__` that redacts it, and passed only to the SDK client. Provider
 error bodies are never echoed into messages that reach the manifest.
 
+### Source claims address a real schema
+
+Every number the article states is recorded as a `source_claim` with the dotted
+context path it came from, and Round 3 resolves each one deterministically.
+
+That only works if the writer knows the vocabulary. It did not. A production Run
+recorded 17 claims and **16 cited paths that do not exist** —
+`context.instrument`, `context.window.bar_count`, `context.latest_candle.close`,
+`context.window_summary.highest_high`, `context.recent_candles[7].c`. Every
+claim check failed, the reviewer re-verified each number by hand, and 14
+artificial HIGH findings sent a finalizer to repair an article that was correct.
+
+The model was not hallucinating. The prompt hands it a `MARKET FACTS` JSON
+document keyed exactly `instrument` / `window` / `latest_candle` /
+`window_summary` / `recent_candles`, then asked for paths "such as
+`context.price.latest_close`" — an open list of examples. Shown one concrete
+document and an open-ended instruction, it cited the document. Those keys are a
+formatted reading aid; the resolver reads `context.json`, shaped differently.
+
+So the prompt now carries a `VALID SOURCE PATHS` catalog **derived from the
+context object itself**:
+
+```text
+- context.market.symbol
+- context.price.latest_close
+- context.timing.latest_candle_at
+- context.ohlc.bars[i].<field>   i = 0..19   (-1 also means the latest)
+    <field> is one of: timestamp, open, high, low, close, volume
+```
+
+Nothing about it is hand-maintained, so it cannot drift from what the resolver
+accepts — a test asserts every advertised path resolves. It is generated from
+application code, never from source content, so the untrusted note cannot
+introduce a path.
+
+Two things are deliberately **not** claimable:
+
+- **the analyst's note.** `context.raw_analysis.text` resolves, but prose
+  paraphrases it while a claim is compared for equality, so offering it
+  guarantees a recurring mismatch. The resolver still accepts a verbatim
+  quotation; the path is simply not offered.
+- **arithmetic.** Net change, percentage change and closing-run length are
+  computed for the prompt and exist nowhere in the context. They may be stated
+  in prose; they may not cite a source. Window high and low need no new field —
+  they are a particular candle's `high` and `low`, and that candle has an
+  address.
+
+Each row of `recent_candles` now carries its own `path`. Trimming re-indexes the
+list — the 8th of the last 12 candles is `bars[15]` of 20 — so an index copied
+from that block would have produced a path that resolves *to the wrong candle*,
+which is the same failure wearing a quieter disguise.
+
+**The writer stage fails closed.** Before `claude_writer.json` is committed,
+every claim path must resolve; if any does not, the stage raises
+`WRITER_RESPONSE_ERROR` and the Run stays `NORMALIZED`. Nothing is repaired —
+guessing which real path a hallucinated one meant would put a citation in the
+artifact that the writer never made. The invariant is that **`DRAFTED` implies
+every source path resolves**, and the reviewer's own check remains as defence in
+depth for artifacts written by older builds.
+
+The prompt is versioned: `gold_writer_v1` is preserved unchanged so existing
+Runs keep meaning what they said, and `gold_writer_v2` is the current default.
+
 ### Response validation
 
 A provider answer is rejected - and no draft written - when it is invalid against

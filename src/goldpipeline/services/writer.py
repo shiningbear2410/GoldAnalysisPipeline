@@ -50,6 +50,7 @@ from goldpipeline.schemas.writer import (
     WriterStatus,
     WriterWarning,
 )
+from goldpipeline.services.claim_resolver import ClaimPathError, resolve_path
 from goldpipeline.services.pipeline import CONTEXT_FILENAME
 from goldpipeline.services.source_guard import (
     SourceGuardReport,
@@ -287,6 +288,9 @@ def load_verified_context(run: RunDirectory, manifest: RunManifest) -> tuple[Ana
 # response validation
 # --------------------------------------------------------------------------
 
+_MAX_REPORTED_PATHS = 10
+"""How many bad paths the error names. Enough to diagnose, bounded for the manifest."""
+
 
 def _validate_output(output: WriterModelOutput, context: AnalysisContext) -> WriterModelOutput:
     """Check a provider answer against *this* Run.
@@ -313,7 +317,52 @@ def _validate_output(output: WriterModelOutput, context: AnalysisContext) -> Wri
     if not output.title.strip():
         raise WriterResponseError("response contains an empty title")
 
+    _require_resolvable_claims(output, context)
+
     return output
+
+
+def _require_resolvable_claims(output: WriterModelOutput, context: AnalysisContext) -> None:
+    """Refuse a draft whose claims cite paths that do not exist.
+
+    The invariant this establishes: **a Run never reaches DRAFTED carrying an
+    unresolvable source path.** Before this check a production Run committed
+    seventeen claims of which sixteen pointed at invented fields; the failure
+    surfaced two stages later as fourteen HIGH reviewer findings against an
+    article that was factually fine, and a finalizer repaired something that was
+    never broken. Catching it here costs one loop and localises the fault where
+    it happened.
+
+    Raised as a :class:`WriterResponseError` rather than a new class because
+    that is exactly what it is - the provider returned a structurally invalid
+    answer. That also gives it the retry policy the existing design already
+    chose for malformed responses: bounded, five attempts, because a model is
+    not deterministic and a second attempt genuinely differs. It is not a
+    configuration fault; nothing about the machine needs fixing.
+
+    Deliberately no repair. Guessing which real path a hallucinated one meant
+    would substitute our arithmetic for the writer's citation and produce a
+    claim nobody made.
+    """
+    invalid: list[str] = []
+    for claim in output.source_claims:
+        try:
+            resolve_path(context, claim.source)
+        except ClaimPathError:
+            invalid.append(claim.source)
+
+    if invalid:
+        shown = ", ".join(repr(path) for path in invalid[:_MAX_REPORTED_PATHS])
+        if len(invalid) > _MAX_REPORTED_PATHS:
+            shown += f", and {len(invalid) - _MAX_REPORTED_PATHS} more"
+        raise WriterResponseError(
+            f"{len(invalid)} of {len(output.source_claims)} source_claims cite paths that "
+            f"do not resolve against this context: {shown}. Source paths must be copied "
+            "from the VALID SOURCE PATHS catalog.",
+            invalid_paths=invalid[:_MAX_REPORTED_PATHS],
+            invalid_count=len(invalid),
+            claim_count=len(output.source_claims),
+        )
 
 
 def _merge_warnings(

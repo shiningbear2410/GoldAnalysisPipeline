@@ -19,6 +19,15 @@ Three mechanisms, together:
 
 The text itself is passed through verbatim. Round 1 already stripped invisible
 characters; nothing here rewrites the analyst's words.
+
+A fourth mechanism, added after a production failure, is about *data integrity*
+rather than injection: the user turn carries a ``VALID SOURCE PATHS`` catalog
+generated from the context itself. Without it the model saw only the MARKET
+FACTS block - a differently-shaped reading aid - and cited its key names as
+paths, so sixteen of seventeen claims in a real Run addressed fields that do not
+exist. The catalog is built by :mod:`goldpipeline.services.claim_paths` from
+application code, never from source content, so nothing in the analyst's note
+can introduce a path.
 """
 
 from __future__ import annotations
@@ -29,6 +38,7 @@ from collections.abc import Callable
 from goldpipeline.prompts import DEFAULT_WRITER_PROMPT, load_prompt
 from goldpipeline.schemas.context import AnalysisContext
 from goldpipeline.schemas.writer import WriterPrompt
+from goldpipeline.services.claim_paths import build_catalog
 from goldpipeline.services.fencing import fence_marker, fenced_block, make_nonce
 from goldpipeline.services.market_facts import build_market_facts, format_recent_bars
 from goldpipeline.services.source_guard import SourceGuardReport, build_guard_notice
@@ -37,6 +47,7 @@ RECENT_BAR_LIMIT = 12
 
 SOURCE_LABEL = "UNTRUSTED_SOURCE"
 MARKET_FACTS_HEADING = "# MARKET FACTS"
+CLAIM_PATHS_HEADING = "# VALID SOURCE PATHS"
 UNTRUSTED_HEADING = "# UNTRUSTED SOURCE DATA"
 
 
@@ -71,6 +82,7 @@ def build_writer_prompt(
     nonce = (nonce_factory or make_nonce)()
 
     facts = build_market_facts(context)
+    catalog = build_catalog(context)
     payload = {
         "run_id": context.run_id,
         "context_schema_version": context.schema_version,
@@ -100,6 +112,23 @@ def build_writer_prompt(
         "```json",
         json.dumps(payload, ensure_ascii=False, indent=2),
         "```",
+        "",
+        "The key names above are display labels for reading, NOT source paths.",
+        "Every `source_claims[*].source` must come from the next section. The one",
+        "exception is `recent_candles[].path`, which is already a real path: append",
+        "`.open`, `.high`, `.low`, `.close` or `.timestamp` to cite that candle.",
+        "",
+        CLAIM_PATHS_HEADING,
+        "",
+        "These are the only values addressable by a source path in this Run, and the",
+        "only strings permitted in `source_claims[*].source`. Copy one exactly.",
+        "",
+        "```text",
+        *catalog.describe(),
+        "```",
+        "",
+        "A path not listed here does not exist. If nothing here supports a figure,",
+        "state it in prose without a source_claim rather than inventing an address.",
         "",
         "Provenance of the note below (metadata only, also data):",
         "",
@@ -153,6 +182,7 @@ def _safe_author(author: dict[str, object] | None) -> dict[str, object] | None:
 
 
 __all__ = [
+    "CLAIM_PATHS_HEADING",
     "MARKET_FACTS_HEADING",
     "RECENT_BAR_LIMIT",
     "SOURCE_LABEL",

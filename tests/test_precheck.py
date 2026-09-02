@@ -170,11 +170,41 @@ def test_a_claim_resolving_to_an_oversized_context_value_is_clipped(
 
 
 def test_an_unresolvable_claim_path_is_flagged(runs_dir: Any, tmp_path: Any) -> None:
-    """Requirement 27.10."""
-    claims = [
-        SourceClaim(type=ClaimType.PRICE, value="3305.90", source="context.price.nonexistent")
-    ]
-    report = check(runs_dir, tmp_path, CLEAN_ARTICLE, claims=claims)
+    """Requirement 27.10, now as defence in depth.
+
+    Round 9.3.4B made the writer stage refuse to commit a draft whose claims
+    cite paths that do not resolve, so this artifact can no longer be produced
+    by drafting one - the substitution below is how it has to be built.
+
+    The check stays because the two guards answer different questions. The
+    writer's guard protects Runs created from now on; this one still has to work
+    for an artifact written by an earlier build, and removing it would leave the
+    only surviving evidence of such a Run unexamined.
+    """
+    from pathlib import Path
+
+    from goldpipeline.schemas.context import AnalysisContext
+    from goldpipeline.schemas.writer import WriterResult
+
+    drafted = make_drafted_run(runs_dir, tmp_path, article=CLEAN_ARTICLE)
+    run_dir = Path(drafted.run_dir)
+    context = AnalysisContext.model_validate_json(
+        (run_dir / "context.json").read_text(encoding="utf-8")
+    )
+    stored = WriterResult.model_validate_json(
+        (run_dir / "claude_writer.json").read_text(encoding="utf-8")
+    )
+    tampered = stored.model_copy(
+        update={
+            "source_claims": [
+                SourceClaim(
+                    type=ClaimType.PRICE, value="3305.90", source="context.price.nonexistent"
+                )
+            ]
+        }
+    )
+
+    report = run_prechecks(context=context, writer_result=tampered, article=CLEAN_ARTICLE)
 
     assert FindingCode.CLAIM_SOURCE_NOT_FOUND in codes(report)
     assert report.has_blocking

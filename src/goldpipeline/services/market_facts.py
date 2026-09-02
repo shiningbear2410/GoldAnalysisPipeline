@@ -192,17 +192,27 @@ def format_recent_bars(context: AnalysisContext, limit: int = 12) -> list[dict[s
     The full series stays in ``context.json``; the prompt carries a tail. A
     writer describing short-term behaviour needs recent candles, and sending
     hundreds of bars would push the interesting ones away from the instruction.
+
+    **Each candle carries its own address.** Trimming re-indexes the list: the
+    eighth candle here was the sixteenth in a twenty-bar series, so a writer
+    citing "index 7" would name a real path pointing at the wrong candle. That
+    is a quieter version of the failure this whole contract exists to prevent -
+    a claim that resolves, to something else - so the absolute path travels with
+    the row rather than being left for the model to work out.
     """
-    recent = context.ohlc.bars[-limit:] if limit > 0 else context.ohlc.bars
+    bars = context.ohlc.bars
+    offset = max(len(bars) - limit, 0) if limit > 0 else 0
+    recent = bars[-limit:] if limit > 0 else bars
     return [
         {
+            "path": f"context.ohlc.bars[{offset + position}]",
             "t": _iso(bar.timestamp),
             "o": format_price(bar.open),
             "h": format_price(bar.high),
             "l": format_price(bar.low),
             "c": format_price(bar.close),
         }
-        for bar in recent
+        for position, bar in enumerate(recent)
     ]
 
 

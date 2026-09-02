@@ -17,7 +17,21 @@ from pathlib import Path
 PROMPTS_DIR = Path(__file__).resolve().parent
 
 GOLD_WRITER_V1 = "gold_writer_v1"
-"""Current writer prompt id."""
+"""The original writer prompt. Retained so historical Runs keep their meaning.
+
+Its `source_claims` rule offered dotted paths "such as" three examples - an open
+vocabulary - while the user turn showed a differently-shaped MARKET FACTS
+document. A production Run cited that document instead, and sixteen of its
+seventeen claims addressed paths that do not exist.
+"""
+
+GOLD_WRITER_V2 = "gold_writer_v2"
+"""Current writer prompt id. Closes the `source` vocabulary.
+
+Identical to v1 except that `source` must be copied from the `VALID SOURCE
+PATHS` catalog the user turn now carries, and derived figures and the analyst's
+note are explicitly not claimable.
+"""
 
 GOLD_REVIEWER_V1 = "gold_reviewer_v1"
 """Current reviewer prompt id."""
@@ -25,7 +39,7 @@ GOLD_REVIEWER_V1 = "gold_reviewer_v1"
 GOLD_FINALIZER_V1 = "gold_finalizer_v1"
 """Current finalizer prompt id."""
 
-DEFAULT_WRITER_PROMPT = GOLD_WRITER_V1
+DEFAULT_WRITER_PROMPT = GOLD_WRITER_V2
 DEFAULT_REVIEWER_PROMPT = GOLD_REVIEWER_V1
 DEFAULT_FINALIZER_PROMPT = GOLD_FINALIZER_V1
 
@@ -67,6 +81,7 @@ __all__ = [
     "GOLD_FINALIZER_V1",
     "GOLD_REVIEWER_V1",
     "GOLD_WRITER_V1",
+    "GOLD_WRITER_V2",
     "PROMPTS_DIR",
     "REQUIRED_SECTIONS",
     "load_prompt",

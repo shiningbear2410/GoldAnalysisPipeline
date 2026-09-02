@@ -133,7 +133,7 @@ def test_metadata_describes_the_draft(normalized_run: Any, runs_dir: Path) -> No
     assert stored.run_id == normalized_run.run_id
     assert stored.status is WriterStatus.COMPLETED
     assert stored.provider == "fake"
-    assert stored.prompt_version == "gold_writer_v1"
+    assert stored.prompt_version == "gold_writer_v2"
     assert stored.draft_file == DRAFT_FILENAME
     assert stored.created_at == WRITER_NOW
     assert [claim.source for claim in stored.source_claims] == ["context.price.latest_close"]
@@ -638,7 +638,7 @@ def test_source_instructions_do_not_change_configuration(runs_dir: Path, tmp_pat
     # Configuration is untouched: still the fake provider, still its own model.
     assert result.result.provider == "fake"
     assert result.result.model == "fake-writer-v1"
-    assert result.result.prompt_version == "gold_writer_v1"
+    assert result.result.prompt_version == "gold_writer_v2"
 
     # The context the draft was written from still describes gold.
     context = AnalysisContext.model_validate_json(
