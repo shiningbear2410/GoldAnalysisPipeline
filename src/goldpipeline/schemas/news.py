@@ -80,6 +80,51 @@ class CollectionOutcome(StrEnum):
     """No source produced anything. Explicitly not an empty success."""
 
 
+class StopReason(StrEnum):
+    """Why pagination stopped walking one channel backwards.
+
+    Closed, because "did we cover the window?" is answered from this and not
+    from a page count. Fetching forty pages proves effort, not coverage; only
+    two of these reasons are evidence that the requested history was reached.
+    """
+
+    CUTOFF_REACHED = "CUTOFF_REACHED"
+    """Walked past the requested start. The window is genuinely covered."""
+
+    SOURCE_EXHAUSTED = "SOURCE_EXHAUSTED"
+    """The channel has no older messages. Covered by definition - there is no
+    more history to miss."""
+
+    PAGE_CAP_REACHED = "PAGE_CAP_REACHED"
+    """This source's circuit breaker tripped before the cutoff."""
+
+    GLOBAL_BUDGET_REACHED = "GLOBAL_BUDGET_REACHED"
+    """The run's total request budget was spent, possibly by other sources."""
+
+    REPEATED_CURSOR = "REPEATED_CURSOR"
+    """The next page did not move backwards. Telegram answers a ``before`` past
+    the beginning with the same page, so this is how a walk would loop."""
+
+    EMPTY_PAGE = "EMPTY_PAGE"
+    """A later page carried no messages. Probably the end of the channel, but
+    not provably so, which is why it does not count as coverage."""
+
+    FETCH_FAILED = "FETCH_FAILED"
+    RATE_LIMITED = "RATE_LIMITED"
+    """The server asked us to stop. Honoured immediately, without retrying."""
+
+    PARSE_FAILED = "PARSE_FAILED"
+    """The first page did not parse - the markup is no longer what we read."""
+
+
+COVERING_STOPS = frozenset({StopReason.CUTOFF_REACHED, StopReason.SOURCE_EXHAUSTED})
+"""The only two reasons that count as having covered the window.
+
+Kept as a set beside the enum so the rule lives in one place: coverage is a
+property of *why* the walk ended, never of how much it fetched.
+"""
+
+
 class NewsItem(StrictModel):
     """One published message, normalized. UNTRUSTED content throughout."""
 
@@ -125,6 +170,17 @@ class SourceReport(StrictModel):
     covered_window: bool = Field(
         default=False,
         description="Whether pagination reached back past the requested start.",
+    )
+    stop_reason: StopReason | None = Field(
+        default=None, description="Why the walk ended. The basis for covered_window."
+    )
+    requested_start: UtcDatetime | None = Field(
+        default=None, description="The cutoff this source was asked to reach."
+    )
+    newest_seen: UtcDatetime | None = None
+    oldest_seen: UtcDatetime | None = Field(
+        default=None,
+        description="Oldest message observed, in or out of the window. How far back we got.",
     )
     error_code: str | None = Field(
         default=None, description="Safe code. Never a provider message or a URL."
@@ -212,6 +268,8 @@ __all__ = [
     "NewsCategory",
     "NewsCollection",
     "NewsItem",
+    "COVERING_STOPS",
     "SourceOutcome",
     "SourceReport",
+    "StopReason",
 ]
