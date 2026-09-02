@@ -63,6 +63,7 @@ from goldpipeline.config import (
     AutomationSettings,
     FinalizerSettings,
     MarketDataSettings,
+    ReviewDeliverySettings,
     ReviewerSettings,
     TelegramSettings,
     WriterSettings,
@@ -1698,11 +1699,28 @@ def _worker_context(
         # is checked against the stand-in's channel. Nothing leaves the machine.
         target = settings.auto_publish_allowed_target
 
+    review = ReviewDeliverySettings.from_env(source)
+
+    def review_client() -> tuple[PublisherClient, str]:
+        """Built only when there is something approved to show.
+
+        Uses the review destination exclusively - never `target_chat`, which is
+        where publishing would post.
+        """
+        if args.fake_publisher:
+            return FakePublisherClient(), review.chat_id or FAKE_TARGET_CHAT
+        telegram = TelegramSettings.from_env(source, secrets=_secret_provider())
+        from goldpipeline.adapters.telegram_publisher import TelegramPublisherClient
+
+        return TelegramPublisherClient(telegram), review.chat_id
+
     return WorkerContext(
         inbox=inbox,
         store=RunStore(args.runs_dir),
         automation=AutomationStore(settings.automation_dir),
         settings=settings,
+        review_delivery=review,
+        review_client=review_client,
         market_source=_market_source(args),
         clients=_pipeline_clients(args),
         expected_symbol=MarketDataSettings.from_env(source).canonical_symbol,

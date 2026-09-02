@@ -23,12 +23,12 @@ from pydantic import Field
 from goldpipeline.schemas.common import StrictModel, UtcDatetime, utc_now
 from goldpipeline.schemas.runtime_config import ConfigMode
 
-AUTOMATION_SCHEMA_VERSION = "1.1.0"
-"""Bumped when a tick record gained configuration provenance.
+AUTOMATION_SCHEMA_VERSION = "1.2.0"
+"""1.1.0 added configuration provenance; 1.2.0 added review deliveries.
 
-Additive: every new field has a default, so records written by 1.0.0 still
-read. The version moved anyway, because "which fields should I expect in an
-incident?" is a question worth being able to answer from the file itself.
+Additive throughout: every field has a default, so records written by an earlier
+version still read. The version moves anyway, because "which fields should I
+expect in an incident?" is a question worth answering from the file itself.
 """
 
 BACKOFF_MINUTES = (1, 2, 5, 10, 30)
@@ -166,6 +166,10 @@ class AutomationTickResult(StrictModel):
     deferred_events: list[WorkItem] = Field(default_factory=list)
     expired_events: list[WorkItem] = Field(default_factory=list)
     blocked_runs: list[WorkItem] = Field(default_factory=list)
+    review_deliveries: list[WorkItem] = Field(
+        default_factory=list,
+        description="Approved Runs shown to a human. Never a publication.",
+    )
     errors: list[str] = Field(
         default_factory=list, description="Safe error codes only, never values or messages."
     )
@@ -180,6 +184,7 @@ class AutomationTickResult(StrictModel):
             or self.deferred_events
             or self.expired_events
             or self.blocked_runs
+            or self.review_deliveries
         )
 
 

@@ -60,6 +60,20 @@ FINALIZER_TIMEOUT_ENV = "GOLDPIPELINE_FINALIZER_TIMEOUT"
 FINALIZER_MAX_RETRIES_ENV = "GOLDPIPELINE_FINALIZER_MAX_RETRIES"
 FINALIZER_MAX_TOKENS_ENV = "GOLDPIPELINE_FINALIZER_MAX_TOKENS"
 
+REVIEW_ENABLED_ENV = "GOLDPIPELINE_TELEGRAM_REVIEW_ENABLED"
+REVIEW_CHAT_ENV = "GOLDPIPELINE_TELEGRAM_REVIEW_CHAT_ID"
+REVIEW_MAX_RUN_AGE_ENV = "GOLDPIPELINE_TELEGRAM_REVIEW_MAX_RUN_AGE_MINUTES"
+
+DEFAULT_REVIEW_MAX_RUN_AGE_MINUTES = 60
+"""How old an approved Run may be and still be worth reviewing.
+
+Doubles as the backlog guard. Enabling review delivery on a machine that
+already holds finished Runs must not post a week of old articles at once, and
+an age limit expresses that without a separate activation marker to keep in
+sync. It is also the right rule on its own terms: an article about candles from
+this morning is not worth reading this evening.
+"""
+
 TELEGRAM_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
 TELEGRAM_TARGET_ENV = "TELEGRAM_TARGET_CHAT_ID"
 TELEGRAM_TIMEOUT_ENV = "GOLDPIPELINE_PUBLISH_TIMEOUT"
@@ -332,6 +346,63 @@ class FinalizerSettings:
 
 _CHAT_USERNAME = re.compile(r"^@[A-Za-z][A-Za-z0-9_]{4,31}$")
 _CHAT_NUMERIC = re.compile(r"^-?\d{1,19}$")
+
+
+@dataclass(frozen=True)
+class ReviewDeliverySettings:
+    """Where an approved-but-unpublished article is sent for a human to read.
+
+    Deliberately its own type rather than a flag on :class:`TelegramSettings`.
+    Review delivery and publishing share a transport and nothing else: they have
+    different destinations, different artifacts, different triggers, and only one
+    of them changes a Run's status. A single settings object holding both
+    destinations would make "post to the review chat" and "publish to the
+    channel" one typo apart.
+
+    The token is not here for the same reason it is not in the config file: it
+    is a credential, and it comes from the credential store at the point of use.
+    """
+
+    enabled: bool = False
+    chat_id: str = ""
+    max_run_age_minutes: int = DEFAULT_REVIEW_MAX_RUN_AGE_MINUTES
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> ReviewDeliverySettings:
+        """Build settings from non-secret configuration.
+
+        Raises:
+            PublisherConfigurationError: Review delivery is on but the
+                destination is missing or is not a shape Telegram accepts.
+                Named, never valued.
+        """
+        source = os.environ if env is None else env
+        enabled = _flag(source, REVIEW_ENABLED_ENV)
+        raw = _raw(source, REVIEW_CHAT_ENV) or ""
+
+        chat_id = raw.strip()
+        if enabled and not chat_id:
+            # Fail closed. A review delivery with no destination must never
+            # borrow the publish target: those are different audiences, and
+            # one of them is a public channel.
+            raise PublisherConfigurationError(
+                f"{REVIEW_ENABLED_ENV} is on but {REVIEW_CHAT_ENV} is not set; "
+                "review delivery never falls back to the publish destination",
+                setting=REVIEW_CHAT_ENV,
+            )
+        if chat_id:
+            chat_id = validate_target_chat(chat_id)
+
+        return cls(
+            enabled=enabled,
+            chat_id=chat_id,
+            max_run_age_minutes=_positive_int(
+                source,
+                REVIEW_MAX_RUN_AGE_ENV,
+                DEFAULT_REVIEW_MAX_RUN_AGE_MINUTES,
+                PublisherConfigurationError,
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -778,6 +849,11 @@ __all__ = [
     "DEFAULT_MT5_SYMBOL",
     "DEFAULT_PUBLISH_TIMEOUT_SECONDS",
     "DEFAULT_REVIEWER_MODEL",
+    "DEFAULT_REVIEW_MAX_RUN_AGE_MINUTES",
+    "REVIEW_CHAT_ENV",
+    "REVIEW_ENABLED_ENV",
+    "REVIEW_MAX_RUN_AGE_ENV",
+    "ReviewDeliverySettings",
     "DEFAULT_REVIEW_MODEL",
     "REVIEWER_MODEL_ENV",
     "DEFAULT_TIMEFRAME",

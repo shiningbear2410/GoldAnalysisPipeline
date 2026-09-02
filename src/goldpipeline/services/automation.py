@@ -47,7 +47,8 @@ from pathlib import Path
 from goldpipeline import PIPELINE_VERSION
 from goldpipeline.adapters.base import MarketDataSource
 from goldpipeline.adapters.inbox_source import parse_event
-from goldpipeline.config import AutomationSettings
+from goldpipeline.adapters.publisher_client import PublisherClient
+from goldpipeline.config import AutomationSettings, ReviewDeliverySettings
 from goldpipeline.domain.errors import (
     ArtifactIntegrityError,
     AutoPublishNotAllowedError,
@@ -76,6 +77,7 @@ from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.ingestion import IngestOutcome, IngestResult
 from goldpipeline.schemas.manifest import RunStatus
 from goldpipeline.schemas.orchestration import PipelineMode, PipelineStatus
+from goldpipeline.schemas.review_delivery import ReviewDeliveryStatus
 from goldpipeline.schemas.runtime_config import ConfigMode, ProductionConfig
 from goldpipeline.services.automation_state import (
     AutomationStore,
@@ -90,6 +92,7 @@ from goldpipeline.services.orchestrator import (
     PipelineRunResult,
     resume_pipeline,
 )
+from goldpipeline.services.review_delivery import deliver_review, is_eligible
 from goldpipeline.services.run_lock import WORKER_LOCK_FILENAME, RunLock
 from goldpipeline.storage.atomic import encode_json
 from goldpipeline.storage.run_store import RunStore
@@ -152,6 +155,21 @@ class WorkerContext:
     argument that a payload could reach.
     """
 
+    review_delivery: ReviewDeliverySettings = field(default_factory=ReviewDeliverySettings)
+    """Whether an approved article is shown to a human, and where.
+
+    Off by default, and entirely independent of ``auto_publish_enabled``:
+    delivering a review copy is not publishing, and enabling one must never
+    imply the other.
+    """
+
+    review_client: Callable[[], tuple[PublisherClient, str]] | None = None
+    """Builds the review transport and destination, lazily.
+
+    A factory rather than a client so a worker that has nothing approved to show
+    never constructs one - and therefore never reads the bot token.
+    """
+
     config: ProductionConfig | None = None
     """The production configuration this context was built from, if any.
 
@@ -195,6 +213,7 @@ class _Tick:
     deferred: list[WorkItem] = field(default_factory=list)
     expired: list[WorkItem] = field(default_factory=list)
     blocked: list[WorkItem] = field(default_factory=list)
+    reviews: list[WorkItem] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     def finish(self, status: TickStatus) -> AutomationTickResult:
@@ -217,6 +236,7 @@ class _Tick:
             deferred_events=self.deferred,
             expired_events=self.expired,
             blocked_runs=self.blocked,
+            review_deliveries=self.reviews,
             errors=self.errors,
         )
 
@@ -272,6 +292,9 @@ def run_tick(context: WorkerContext, *, now: datetime | None = None) -> Automati
         _promote_deferred(context, tick, moment)
         _resume_runs(context, tick, moment)
         _process_events(context, tick, moment)
+        # Last, so a Run finished by this very tick is shown immediately rather
+        # than a minute later. Publishing is untouched: this changes no status.
+        _deliver_reviews(context, tick, moment)
         status = TickStatus.BLOCKED if tick.blocked else TickStatus.OK
     except PipelineError as exc:
         # A worker-level failure. The stage-level ones are handled where they
@@ -487,6 +510,73 @@ def _resumable_runs(context: WorkerContext, moment: datetime) -> list[str]:
         candidates.append((manifest.created_at, run_id))
 
     return [run_id for _, run_id in sorted(candidates)]
+
+
+def _deliver_reviews(context: WorkerContext, tick: _Tick, moment: datetime) -> None:
+    """Show every newly approved Run to a human, at most once each.
+
+    Deliberately independent of ``auto_publish_enabled``. A review copy going to
+    the operator's own chat and a publication going to an audience are different
+    acts with different consequences, and the flag that authorises one must not
+    authorise the other.
+
+    Failures here are logged and dropped rather than failing the tick: the
+    pipeline's work is already safely on disk, and a Telegram problem must not
+    turn a completed Run into a retried one.
+    """
+    settings = context.review_delivery
+    if not settings.enabled or context.review_client is None:
+        return
+
+    for run_id in context.store.list_run_ids():
+        if _out_of_time(context, tick):
+            return
+        try:
+            run = context.store.open(run_id)
+            manifest = run.load_manifest()
+        except (FileNotFoundError, ValueError, PipelineError):
+            continue
+
+        if (
+            is_eligible(run, manifest, now=moment, max_run_age_minutes=settings.max_run_age_minutes)
+            is not None
+        ):
+            continue
+
+        try:
+            client, target = context.review_client()
+            outcome = deliver_review(
+                run_id=run_id,
+                store=context.store,
+                client=client,
+                target_chat=target,
+                now=moment,
+                max_run_age_minutes=settings.max_run_age_minutes,
+            )
+        except PipelineError as exc:
+            logger.error("run=%s stage=review_delivery status=FAILED code=%s", run_id, exc.code)
+            tick.reviews.append(
+                WorkItem(
+                    kind="run",
+                    identifier=run_id,
+                    outcome=WorkOutcome.FAILED,
+                    code=exc.code,
+                    detail="review delivery failed; the Run is unaffected",
+                )
+            )
+            continue
+
+        if outcome.status is ReviewDeliveryStatus.SKIPPED:
+            continue
+        tick.reviews.append(
+            WorkItem(
+                kind="run",
+                identifier=run_id,
+                outcome=(WorkOutcome.COMPLETED if outcome.delivered else WorkOutcome.FAILED),
+                code=str(outcome.status),
+                detail="review copy; the Run remains READY_TO_PUBLISH",
+            )
+        )
 
 
 def may_resume(status: RunStatus, auto_publish: bool) -> bool:

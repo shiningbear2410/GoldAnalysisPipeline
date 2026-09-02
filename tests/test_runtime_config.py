@@ -178,6 +178,11 @@ def test_every_allowed_setting_can_be_persisted(store: RuntimeConfigStore) -> No
         ConfigKey.AUTOPUBLISH_ENABLED: "false",
         ConfigKey.AUTOPUBLISH_ALLOWED_TARGET: "@pcfxsn",
         ConfigKey.AUTOPUBLISH_MAX_RUN_AGE_MINUTES: "30",
+        # Round 9.4: review delivery. Separate from publishing on purpose - the
+        # destination is the operator's own chat, not the audience's channel.
+        ConfigKey.TELEGRAM_REVIEW_ENABLED: "false",
+        ConfigKey.TELEGRAM_REVIEW_CHAT_ID: "7387726751",
+        ConfigKey.TELEGRAM_REVIEW_MAX_RUN_AGE_MINUTES: "60",
     }
     for key, value in values.items():
         store.set(key, value)
