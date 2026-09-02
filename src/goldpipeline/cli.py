@@ -28,6 +28,7 @@ from goldpipeline.adapters.config_store import (
     RuntimeConfigStore,
     parse_key,
 )
+from goldpipeline.adapters.event_transport import EventTransport, HttpOutboxTransport
 from goldpipeline.adapters.fake_finalizer import FakeFinalizerClient
 from goldpipeline.adapters.fake_publisher import FakePublisherClient
 from goldpipeline.adapters.fake_reviewer import FakeReviewerClient
@@ -62,6 +63,7 @@ from goldpipeline.config import (
     INBOX_DIR_ENV,
     AutomationSettings,
     FinalizerSettings,
+    IngestSettings,
     MarketDataSettings,
     ReviewDeliverySettings,
     ReviewerSettings,
@@ -77,6 +79,7 @@ from goldpipeline.domain.errors import (
     PipelineError,
     ProductionConfigError,
     PublisherConfigurationError,
+    RemoteIntakeConfigurationError,
     ReviewConfigurationError,
     RunLockedError,
     WriterConfigurationError,
@@ -1714,6 +1717,29 @@ def _worker_context(
 
         return TelegramPublisherClient(telegram), review.chat_id
 
+    ingest = IngestSettings.from_env(source)
+
+    def event_transport() -> EventTransport:
+        """Built only when remote intake is on.
+
+        The credential is resolved here, inside the factory, so a disabled
+        feature never touches the credential store.
+        """
+        token, _ = _secret_provider().resolve(SecretName.INGEST_TOKEN)
+        if not token:
+            # Fail closed rather than sending "Bearer None" to the producer and
+            # reading whatever an unauthenticated endpoint decides to hand back.
+            raise RemoteIntakeConfigurationError(
+                f"remote intake is on but {SecretName.INGEST_TOKEN.value} is not configured",
+                setting=SecretName.INGEST_TOKEN.value,
+            )
+        return HttpOutboxTransport(
+            base_url=ingest.url,
+            token=token,
+            timeout_seconds=ingest.timeout_seconds,
+            max_bytes=ingest.max_bytes,
+        )
+
     return WorkerContext(
         inbox=inbox,
         store=RunStore(args.runs_dir),
@@ -1721,6 +1747,8 @@ def _worker_context(
         settings=settings,
         review_delivery=review,
         review_client=review_client,
+        ingest=ingest,
+        event_transport=event_transport if ingest.enabled else None,
         market_source=_market_source(args),
         clients=_pipeline_clients(args),
         expected_symbol=MarketDataSettings.from_env(source).canonical_symbol,

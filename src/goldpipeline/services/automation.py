@@ -46,9 +46,10 @@ from pathlib import Path
 
 from goldpipeline import PIPELINE_VERSION
 from goldpipeline.adapters.base import MarketDataSource
+from goldpipeline.adapters.event_transport import EventTransport
 from goldpipeline.adapters.inbox_source import parse_event
 from goldpipeline.adapters.publisher_client import PublisherClient
-from goldpipeline.config import AutomationSettings, ReviewDeliverySettings
+from goldpipeline.config import AutomationSettings, IngestSettings, ReviewDeliverySettings
 from goldpipeline.domain.errors import (
     ArtifactIntegrityError,
     AutoPublishNotAllowedError,
@@ -60,6 +61,7 @@ from goldpipeline.domain.errors import (
     MarketDataError,
     PipelineError,
     PublisherConfigurationError,
+    RemoteIntakeError,
     ReviewConfigurationError,
     ReviewSchemaError,
     RunLockedError,
@@ -87,7 +89,8 @@ from goldpipeline.services.automation_state import (
     read_defer,
     write_defer,
 )
-from goldpipeline.services.inbox import INCOMING, Inbox
+from goldpipeline.services.event_intake import intake
+from goldpipeline.services.inbox import INCOMING, Inbox, Ledger
 from goldpipeline.services.ingestion import IngestionContext, ingest_claimed, reconcile
 from goldpipeline.services.orchestrator import (
     PipelineClients,
@@ -165,6 +168,22 @@ class WorkerContext:
     imply the other.
     """
 
+    ingest: IngestSettings = field(default_factory=IngestSettings)
+    """The optional remote event source. Off by default.
+
+    When off, no transport is built, no credential is read and no socket is
+    opened - a tick is byte-for-byte the tick this worker did before remote
+    intake existed.
+    """
+
+    event_transport: Callable[[], EventTransport] | None = None
+    """Builds the remote transport, lazily.
+
+    A factory rather than an instance for the same reason the publisher is one:
+    constructing it resolves a credential, and a disabled feature must not read
+    a credential it will never use.
+    """
+
     review_client: Callable[[], tuple[PublisherClient, str]] | None = None
     """Builds the review transport and destination, lazily.
 
@@ -216,6 +235,14 @@ class _Tick:
     expired: list[WorkItem] = field(default_factory=list)
     blocked: list[WorkItem] = field(default_factory=list)
     reviews: list[WorkItem] = field(default_factory=list)
+    remote_attempted: bool = False
+    remote_status: str | None = None
+    remote_received: int = 0
+    remote_submitted: int = 0
+    remote_duplicate: int = 0
+    remote_invalid: int = 0
+    remote_conflict: int = 0
+    remote_items: list[WorkItem] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     def finish(self, status: TickStatus) -> AutomationTickResult:
@@ -239,6 +266,14 @@ class _Tick:
             expired_events=self.expired,
             blocked_runs=self.blocked,
             review_deliveries=self.reviews,
+            remote_fetch_attempted=self.remote_attempted,
+            remote_fetch_status=self.remote_status,
+            remote_events_received=self.remote_received,
+            remote_events_submitted=self.remote_submitted,
+            remote_events_duplicate=self.remote_duplicate,
+            remote_events_invalid=self.remote_invalid,
+            remote_events_conflict=self.remote_conflict,
+            remote_intake=self.remote_items,
             errors=self.errors,
         )
 
@@ -290,6 +325,7 @@ def run_tick(context: WorkerContext, *, now: datetime | None = None) -> Automati
         return tick.finish(TickStatus.SKIPPED)
 
     try:
+        _fetch_remote_events(context, tick)
         _reconcile(context, tick)
         _promote_deferred(context, tick, moment)
         _resume_runs(context, tick, moment)
@@ -375,6 +411,78 @@ def _reconcile(context: WorkerContext, tick: _Tick) -> None:
                 identifier=report.event_id,
                 outcome=WorkOutcome.COMPLETED if report.run_status else WorkOutcome.SKIPPED,
                 detail=report.resolution,
+            )
+        )
+
+
+# --------------------------------------------------------------------------
+# 0. remote intake (optional)
+# --------------------------------------------------------------------------
+
+
+def _fetch_remote_events(context: WorkerContext, tick: _Tick) -> None:
+    """Ask the remote producer for events and admit the new ones.
+
+    **This function never raises.** Remote intake is an optional upstream
+    source, and the pipeline worked without it for nine rounds; a producer that
+    is unreachable, misconfigured or answering nonsense must cost exactly one
+    recorded line and nothing else. Everything after this point - reconcile,
+    resume, local events, review delivery - runs identically whether this
+    succeeded, failed, or never ran.
+
+    That is why the catch is broad. A narrower one would let an unforeseen
+    exception from a third-party HTTP stack end the tick, which would mean an
+    optional feature could stop the pipeline that does not need it.
+    """
+    settings = context.ingest
+    if not settings.enabled or context.event_transport is None:
+        # Off: no transport, no credential lookup, no DNS, no socket.
+        return
+
+    tick.remote_attempted = True
+    try:
+        report = intake(
+            transport=context.event_transport(),
+            inbox=context.inbox,
+            ledger=Ledger(context.inbox.directory("index")),
+            limit=settings.max_events,
+        )
+    except RemoteIntakeError as exc:
+        tick.remote_status = exc.code
+        tick.errors.append(exc.code)
+        logger.warning("automation.remote_intake tick=%s code=%s", tick.tick_id, exc.code)
+        return
+    except Exception:  # noqa: BLE001 - an optional source must never end a tick
+        tick.remote_status = "REMOTE_INTAKE_UNEXPECTED"
+        tick.errors.append("REMOTE_INTAKE_UNEXPECTED")
+        logger.exception("automation.remote_intake tick=%s unexpected failure", tick.tick_id)
+        return
+
+    tick.remote_status = "OK"
+    tick.remote_received = report.received
+    tick.remote_submitted = len(report.submitted)
+    tick.remote_duplicate = len(report.duplicate)
+    tick.remote_invalid = report.invalid
+    tick.remote_conflict = len(report.conflicts)
+
+    for event_id in report.submitted:
+        tick.remote_items.append(
+            WorkItem(kind="event", identifier=event_id, outcome=WorkOutcome.INGESTED)
+        )
+    for conflict in report.conflicts:
+        # Named individually, because a reused event_id is the one remote
+        # outcome a human has to look at. The digests are safe to record: they
+        # identify content without revealing any of it.
+        tick.remote_items.append(
+            WorkItem(
+                kind="event",
+                identifier=conflict.event_id,
+                outcome=WorkOutcome.FAILED,
+                code="EVENT_CONFLICT",
+                detail=(
+                    f"offered {conflict.offered_sha256[:12]} but "
+                    f"{conflict.where} holds {conflict.known_sha256[:12]}; not admitted"
+                ),
             )
         )
 

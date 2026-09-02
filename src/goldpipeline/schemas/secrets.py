@@ -37,6 +37,7 @@ class SecretName(StrEnum):
     ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
     OPENAI_API_KEY = "OPENAI_API_KEY"
     TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
+    INGEST_TOKEN = "INGEST_TOKEN"
 
     @property
     def entry(self) -> str:
@@ -57,11 +58,13 @@ Anthropic. They remain three independent requests with three different prompts;
 what they share is an account, not a conversation.
 """
 
-CONDITIONAL_SECRETS = frozenset({SecretName.TELEGRAM_BOT_TOKEN})
-"""Needed only when the Publisher actually runs.
+CONDITIONAL_SECRETS = frozenset({SecretName.TELEGRAM_BOT_TOKEN, SecretName.INGEST_TOKEN})
+"""Needed only when the feature that uses them actually runs.
 
 Absent is not a fault while unattended publishing is off, which is why readiness
-has always been reported against the mode rather than the list.
+has always been reported against the mode rather than the list. ``INGEST_TOKEN``
+joins on the same terms: remote intake is off by default, and a credential for a
+switched-off feature is not a missing credential.
 """
 
 OPTIONAL_SECRETS = frozenset({SecretName.OPENAI_API_KEY})

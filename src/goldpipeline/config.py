@@ -25,6 +25,7 @@ from goldpipeline.domain.errors import (
     FinalizeConfigurationError,
     MarketDataConfigurationError,
     PublisherConfigurationError,
+    RemoteIntakeConfigurationError,
     ReviewConfigurationError,
     WriterConfigurationError,
 )
@@ -72,6 +73,35 @@ already holds finished Runs must not post a week of old articles at once, and
 an age limit expresses that without a separate activation marker to keep in
 sync. It is also the right rule on its own terms: an article about candles from
 this morning is not worth reading this evening.
+"""
+
+INGEST_ENABLED_ENV = "GOLDPIPELINE_INGEST_ENABLED"
+INGEST_URL_ENV = "GOLDPIPELINE_INGEST_URL"
+INGEST_MAX_EVENTS_ENV = "GOLDPIPELINE_INGEST_MAX_EVENTS"
+INGEST_TIMEOUT_ENV = "GOLDPIPELINE_INGEST_TIMEOUT_SECONDS"
+
+DEFAULT_INGEST_MAX_EVENTS = 25
+MAX_INGEST_MAX_EVENTS = 200
+"""Ceiling on how many events one fetch may admit.
+
+Bounded for the same reason ``max_events_per_tick`` is: a producer bug that
+offers ten thousand events must cost one refused response, not ten thousand
+Runs.
+"""
+
+DEFAULT_INGEST_TIMEOUT_SECONDS = 10.0
+MAX_INGEST_TIMEOUT_SECONDS = 60.0
+"""How long a fetch may take. Deliberately far below the tick budget.
+
+The worker has ``max_tick_minutes`` to do real work; an optional upstream that
+is merely slow must not spend it.
+"""
+
+DEFAULT_INGEST_MAX_BYTES = 1_048_576
+"""Hard cap on a response body: 1 MiB.
+
+Comfortably above a batch of realistic analyses - ``raw_text`` alone is capped
+at 200,000 characters - and far below anything that would strain memory.
 """
 
 TELEGRAM_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
@@ -402,6 +432,89 @@ class ReviewDeliverySettings:
                 DEFAULT_REVIEW_MAX_RUN_AGE_MINUTES,
                 PublisherConfigurationError,
             ),
+        )
+
+
+@dataclass(frozen=True)
+class IngestSettings:
+    """The optional remote event source.
+
+    Off by default, and off is the only state production has ever been in. When
+    disabled nothing here is read, no credential is looked up and no socket is
+    opened - the pipeline behaves exactly as it did before this existed.
+
+    Deliberately its own type, and deliberately *not* a member of
+    :class:`~goldpipeline.schemas.runtime_config.ConfigKey`. That enum drives
+    ``REQUIRED_PRODUCTION_KEYS``, so a new member becomes mandatory the instant
+    it ships and would fail the running worker closed before anyone could update
+    the file. Reading these by name instead means an absent key is simply "off",
+    which is the correct answer for a feature nobody has turned on.
+
+    The token is not here, for the same reason the bot token is not: it is a
+    credential, and it comes from the credential store at the point of use.
+    """
+
+    enabled: bool = False
+    url: str = ""
+    max_events: int = DEFAULT_INGEST_MAX_EVENTS
+    timeout_seconds: float = DEFAULT_INGEST_TIMEOUT_SECONDS
+    max_bytes: int = DEFAULT_INGEST_MAX_BYTES
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> IngestSettings:
+        """Build settings from non-secret configuration.
+
+        Raises:
+            RemoteIntakeConfigurationError: Intake is on but the endpoint is
+                missing or is not an HTTPS URL. Named, never valued.
+        """
+        source = os.environ if env is None else env
+        enabled = _flag(source, INGEST_ENABLED_ENV)
+        url = (_raw(source, INGEST_URL_ENV) or "").strip()
+
+        if enabled:
+            if not url:
+                raise RemoteIntakeConfigurationError(
+                    f"{INGEST_ENABLED_ENV} is on but {INGEST_URL_ENV} is not set",
+                    setting=INGEST_URL_ENV,
+                )
+            if not url.lower().startswith("https://"):
+                # A bearer token on a plaintext connection is a token given away.
+                # There is no "internal network" exception here: the setting is
+                # read by an unattended task that cannot judge its own network.
+                raise RemoteIntakeConfigurationError(
+                    f"{INGEST_URL_ENV} must be an https:// URL; refusing to send a "
+                    "bearer token over an unencrypted connection",
+                    setting=INGEST_URL_ENV,
+                )
+
+        max_events = _positive_int(
+            source, INGEST_MAX_EVENTS_ENV, DEFAULT_INGEST_MAX_EVENTS, RemoteIntakeConfigurationError
+        )
+        if max_events > MAX_INGEST_MAX_EVENTS:
+            raise RemoteIntakeConfigurationError(
+                f"{INGEST_MAX_EVENTS_ENV} must not exceed {MAX_INGEST_MAX_EVENTS}",
+                setting=INGEST_MAX_EVENTS_ENV,
+            )
+
+        timeout = _positive_float(
+            source,
+            INGEST_TIMEOUT_ENV,
+            DEFAULT_INGEST_TIMEOUT_SECONDS,
+            RemoteIntakeConfigurationError,
+        )
+        if timeout > MAX_INGEST_TIMEOUT_SECONDS:
+            raise RemoteIntakeConfigurationError(
+                f"{INGEST_TIMEOUT_ENV} must not exceed {MAX_INGEST_TIMEOUT_SECONDS} seconds",
+                setting=INGEST_TIMEOUT_ENV,
+            )
+
+        return cls(
+            enabled=enabled,
+            url=url,
+            max_events=max_events,
+            timeout_seconds=timeout,
+            max_bytes=DEFAULT_INGEST_MAX_BYTES,
         )
 
 
@@ -769,6 +882,7 @@ ConfigError = (
     | type[PublisherConfigurationError]
     | type[MarketDataConfigurationError]
     | type[AutomationConfigurationError]
+    | type[RemoteIntakeConfigurationError]
 )
 """Which configuration error a helper should raise.
 
@@ -873,8 +987,13 @@ __all__ = [
     "MODEL_ENV",
     "MT5_SYMBOL_ENV",
     "MarketDataSettings",
+    "INGEST_ENABLED_ENV",
+    "INGEST_MAX_EVENTS_ENV",
+    "INGEST_TIMEOUT_ENV",
+    "INGEST_URL_ENV",
     "REVIEW_API_KEY_ENV",
     "REVIEW_MODEL_ENV",
+    "IngestSettings",
     "ReviewerSettings",
     "SUPPORTED_TIMEFRAMES",
     "TELEGRAM_TARGET_ENV",

@@ -683,6 +683,54 @@ class LedgerError(IngestionError):
     code = "INGESTION_LEDGER_ERROR"
 
 
+# --- remote intake (optional upstream source) ----------------------------
+
+
+class RemoteIntakeError(IngestionError):
+    """Base class for failures of the optional remote event source.
+
+    Separate from the inbox errors above because the blast radius is different.
+    An unreadable *local* event is evidence about a Run that may already exist;
+    an unreachable *remote* producer says nothing about local work at all. These
+    are caught at the fetch step and recorded, never allowed to end a tick - a
+    source that is switched off by default must not be able to stop the pipeline
+    that ran fine without it.
+    """
+
+    code = "REMOTE_INTAKE_ERROR"
+
+
+class RemoteIntakeConfigurationError(RemoteIntakeError):
+    """Remote intake is on but its settings or credential are unusable.
+
+    A human must fix the environment, so this is the one remote failure that is
+    worth reporting loudly rather than retrying quickly.
+    """
+
+    code = "REMOTE_INTAKE_CONFIGURATION_ERROR"
+
+
+class RemoteIntakeTransportError(RemoteIntakeError):
+    """The remote producer could not be reached, or refused to answer.
+
+    Unlike a publish, nothing is ambiguous here: a fetch that fails delivered
+    nothing, changed nothing, and can be retried on the next tick at no cost.
+    """
+
+    code = "REMOTE_INTAKE_TRANSPORT_ERROR"
+
+
+class RemoteIntakeResponseError(RemoteIntakeError):
+    """The remote producer answered with something this pipeline will not read.
+
+    Covers a body that is not JSON, an envelope of the wrong shape, a response
+    larger than the cap, or more events than the cap allows. The payload is
+    discarded whole; nothing partial is admitted.
+    """
+
+    code = "REMOTE_INTAKE_RESPONSE_ERROR"
+
+
 # --- automation (Round 9) ------------------------------------------------
 
 
@@ -997,6 +1045,10 @@ __all__ = [
     "RunLockedError",
     "RunNotFinalizableError",
     "RunNotGateableError",
+    "RemoteIntakeConfigurationError",
+    "RemoteIntakeError",
+    "RemoteIntakeResponseError",
+    "RemoteIntakeTransportError",
     "RunNotReadyError",
     "RunNotResumableError",
     "RunNotReviewableError",

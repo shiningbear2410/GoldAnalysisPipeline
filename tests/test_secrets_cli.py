@@ -57,7 +57,7 @@ def _report(module: FakeKeyringModule) -> Any:
 @pytest.fixture(autouse=True)
 def no_ambient_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start every test from an environment with no credentials in it."""
-    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN"):
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN", "INGEST_TOKEN"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -76,6 +76,7 @@ def test_status_reports_missing_credentials(
         "ANTHROPIC_API_KEY": "MISSING",
         "OPENAI_API_KEY": "MISSING",
         "TELEGRAM_BOT_TOKEN": "MISSING",
+        "INGEST_TOKEN": "MISSING",
     }
 
 

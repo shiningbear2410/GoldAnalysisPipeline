@@ -23,8 +23,8 @@ from pydantic import Field
 from goldpipeline.schemas.common import StrictModel, UtcDatetime, utc_now
 from goldpipeline.schemas.runtime_config import ConfigMode
 
-AUTOMATION_SCHEMA_VERSION = "1.2.0"
-"""1.1.0 added configuration provenance; 1.2.0 added review deliveries.
+AUTOMATION_SCHEMA_VERSION = "1.3.0"
+"""1.1.0 configuration provenance; 1.2.0 review deliveries; 1.3.0 remote intake.
 
 Additive throughout: every field has a default, so records written by an earlier
 version still read. The version moves anyway, because "which fields should I
@@ -170,6 +170,33 @@ class AutomationTickResult(StrictModel):
         default_factory=list,
         description="Approved Runs shown to a human. Never a publication.",
     )
+
+    remote_fetch_attempted: bool = Field(
+        default=False, description="Whether this tick asked the remote producer for events."
+    )
+    remote_fetch_status: str | None = Field(
+        default=None,
+        description="Safe outcome code of the fetch: OK, or the failure's code. Never a message.",
+    )
+    remote_events_received: int = 0
+    remote_events_submitted: int = 0
+    remote_events_duplicate: int = 0
+    remote_events_invalid: int = 0
+    remote_events_conflict: int = 0
+    remote_intake: list[WorkItem] = Field(
+        default_factory=list,
+        description=(
+            "Per-event remote outcomes worth naming - conflicts above all. "
+            "Counts answer 'how many'; this answers 'which one'."
+        ),
+    )
+    """Remote intake, all zero-valued when the feature is off.
+
+    Every field defaults, so a history written by 1.2.0 still reads, and a tick
+    with intake disabled is indistinguishable from one written before intake
+    existed - which is the point: switching this on must be visible, and leaving
+    it off must change nothing.
+    """
     errors: list[str] = Field(
         default_factory=list, description="Safe error codes only, never values or messages."
     )
@@ -185,6 +212,8 @@ class AutomationTickResult(StrictModel):
             or self.expired_events
             or self.blocked_runs
             or self.review_deliveries
+            or self.remote_events_submitted
+            or self.remote_intake
         )
 
 

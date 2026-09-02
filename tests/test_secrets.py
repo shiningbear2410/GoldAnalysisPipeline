@@ -112,6 +112,7 @@ def test_entries_are_named_for_the_kind_of_credential() -> None:
         (SERVICE_NAME, "anthropic_api_key"),
         (SERVICE_NAME, "openai_api_key"),
         (SERVICE_NAME, "telegram_bot_token"),
+        (SERVICE_NAME, "ingest_token"),
     ]
 
 
@@ -421,17 +422,21 @@ def test_the_store_source_reads_clearly() -> None:
 # --- which credentials exist at all ---------------------------------------
 
 
-def test_only_three_credentials_are_recognised() -> None:
+def test_only_credentials_are_recognised() -> None:
     """Requirement 5 of the spec.
 
     A destination chat, a symbol, a timeframe and a feature flag are
     configuration, not credentials. Putting them in a vault would make them
     harder to audit without making anything safer.
+
+    The list grows only when something genuinely secret arrives; INGEST_TOKEN
+    joined it because a bearer token is exactly that.
     """
     assert {name.value for name in SecretName} == {
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "TELEGRAM_BOT_TOKEN",
+        "INGEST_TOKEN",
     }
     for forbidden in ("TELEGRAM_TARGET_CHAT_ID", "GOLDPIPELINE_MT5_SYMBOL", "ANTHROPIC_MODEL"):
         assert forbidden not in {name.value for name in SecretName}

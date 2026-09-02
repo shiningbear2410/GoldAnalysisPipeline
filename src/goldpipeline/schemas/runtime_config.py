@@ -78,7 +78,9 @@ five-minute puzzle; a typo in a file that persists across reboots quietly means
 deserves to be told rather than ignored.
 """
 
-FORBIDDEN_KEYS = frozenset({"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN"})
+FORBIDDEN_KEYS = frozenset(
+    {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN", "INGEST_TOKEN"}
+)
 """Credentials, refused by name.
 
 They are already absent from :class:`ConfigKey`, so the schema would reject them
@@ -105,6 +107,20 @@ reasons, and the second is the important one:
 
 Note this is a *production* requirement, not a general one. An operator running
 a command by hand still gets built-in defaults; see :class:`ConfigMode`.
+
+**Why the remote-intake settings are not here yet.** ``GOLDPIPELINE_INGEST_*``
+is read by :class:`~goldpipeline.config.IngestSettings` but is deliberately
+absent from :class:`ConfigKey`, and therefore from this set. Adding a member
+makes it mandatory *immediately* - which is the right default, and exactly the
+problem: the running production file would become incomplete the moment the code
+shipped, and the next scheduled tick would fail closed before anyone could
+rewrite it. Remote intake is off by default and reads its settings by name, so
+in ``STRICT_PERSISTENT`` the keys are simply absent and the feature stays off.
+
+Turning it on is therefore a deliberate two-step migration, in this order:
+add the members here, then rewrite the authoritative file to match, as one
+operator action. Until then the feature is reachable only in ``LAYERED`` mode,
+which is what a person testing it by hand actually wants.
 """
 
 
