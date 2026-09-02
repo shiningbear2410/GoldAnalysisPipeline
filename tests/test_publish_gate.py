@@ -505,6 +505,104 @@ def test_an_unresolved_review_issue_blocks(runs_dir: Path, tmp_path: Path) -> No
     assert BlockerCode.UNRESOLVED_REVIEW_ISSUE in blocker_codes(result)
 
 
+def _inject_issue_and_resolution(
+    runs_dir: Path, run_id: str, *, severity: str, resolution: str
+) -> None:
+    """Add one issue to ``gpt_review.json`` and its resolution to
+    ``claude_finalizer.json``, re-stamping the manifest's digests for both.
+
+    Stands in for what Round 9.3.4A's severity reconciliation would already
+    have written into ``gpt_review.json`` before the finalizer ever saw it -
+    this is exactly the persisted shape a normalized HIGH/CRITICAL issue takes,
+    independent of how the reviewer or finalizer stage produced it.
+    """
+    run_dir = Path(runs_dir) / run_id
+
+    review = json.loads((run_dir / "gpt_review.json").read_text(encoding="utf-8"))
+    review["issues"].append(
+        {
+            "issue_id": "precheck-note-paraphrase",
+            "category": "SOURCE_CONTRADICTION",
+            "severity": severity,
+            "message": "Normalized by severity reconciliation from a milder model severity.",
+        }
+    )
+    review_bytes = (json.dumps(review, ensure_ascii=False, indent=2) + "\n").encode()
+    (run_dir / "gpt_review.json").write_bytes(review_bytes)
+
+    finalizer_meta = json.loads((run_dir / "claude_finalizer.json").read_text(encoding="utf-8"))
+    # The finalizer's own metadata names the review it was built from, by hash.
+    # Changing the review invalidates that cross-reference unless it too is
+    # re-stamped - otherwise the gate's integrity check fires first and masks
+    # the closure check this fixture exists to exercise.
+    finalizer_meta["review_sha256"] = sha256_bytes(review_bytes)
+    finalizer_meta["issue_resolutions"].append(
+        {
+            "issue_id": "precheck-note-paraphrase",
+            "resolution": resolution,
+            "description": "Test fixture resolution.",
+        }
+    )
+    finalizer_bytes = (json.dumps(finalizer_meta, ensure_ascii=False, indent=2) + "\n").encode()
+    (run_dir / "claude_finalizer.json").write_bytes(finalizer_bytes)
+
+    store = RunStore(runs_dir)
+    run = store.open(run_id)
+    manifest = run.load_manifest()
+    for ref in manifest.artifact_files:
+        if ref.name == "gpt_review.json":
+            ref.sha256, ref.size_bytes = sha256_bytes(review_bytes), len(review_bytes)
+        if ref.name == "claude_finalizer.json":
+            ref.sha256, ref.size_bytes = sha256_bytes(finalizer_bytes), len(finalizer_bytes)
+    run.save_manifest(manifest)
+
+
+@pytest.mark.parametrize("resolution", ["BLOCKED", "NOT_APPLICABLE"])
+def test_a_normalized_high_issue_left_unresolved_still_blocks(
+    finalized_run: Any, runs_dir: Path, resolution: str
+) -> None:
+    """Round 9.3.4A: the exact production shape (PRECHECK-NOTE-PARAPHRASE).
+
+    Once severity reconciliation has normalized an issue to HIGH, a resolution
+    short of APPLIED must still block closure - the whole point of the round
+    is that this can no longer be bypassed by a milder model-assigned severity.
+    """
+    _inject_issue_and_resolution(
+        runs_dir, finalized_run.run_id, severity="HIGH", resolution=resolution
+    )
+
+    result = run_gate(runs_dir, finalized_run.run_id)
+
+    assert not result.approved
+    assert BlockerCode.UNRESOLVED_REVIEW_ISSUE in blocker_codes(result)
+
+
+def test_a_normalized_high_issue_applied_passes_closure(finalized_run: Any, runs_dir: Path) -> None:
+    """Same normalized HIGH issue, but genuinely resolved - closure is satisfied."""
+    _inject_issue_and_resolution(
+        runs_dir, finalized_run.run_id, severity="HIGH", resolution="APPLIED"
+    )
+
+    result = run_gate(runs_dir, finalized_run.run_id)
+
+    assert result.approved
+
+
+@pytest.mark.parametrize("resolution", ["BLOCKED", "NOT_APPLICABLE"])
+def test_a_normalized_critical_issue_left_unresolved_still_blocks(
+    finalized_run: Any, runs_dir: Path, resolution: str
+) -> None:
+    """A model must never be able to downgrade CRITICAL either."""
+    _inject_issue_and_resolution(
+        runs_dir, finalized_run.run_id, severity="CRITICAL", resolution=resolution
+    )
+
+    result = run_gate(runs_dir, finalized_run.run_id)
+
+    assert not result.approved
+    assert BlockerCode.UNRESOLVED_REVIEW_ISSUE in blocker_codes(result)
+
+
 def test_a_reported_fix_that_is_not_in_the_text_blocks(runs_dir: Path, tmp_path: Path) -> None:
     """Requirement 31.56: metadata claiming APPLIED is a claim, not proof."""
     from goldpipeline.adapters.fake_reviewer import FakeReviewerClient

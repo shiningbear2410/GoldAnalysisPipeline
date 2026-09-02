@@ -342,3 +342,183 @@ def test_non_blocking_findings_are_not_promoted_to_issues() -> None:
     """They stay visible in deterministic_findings without burying real issues."""
     outcome = apply_policy(output(), report(finding(Severity.MEDIUM)))
     assert outcome.issues == []
+
+
+# --- deterministic severity authority (Round 9.3.4A) -----------------------
+#
+# A model may report its own, milder issue about a finding the deterministic
+# pass already classified as blocking. Effective severity must never fall
+# below the deterministic one - the model may only ever raise it.
+
+
+def cited_issue(*, severity: Severity, actual: str = "3325.20") -> ReviewIssue:
+    """A model issue that explicitly cites the same evidence as a finding."""
+    return issue(
+        severity=severity,
+        category=IssueCategory.DATA_MISMATCH,
+        evidence=Evidence(
+            source_path="context.price.latest_close", expected="3305.90", actual=actual
+        ),
+    )
+
+
+def mentioning_issue(*, severity: Severity, actual: str = "3325.20") -> ReviewIssue:
+    """A model issue that only mentions the finding's value in its own words."""
+    return ReviewIssue(
+        issue_id="i1",
+        category=IssueCategory.DATA_MISMATCH,
+        severity=severity,
+        message=f"The article states {actual!r}; the paraphrase, not the raw claim, is at fault.",
+    )
+
+
+def cited_finding(severity: Severity, actual: str = "3325.20") -> PrecheckFinding:
+    """A finding whose (source_path, actual) matches ``cited_issue``'s evidence exactly."""
+    return PrecheckFinding(
+        code=FindingCode.CLAIM_VALUE_MISMATCH,
+        severity=severity,
+        message=f"CLAIM_VALUE_MISMATCH at {severity}.",
+        source_path="context.price.latest_close",
+        actual=actual,
+    )
+
+
+@pytest.mark.parametrize(
+    ("deterministic", "model", "effective"),
+    [
+        (Severity.HIGH, Severity.MEDIUM, Severity.HIGH),
+        (Severity.HIGH, Severity.LOW, Severity.HIGH),
+        (Severity.HIGH, Severity.HIGH, Severity.HIGH),
+        (Severity.HIGH, Severity.CRITICAL, Severity.CRITICAL),
+        (Severity.CRITICAL, Severity.LOW, Severity.CRITICAL),
+        (Severity.CRITICAL, Severity.HIGH, Severity.CRITICAL),
+    ],
+)
+def test_effective_severity_is_never_below_the_deterministic_one(
+    deterministic: Severity, model: Severity, effective: Severity
+) -> None:
+    """The production gap: a model must not launder a blocking finding's
+    severity down by citing it in a milder issue of its own."""
+    outcome = apply_policy(
+        output(
+            status=ReviewStatus.NEEDS_REVISION,
+            score=60,
+            issues=[cited_issue(severity=model)],
+            revision_instructions=["Sửa giá."],
+        ),
+        report(cited_finding(deterministic)),
+    )
+
+    assert len(outcome.issues) == 1, "citing the finding must not duplicate it"
+    assert outcome.issues[0].severity is effective
+
+
+def test_a_model_issue_can_still_escalate_a_medium_finding() -> None:
+    """Escalation is always allowed - only downgrading is forbidden."""
+    outcome = apply_policy(
+        output(
+            status=ReviewStatus.NEEDS_REVISION,
+            score=60,
+            issues=[issue(severity=Severity.HIGH, category=IssueCategory.STYLE)],
+        ),
+        report(finding(Severity.MEDIUM)),
+    )
+
+    assert outcome.issues[0].severity is Severity.HIGH, (
+        "an unrelated MEDIUM finding must not touch it"
+    )
+
+
+def test_low_deterministic_and_low_model_stay_low() -> None:
+    outcome = apply_policy(output(), report(finding(Severity.LOW)))
+    assert outcome.issues == []
+
+
+def test_severity_escalation_via_mention_not_exact_citation() -> None:
+    """The looser of the two existing association signals also participates."""
+    outcome = apply_policy(
+        output(
+            status=ReviewStatus.NEEDS_REVISION,
+            score=60,
+            issues=[mentioning_issue(severity=Severity.MEDIUM)],
+            revision_instructions=["Sửa giá."],
+        ),
+        report(finding(Severity.HIGH)),
+    )
+
+    assert len(outcome.issues) == 1
+    assert outcome.issues[0].severity is Severity.HIGH
+    assert any("severity raised" in note for note in outcome.notes)
+
+
+def test_an_unrelated_model_issue_does_not_suppress_the_finding() -> None:
+    """No reliable association exists, so the finding is promoted as before -
+    it must never simply disappear because some unrelated issue exists."""
+    outcome = apply_policy(
+        output(
+            status=ReviewStatus.NEEDS_REVISION,
+            score=60,
+            issues=[issue(severity=Severity.LOW, issue_id="unrelated")],
+            revision_instructions=["Sửa văn phong."],
+        ),
+        report(finding(Severity.HIGH)),
+    )
+
+    assert len(outcome.issues) == 2
+    ids = {i.issue_id for i in outcome.issues}
+    assert "unrelated" in ids
+    promoted = next(i for i in outcome.issues if i.issue_id != "unrelated")
+    assert promoted.severity is Severity.HIGH
+
+
+def test_verdict_escalation_is_unaffected_by_severity_reconciliation() -> None:
+    """This round changes issue closure, not verdict policy."""
+    outcome = apply_policy(
+        output(
+            status=ReviewStatus.PASS,
+            issues=[cited_issue(severity=Severity.MEDIUM)],
+        ),
+        report(cited_finding(Severity.HIGH)),
+    )
+
+    assert outcome.status is ReviewStatus.NEEDS_REVISION
+    assert outcome.verdict_source is VerdictSource.POLICY_ESCALATED
+    assert outcome.issues[0].severity is Severity.HIGH
+
+
+def test_production_shaped_note_paraphrase_regression() -> None:
+    """Shaped after the real Round 9.3.3 finding: a HIGH CLAIM_VALUE_MISMATCH
+    on ``context.raw_analysis.text``, cited by a model issue the model itself
+    filed as MEDIUM. Must come out HIGH, not silently stay MEDIUM."""
+    note_finding = PrecheckFinding(
+        code=FindingCode.CLAIM_VALUE_MISMATCH,
+        severity=Severity.HIGH,
+        message="Precheck 17 (HIGH): claim paraphrases raw_analysis.text instead of quoting it.",
+        source_path="context.raw_analysis.text",
+        actual="ghi chú là dữ liệu kiểm thử hệ thống, không phải tín hiệu giao dịch",
+    )
+    model_issue = ReviewIssue(
+        issue_id="PRECHECK-NOTE-PARAPHRASE",
+        category=IssueCategory.SOURCE_CONTRADICTION,
+        severity=Severity.MEDIUM,
+        message="Precheck 17 (HIGH): the note is paraphrased, not quoted verbatim.",
+        evidence=Evidence(
+            source_path="context.raw_analysis.text",
+            expected="verbatim raw_analysis.text",
+            actual="ghi chú là dữ liệu kiểm thử hệ thống, không phải tín hiệu giao dịch",
+        ),
+    )
+
+    outcome = apply_policy(
+        output(
+            status=ReviewStatus.NEEDS_REVISION,
+            score=78,
+            issues=[model_issue],
+            revision_instructions=["Trích nguyên văn ghi chú nguồn."],
+        ),
+        report(note_finding),
+    )
+
+    assert len(outcome.issues) == 1
+    assert outcome.issues[0].severity is Severity.HIGH
+    assert outcome.issues[0].issue_id == "PRECHECK-NOTE-PARAPHRASE"

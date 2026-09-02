@@ -34,6 +34,7 @@ from goldpipeline.schemas.review import (
     PrecheckFinding,
     ReviewIssue,
     ReviewModelOutput,
+    ReviewResult,
     ReviewStatus,
     Severity,
     VerdictSource,
@@ -190,6 +191,56 @@ def test_a_wrong_price_claim_is_caught(runs_dir: Path, tmp_path: Path) -> None:
     assert finding.expected == LATEST_CLOSE
     assert finding.actual == "3325.20"
     assert finding.source_path == "context.price.latest_close"
+
+
+def test_severity_reconciliation_round_trips_through_gpt_review_json(
+    runs_dir: Path, tmp_path: Path
+) -> None:
+    """Round 9.3.4A, end to end: a model reports a deliberately milder
+    severity for an issue that cites the same evidence as a HIGH deterministic
+    finding. The persisted ``gpt_review.json`` - historical filename and
+    schema unchanged - must carry the normalized HIGH, not the model's MEDIUM,
+    and it must still parse back into ``ReviewResult`` cleanly.
+    """
+    claims = [
+        SourceClaim(type=ClaimType.PRICE, value="3325.20", source="context.price.latest_close")
+    ]
+    drafted = make_drafted_run(runs_dir, tmp_path, claims=claims)
+
+    def build(request: Any) -> ReviewModelOutput:
+        return ReviewModelOutput(
+            run_id=request.run_id,
+            status=ReviewStatus.NEEDS_REVISION,
+            score=60,
+            summary="Giá bị sai lệch nhẹ.",
+            issues=[
+                ReviewIssue(
+                    issue_id="model-price",
+                    category=IssueCategory.DATA_MISMATCH,
+                    severity=Severity.MEDIUM,
+                    message="Giá gần nhất chưa khớp nguồn.",
+                    evidence=Evidence(
+                        source_path="context.price.latest_close",
+                        expected=LATEST_CLOSE,
+                        actual="3325.20",
+                    ),
+                )
+            ],
+            revision_instructions=["Sửa giá."],
+        )
+
+    result = run_reviewer(runs_dir, drafted.run_id, client=FakeReviewerClient(output_factory=build))
+    assert result.succeeded
+
+    review = load_review(result.run_dir)
+    issue = next(i for i in review.issues if i.issue_id == "model-price")
+    assert issue.severity is Severity.HIGH
+    assert len(review.issues) == 1, "citing the finding must not also duplicate it"
+
+    raw = (Path(result.run_dir) / REVIEW_FILENAME).read_bytes()
+    reparsed = ReviewResult.model_validate_json(raw)
+    reparsed_issue = next(i for i in reparsed.issues if i.issue_id == "model-price")
+    assert reparsed_issue.severity is Severity.HIGH
 
 
 def test_a_wrong_symbol_is_caught(runs_dir: Path, tmp_path: Path) -> None:

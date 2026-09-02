@@ -44,8 +44,23 @@ _STATUS_RANK = {
     ReviewStatus.REJECT: 2,
 }
 
+_SEVERITY_RANK = {
+    Severity.LOW: 0,
+    Severity.MEDIUM: 1,
+    Severity.HIGH: 2,
+    Severity.CRITICAL: 3,
+}
+"""Explicit order, not enum declaration order: a plain ``StrEnum`` promises
+nothing about ordering, and this ranking is safety-relevant enough to state on
+purpose rather than assume."""
+
 PRECHECK_ISSUE_PREFIX = "precheck"
 """Issue ids minted from deterministic findings carry this prefix."""
+
+
+def _max_severity(a: Severity, b: Severity) -> Severity:
+    """The more severe of two severities. Ties keep *a*."""
+    return a if _SEVERITY_RANK[a] >= _SEVERITY_RANK[b] else b
 
 
 @dataclass
@@ -120,16 +135,7 @@ def apply_policy(output: ReviewModelOutput, report: PrecheckReport) -> PolicyOut
         output: The model's response, already validated as self-consistent.
         report: What the deterministic pass established.
     """
-    issues = list(output.issues)
-    notes: list[str] = []
-
-    merged = _findings_as_issues(report, existing=issues)
-    if merged:
-        issues.extend(merged)
-        notes.append(
-            f"{len(merged)} deterministic finding(s) were added as issues; the reviewer "
-            "did not report them."
-        )
+    issues, notes = _findings_as_issues(report, existing=output.issues)
 
     required = _status_required_by(report)
     status = output.status
@@ -169,38 +175,86 @@ def _status_required_by(report: PrecheckReport) -> ReviewStatus:
 
 def _findings_as_issues(
     report: PrecheckReport, *, existing: list[ReviewIssue]
-) -> list[ReviewIssue]:
-    """Turn blocking findings the reviewer missed into issues.
+) -> tuple[list[ReviewIssue], list[str]]:
+    """Reconcile every blocking finding against the model's own issues.
 
-    Only blocking ones: a LOW or MEDIUM finding is already visible in
-    ``deterministic_findings`` on the artifact, and promoting every heuristic
-    warning into a formal issue would bury the real ones.
+    A blocking (HIGH/CRITICAL) finding is either:
+
+    * represented by an existing issue - the same association the reviewer's
+      own citation and mention conventions already use, below - in which case
+      that issue's severity is raised to at least the finding's own, never
+      lowered; or
+    * not represented at all, in which case it is promoted into its own issue,
+      exactly as before.
+
+    Only blocking findings are considered: a LOW or MEDIUM finding is already
+    visible in ``deterministic_findings`` on the artifact, and both members of
+    an already-blocking pair only ever move the result up, so there is nothing
+    a non-blocking finding could still raise.
+
+    The model may escalate a deterministic severity by reporting its own,
+    harsher one. It must never be able to launder a blocking finding down by
+    writing a milder issue that merely mentions it - so association here does
+    not delete the finding's severity, it raises the issue's to match.
     """
-    already_cited = {
-        (issue.evidence.source_path, issue.evidence.actual)
-        for issue in existing
-        if issue.evidence is not None
-    }
-    already_mentioned = " ".join(issue.message for issue in existing).casefold()
+    updated = list(existing)
+    notes: list[str] = []
+    promoted = 0
 
-    issues: list[ReviewIssue] = []
     for index, finding in enumerate(report.blocking, start=1):
-        if (finding.source_path, finding.actual) in already_cited:
-            continue
-        if finding.actual and finding.actual.casefold() in already_mentioned:
-            continue
-        issues.append(
-            ReviewIssue(
-                issue_id=f"{PRECHECK_ISSUE_PREFIX}-{index}-{finding.code.lower()}",
-                category=_category_for(finding),
-                severity=finding.severity,
-                message=finding.message,
-                article_excerpt=finding.excerpt,
-                evidence=None,
-                suggested_fix=None,
+        represented_by = [i for i, issue in enumerate(updated) if _represents(finding, issue)]
+
+        if not represented_by:
+            updated.append(
+                ReviewIssue(
+                    issue_id=f"{PRECHECK_ISSUE_PREFIX}-{index}-{finding.code.lower()}",
+                    category=_category_for(finding),
+                    severity=finding.severity,
+                    message=finding.message,
+                    article_excerpt=finding.excerpt,
+                    evidence=None,
+                    suggested_fix=None,
+                )
             )
+            promoted += 1
+            continue
+
+        for i in represented_by:
+            issue = updated[i]
+            effective = _max_severity(finding.severity, issue.severity)
+            if effective != issue.severity:
+                notes.append(
+                    f"Issue {issue.issue_id} severity raised from {issue.severity} to "
+                    f"{effective}: represents deterministic finding {finding.code}, which "
+                    "the reviewer must not downgrade."
+                )
+                updated[i] = issue.model_copy(update={"severity": effective})
+
+    if promoted:
+        notes.append(
+            f"{promoted} deterministic finding(s) were added as issues; the reviewer "
+            "did not report them."
         )
-    return issues
+    return updated, notes
+
+
+def _represents(finding: PrecheckFinding, issue: ReviewIssue) -> bool:
+    """Whether *issue* already covers *finding*.
+
+    Reuses exactly the two signals the reviewer stage has always trusted for
+    this: an issue citing the identical evidence, or an issue whose message
+    mentions the finding's own flagged value. Nothing fuzzier is attempted - an
+    unproven association must never suppress or misreport a severity.
+    """
+    if issue.evidence is not None and (
+        issue.evidence.source_path,
+        issue.evidence.actual,
+    ) == (finding.source_path, finding.actual):
+        return True
+    actual = finding.actual
+    if not actual:
+        return False
+    return actual.casefold() in issue.message.casefold()
 
 
 def _category_for(finding: PrecheckFinding) -> IssueCategory:
