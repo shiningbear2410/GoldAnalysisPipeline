@@ -28,6 +28,10 @@ mt5 = ["MetaTrader5>=5.0.45; sys_platform == 'win32'"]
 # and the environment-variable path still works; it is what an unattended
 # scheduled task needs, since that inherits no session.
 secrets = ["keyring>=25.0"]
+# The websocket client behind the TradingView market-data provider. An extra
+# because the whole suite and the MT5 market path run without it: every test of
+# that provider drives a fake connection, and only a live fetch needs this.
+tradingview = ["websocket-client>=1.7"]
 
 [project.scripts]
 goldpipeline = "goldpipeline.cli:main"

@@ -641,6 +641,74 @@ class Mt5ProviderError(MarketDataError):
     code = "MT5_PROVIDER_ERROR"
 
 
+# --- TradingView market data (Round 6.4b) --------------------------------
+#
+# Every failure below is a *market data* failure, so they share
+# `MarketDataError` with the MT5 family: a caller that already handles "the
+# feed did not give me candles I can trust" keeps working when a second
+# provider appears. What is deliberately *not* shared is the wire vocabulary -
+# the codes name a framing or protocol fault without a caller having to know
+# what a frame is.
+
+
+class TradingViewNotInstalledError(MarketDataError):
+    """The websocket client backing this provider is not importable.
+
+    Its own code rather than a connection failure, for the same reason
+    :class:`Mt5NotInstalledError` is: one is fixed with ``pip``, the other by
+    looking at the network.
+    """
+
+    code = "TRADINGVIEW_NOT_INSTALLED"
+
+
+class TradingViewConnectionError(MarketDataError):
+    """The websocket could not be opened, or closed before the series finished."""
+
+    code = "TRADINGVIEW_CONNECTION_FAILED"
+
+
+class TradingViewTimeoutError(MarketDataError):
+    """The feed went quiet before the requested series completed."""
+
+    code = "TRADINGVIEW_TIMEOUT"
+
+
+class TradingViewFramingError(MarketDataError):
+    """A framed packet was malformed.
+
+    Raised rather than skipped. A packet whose own length header cannot be
+    trusted says nothing reliable about where the next one starts, so reading
+    on would risk assembling candle history out of misaligned bytes.
+    """
+
+    code = "TRADINGVIEW_FRAMING_ERROR"
+
+
+class TradingViewProtocolError(MarketDataError):
+    """The feed reported a protocol fault, or never completed the series."""
+
+    code = "TRADINGVIEW_PROTOCOL_ERROR"
+
+
+class TradingViewCriticalError(MarketDataError):
+    """The feed reported a critical error. Never retried."""
+
+    code = "TRADINGVIEW_CRITICAL_ERROR"
+
+
+class TradingViewCandleError(MarketDataError):
+    """A candle in the response was not usable, so the whole response failed.
+
+    Fail closed, deliberately: see the module docstring of
+    :mod:`goldpipeline.adapters.tradingview_market`. One unusable bar in a
+    series of twenty means the feed is not doing what it is documented to do,
+    and a silently shortened series is a worse outcome than a refused fetch.
+    """
+
+    code = "TRADINGVIEW_INVALID_CANDLE"
+
+
 # --- ingestion (Round 8) -------------------------------------------------
 
 
@@ -1125,6 +1193,8 @@ __all__ = [
     "PersistentConfigUnknownKeyError",
     "PersistentConfigUnreadableError",
     "PipelineError",
+    "PreferencesUnavailableError",
+    "ProducerRequestError",
     "ProductionConfigError",
     "PublishDecisionExistsError",
     "PublishGateError",
@@ -1136,12 +1206,15 @@ __all__ = [
     "PublisherNotApprovedError",
     "PublisherPermissionError",
     "PublisherPreviousAttemptUncertainError",
-    "PreferencesUnavailableError",
-    "ProducerRequestError",
     "PublisherRateLimitError",
     "PublisherRejectedError",
     "PublisherResponseError",
     "PublisherTransportAmbiguousError",
+    "RemoteArticleTypeNotAllowedError",
+    "RemoteIntakeConfigurationError",
+    "RemoteIntakeError",
+    "RemoteIntakeResponseError",
+    "RemoteIntakeTransportError",
     "ReviewArtifactExistsError",
     "ReviewConfigurationError",
     "ReviewError",
@@ -1153,11 +1226,6 @@ __all__ = [
     "RunLockedError",
     "RunNotFinalizableError",
     "RunNotGateableError",
-    "RemoteArticleTypeNotAllowedError",
-    "RemoteIntakeConfigurationError",
-    "RemoteIntakeError",
-    "RemoteIntakeResponseError",
-    "RemoteIntakeTransportError",
     "RunNotReadyError",
     "RunNotResumableError",
     "RunNotReviewableError",
@@ -1169,6 +1237,13 @@ __all__ = [
     "TaskDefinitionMismatchError",
     "TaskSchedulerError",
     "TaskSchedulerUnavailableError",
+    "TradingViewCandleError",
+    "TradingViewConnectionError",
+    "TradingViewCriticalError",
+    "TradingViewFramingError",
+    "TradingViewNotInstalledError",
+    "TradingViewProtocolError",
+    "TradingViewTimeoutError",
     "UnknownTimezoneError",
     "UntrustworthyRunError",
     "WriterArtifactExistsError",
