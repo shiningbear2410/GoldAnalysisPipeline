@@ -709,6 +709,20 @@ class TradingViewCandleError(MarketDataError):
     code = "TRADINGVIEW_INVALID_CANDLE"
 
 
+class IncomparableSourcesError(MarketDataError):
+    """Two market-data payloads cannot meaningfully be compared.
+
+    Different instruments, different timeframes, or a timestamp with no zone.
+    Distinct from :class:`SymbolMismatchError`, which is about one payload
+    disagreeing with itself during normalization: this is about a caller
+    handing a comparison two things that are not the same measurement. It is
+    refused rather than computed, because the resulting numbers would look like
+    a data-quality finding and mean nothing at all.
+    """
+
+    code = "INCOMPARABLE_SOURCES"
+
+
 # --- ingestion (Round 8) -------------------------------------------------
 
 
@@ -1164,6 +1178,7 @@ __all__ = [
     "FinalizeTimeoutError",
     "FormingCandleError",
     "InboxPayloadError",
+    "IncomparableSourcesError",
     "IngestionError",
     "InputValidationError",
     "InsecureCredentialBackendError",
