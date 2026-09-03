@@ -24,6 +24,7 @@ from goldpipeline.domain.errors import (
     AutomationConfigurationError,
     FinalizeConfigurationError,
     MarketDataConfigurationError,
+    PipelineError,
     PublisherConfigurationError,
     RemoteIntakeConfigurationError,
     ReviewConfigurationError,
@@ -55,6 +56,20 @@ MODEL_ENV = "ANTHROPIC_MODEL"
 TIMEOUT_ENV = "GOLDPIPELINE_WRITER_TIMEOUT"
 MAX_RETRIES_ENV = "GOLDPIPELINE_WRITER_MAX_RETRIES"
 MAX_TOKENS_ENV = "GOLDPIPELINE_WRITER_MAX_TOKENS"
+
+DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
+DEEPSEEK_BASE_URL_ENV = "DEEPSEEK_BASE_URL"
+DEEPSEEK_TIMEOUT_ENV = "GOLDPIPELINE_DEEPSEEK_TIMEOUT"
+DEEPSEEK_MAX_RETRIES_ENV = "GOLDPIPELINE_DEEPSEEK_MAX_RETRIES"
+DEEPSEEK_MAX_TOKENS_ENV = "GOLDPIPELINE_DEEPSEEK_MAX_TOKENS"
+
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+"""The vendor's OpenAI-format endpoint. HTTPS, and the only host this reaches."""
+
+DEEPSEEK_MAX_RESPONSE_BYTES = 4_194_304
+"""4 MiB. An article and its claims are a few tens of kilobytes; a thinking
+response is larger but nowhere near this. The cap exists so a wrong endpoint
+cannot stream a process out of memory."""
 
 FINALIZER_MODEL_ENV = "ANTHROPIC_FINALIZER_MODEL"
 FINALIZER_TIMEOUT_ENV = "GOLDPIPELINE_FINALIZER_TIMEOUT"
@@ -212,6 +227,89 @@ class WriterSettings:
             timeout_seconds=_positive_float(source, TIMEOUT_ENV, DEFAULT_TIMEOUT_SECONDS),
             max_retries=_non_negative_int(source, MAX_RETRIES_ENV, DEFAULT_MAX_RETRIES),
             max_tokens=_positive_int(source, MAX_TOKENS_ENV, DEFAULT_MAX_TOKENS),
+        )
+
+
+@dataclass(frozen=True)
+class DeepSeekSettings:
+    """Everything a DeepSeek generation call needs.
+
+    One settings type for both the writer and the finalizer, unlike the Anthropic
+    pair. The reason the Anthropic ones are separate is that each resolves its
+    own *model* from its own environment variable; here the model is not an
+    environment setting at all - it comes from the catalog entry for whatever the
+    operator selected - so there is nothing left to keep apart.
+
+    Deliberately no reviewer counterpart. The review stage is Anthropic's, and
+    the absence of a type is the cheapest way to keep it that way.
+    """
+
+    api_key: str = field(repr=False)
+    base_url: str = DEEPSEEK_BASE_URL
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    max_retries: int = DEFAULT_MAX_RETRIES
+    max_tokens: int = DEFAULT_MAX_TOKENS
+    max_response_bytes: int = DEEPSEEK_MAX_RESPONSE_BYTES
+
+    def __repr__(self) -> str:
+        """Render without the credential, and visibly so."""
+        return (
+            f"DeepSeekSettings(api_key={_REDACTED}, base_url={self.base_url!r}, "
+            f"timeout_seconds={self.timeout_seconds}, max_retries={self.max_retries}, "
+            f"max_tokens={self.max_tokens})"
+        )
+
+    __str__ = __repr__
+
+    @classmethod
+    def from_env(
+        cls,
+        env: Mapping[str, str] | None = None,
+        *,
+        secrets: SecretProvider | None = None,
+        error: type[PipelineError] = WriterConfigurationError,
+    ) -> DeepSeekSettings:
+        """Resolve the key and tuning, at the moment a DeepSeek call is due.
+
+        Called lazily and never at import or start-up: an operator who never
+        selects DeepSeek must not be asked for a DeepSeek key, and preflight
+        must not fail for the want of one.
+
+        Args:
+            env: Mapping for non-secret values. Defaults to ``os.environ``.
+            secrets: Where the key comes from. Defaults to the environment
+                alone, so importing this module never reaches a vault.
+            error: Which stage's configuration error to raise, so a writer
+                failure and a finalizer failure stay distinguishable.
+
+        Raises:
+            PipelineError: The key is absent, or a setting is unusable. The
+                message names the setting and never any part of its value.
+        """
+        source = os.environ if env is None else env
+
+        api_key = _secret(SecretName.DEEPSEEK_API_KEY, secrets, env)
+        if not api_key:
+            raise error(
+                f"{DEEPSEEK_API_KEY_ENV} is not set; DeepSeek was selected but "
+                "there is no credential to reach it with",
+                setting=DEEPSEEK_API_KEY_ENV,
+            )
+
+        base_url = (source.get(DEEPSEEK_BASE_URL_ENV) or DEEPSEEK_BASE_URL).strip()
+        if not base_url.startswith("https://"):
+            # An http:// base would put a bearer token on the wire in clear.
+            raise error(
+                f"{DEEPSEEK_BASE_URL_ENV} must be an https:// URL",
+                setting=DEEPSEEK_BASE_URL_ENV,
+            )
+
+        return cls(
+            api_key=api_key,
+            base_url=base_url.rstrip("/"),
+            timeout_seconds=_positive_float(source, DEEPSEEK_TIMEOUT_ENV, DEFAULT_TIMEOUT_SECONDS),
+            max_retries=_non_negative_int(source, DEEPSEEK_MAX_RETRIES_ENV, DEFAULT_MAX_RETRIES),
+            max_tokens=_positive_int(source, DEEPSEEK_MAX_TOKENS_ENV, DEFAULT_MAX_TOKENS),
         )
 
 
@@ -962,6 +1060,9 @@ __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_MT5_SYMBOL",
     "DEFAULT_PUBLISH_TIMEOUT_SECONDS",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_MAX_RESPONSE_BYTES",
+    "DeepSeekSettings",
     "DEFAULT_REVIEWER_MODEL",
     "DEFAULT_REVIEW_MAX_RUN_AGE_MINUTES",
     "REVIEW_CHAT_ENV",

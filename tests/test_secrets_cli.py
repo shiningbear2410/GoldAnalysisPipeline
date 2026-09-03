@@ -74,6 +74,7 @@ def test_status_reports_missing_credentials(
     assert code == EXIT_OK
     assert {entry["name"]: entry["source"] for entry in payload["secrets"]} == {
         "ANTHROPIC_API_KEY": "MISSING",
+        "DEEPSEEK_API_KEY": "MISSING",
         "OPENAI_API_KEY": "MISSING",
         "TELEGRAM_BOT_TOKEN": "MISSING",
         "INGEST_TOKEN": "MISSING",

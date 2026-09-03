@@ -225,8 +225,18 @@ class WriterResult(StrictModel):
     status: WriterStatus
     stage: str = Field(default="claude_writer")
     title: str
-    model: str = Field(description="Model id that produced the draft.")
-    provider: str = Field(description="Which client produced it, e.g. 'anthropic', 'fake'.")
+    model: str = Field(description="Vendor model id that actually produced the draft.")
+    provider: str = Field(
+        description="Which client produced it, e.g. 'anthropic', 'deepseek', 'fake'."
+    )
+    selection_id: str | None = Field(
+        default=None,
+        description=(
+            "The catalog choice behind `model`, when they differ. Two DeepSeek "
+            "choices share one vendor model, so the vendor id alone no longer says "
+            "what was asked for. Null on artifacts written before selections existed."
+        ),
+    )
     prompt_version: str = Field(description="Version of the prompt template used.")
     context_sha256: str = Field(
         min_length=64,

@@ -35,6 +35,7 @@ class SecretName(StrEnum):
     """
 
     ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
+    DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY"
     OPENAI_API_KEY = "OPENAI_API_KEY"
     TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
     INGEST_TOKEN = "INGEST_TOKEN"
@@ -53,18 +54,30 @@ class SecretName(StrEnum):
 REQUIRED_SECRETS = frozenset({SecretName.ANTHROPIC_API_KEY})
 """Credentials the production pipeline cannot do its work without.
 
-One entry, because every AI stage - Writer, Reviewer and Finalizer - now calls
-Anthropic. They remain three independent requests with three different prompts;
-what they share is an account, not a conversation.
+One entry, because the Reviewer always calls Anthropic and the Writer and
+Finalizer do so by default. They remain three independent requests with three
+different prompts; what they share is an account, not a conversation.
+
+``DEEPSEEK_API_KEY`` is deliberately absent. Generation may be pointed at
+DeepSeek, but nothing requires it, and a required secret is one whose absence
+stops the pipeline - see :data:`CONDITIONAL_SECRETS`.
 """
 
-CONDITIONAL_SECRETS = frozenset({SecretName.TELEGRAM_BOT_TOKEN, SecretName.INGEST_TOKEN})
+CONDITIONAL_SECRETS = frozenset(
+    {SecretName.TELEGRAM_BOT_TOKEN, SecretName.INGEST_TOKEN, SecretName.DEEPSEEK_API_KEY}
+)
 """Needed only when the feature that uses them actually runs.
 
 Absent is not a fault while unattended publishing is off, which is why readiness
 has always been reported against the mode rather than the list. ``INGEST_TOKEN``
-joins on the same terms: remote intake is off by default, and a credential for a
+joined on the same terms: remote intake is off by default, and a credential for a
 switched-off feature is not a missing credential.
+
+``DEEPSEEK_API_KEY`` joins on those terms too, with one difference worth naming:
+the others are gated by a config flag, this one by a selection. An operator who
+never picks DeepSeek must never be asked for a DeepSeek key, so it is resolved at
+the moment a DeepSeek call is about to be made - never at import, at start-up, or
+while rendering a status.
 """
 
 OPTIONAL_SECRETS = frozenset({SecretName.OPENAI_API_KEY})
@@ -128,6 +141,7 @@ _HUMAN = {
 __all__ = [
     "CONDITIONAL_SECRETS",
     "OPTIONAL_SECRETS",
+    "CONDITIONAL_SECRETS",
     "REQUIRED_SECRETS",
     "SecretName",
     "SecretSource",

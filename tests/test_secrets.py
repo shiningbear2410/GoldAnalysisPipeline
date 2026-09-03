@@ -110,6 +110,7 @@ def test_entries_are_named_for_the_kind_of_credential() -> None:
 
     assert module.reads == [
         (SERVICE_NAME, "anthropic_api_key"),
+        (SERVICE_NAME, "deepseek_api_key"),
         (SERVICE_NAME, "openai_api_key"),
         (SERVICE_NAME, "telegram_bot_token"),
         (SERVICE_NAME, "ingest_token"),
@@ -430,10 +431,12 @@ def test_only_credentials_are_recognised() -> None:
     harder to audit without making anything safer.
 
     The list grows only when something genuinely secret arrives; INGEST_TOKEN
-    joined it because a bearer token is exactly that.
+    joined it because a bearer token is exactly that, and DEEPSEEK_API_KEY when
+    generation gained a second vendor.
     """
     assert {name.value for name in SecretName} == {
         "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
         "OPENAI_API_KEY",
         "TELEGRAM_BOT_TOKEN",
         "INGEST_TOKEN",

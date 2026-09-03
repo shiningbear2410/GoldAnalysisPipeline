@@ -28,8 +28,8 @@ from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.news import MAX_LOOKBACK, MIN_LOOKBACK
 from goldpipeline.schemas.preferences import (
     CATALOG,
-    DEFAULT_MODEL_ID,
     DEFAULT_PREFERENCES,
+    DEFAULT_SELECTION_ID,
     PREFERENCES_FILENAME,
     PREFERENCES_SCHEMA_VERSION,
     PreferencesHealth,
@@ -40,6 +40,7 @@ from goldpipeline.schemas.preferences import (
     provider_spec,
     resolve_model,
 )
+from goldpipeline.schemas.secrets import SecretName
 from goldpipeline.services.article_routing import SPECS
 from goldpipeline.services.preferences import PreferencesStore
 
@@ -92,13 +93,13 @@ def test_the_default_model_is_what_production_already_uses() -> None:
     """
     from goldpipeline.config import DEFAULT_MODEL
 
-    assert DEFAULT_MODEL_ID == DEFAULT_MODEL
+    assert DEFAULT_SELECTION_ID == DEFAULT_MODEL
     assert DEFAULT_PREFERENCES.provider is Provider.CLAUDE
-    assert DEFAULT_PREFERENCES.model_id == DEFAULT_MODEL
+    assert DEFAULT_PREFERENCES.selection_id == DEFAULT_MODEL
 
 
 def test_defaults_are_a_valid_selection() -> None:
-    resolve_model(DEFAULT_PREFERENCES.provider, DEFAULT_PREFERENCES.model_id)
+    resolve_model(DEFAULT_PREFERENCES.provider, DEFAULT_PREFERENCES.selection_id)
 
 
 # --------------------------------------------------------------------------
@@ -113,15 +114,15 @@ def test_every_provider_appears_once() -> None:
 
 
 def test_the_claude_models_are_the_agreed_three() -> None:
-    assert tuple(m.model_id for m in provider_spec(Provider.CLAUDE).models) == CLAUDE_MODELS
+    assert tuple(m.selection_id for m in provider_spec(Provider.CLAUDE).models) == CLAUDE_MODELS
 
 
 def test_the_deepseek_models_are_the_agreed_four() -> None:
-    assert tuple(m.model_id for m in provider_spec(Provider.DEEPSEEK).models) == DEEPSEEK_MODELS
+    assert tuple(m.selection_id for m in provider_spec(Provider.DEEPSEEK).models) == DEEPSEEK_MODELS
 
 
 @pytest.mark.parametrize(
-    ("model_id", "label"),
+    ("selection_id", "label"),
     [
         ("claude-haiku-4-5", "Haiku 4.5"),
         ("claude-sonnet-5", "Sonnet 5"),
@@ -132,15 +133,15 @@ def test_the_deepseek_models_are_the_agreed_four() -> None:
         ("deepseek-reasoner", "DeepSeek Reasoner"),
     ],
 )
-def test_display_labels_are_stable(model_id: str, label: str) -> None:
+def test_display_labels_are_stable(selection_id: str, label: str) -> None:
     """A label is what a person clicked. Changing one silently is a UI bug."""
-    found = next(m for spec in CATALOG for m in spec.models if m.model_id == model_id)
+    found = next(m for spec in CATALOG for m in spec.models if m.selection_id == selection_id)
     assert found.label == label
 
 
 def test_catalog_iteration_is_deterministic() -> None:
-    once = [(spec.provider, tuple(m.model_id for m in spec.models)) for spec in CATALOG]
-    twice = [(spec.provider, tuple(m.model_id for m in spec.models)) for spec in CATALOG]
+    once = [(spec.provider, tuple(m.selection_id for m in spec.models)) for spec in CATALOG]
+    twice = [(spec.provider, tuple(m.selection_id for m in spec.models)) for spec in CATALOG]
     assert once == twice
 
 
@@ -148,37 +149,37 @@ def test_provider_labels_are_present() -> None:
     assert [spec.label for spec in CATALOG] == ["Claude API", "DeepSeek API"]
 
 
-@pytest.mark.parametrize("model_id", DEEPSEEK_MODELS)
-def test_claude_does_not_offer_deepseek_models(model_id: str) -> None:
+@pytest.mark.parametrize("selection_id", DEEPSEEK_MODELS)
+def test_claude_does_not_offer_deepseek_models(selection_id: str) -> None:
     with pytest.raises(ValueError, match="does not offer"):
-        resolve_model(Provider.CLAUDE, model_id)
+        resolve_model(Provider.CLAUDE, selection_id)
 
 
-@pytest.mark.parametrize("model_id", CLAUDE_MODELS)
-def test_deepseek_does_not_offer_claude_models(model_id: str) -> None:
+@pytest.mark.parametrize("selection_id", CLAUDE_MODELS)
+def test_deepseek_does_not_offer_claude_models(selection_id: str) -> None:
     with pytest.raises(ValueError, match="does not offer"):
-        resolve_model(Provider.DEEPSEEK, model_id)
+        resolve_model(Provider.DEEPSEEK, selection_id)
 
 
 @pytest.mark.parametrize(
-    "model_id",
+    "selection_id",
     ["", "gpt-4", "claude-opus-4", "claude-opus-5 ", "CLAUDE-OPUS-5", "../../etc/passwd"],
 )
-def test_an_unknown_model_is_refused(model_id: str) -> None:
+def test_an_unknown_model_is_refused(selection_id: str) -> None:
     with pytest.raises(ValueError):
-        resolve_model(Provider.CLAUDE, model_id)
+        resolve_model(Provider.CLAUDE, selection_id)
 
 
 @pytest.mark.parametrize("provider", ["claude", "CLAUDE_API", "openai", "", "anthropic"])
 def test_an_unknown_provider_is_refused(provider: str) -> None:
     with pytest.raises(ValidationError):
-        UserPreferences(provider=provider, model_id="claude-opus-5")  # type: ignore[arg-type]
+        UserPreferences(provider=provider, selection_id="claude-opus-5")  # type: ignore[arg-type]
 
 
 def test_provider_is_never_inferred_from_a_model_prefix() -> None:
     """``claude-`` is a naming convention, not authority."""
     with pytest.raises(ValidationError):
-        UserPreferences(provider=Provider.DEEPSEEK, model_id="claude-opus-5")
+        UserPreferences(provider=Provider.DEEPSEEK, selection_id="claude-opus-5")
 
 
 # --------------------------------------------------------------------------
@@ -186,22 +187,67 @@ def test_provider_is_never_inferred_from_a_model_prefix() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_claude_is_runnable_and_deepseek_is_not_yet() -> None:
-    assert provider_spec(Provider.CLAUDE).runtime is RuntimeReadiness.AVAILABLE
-    assert provider_spec(Provider.DEEPSEEK).runtime is RuntimeReadiness.NOT_IMPLEMENTED
-    assert provider_spec(Provider.DEEPSEEK).requires, "an unavailable provider must say why"
+def test_both_providers_are_implemented() -> None:
+    """DeepSeek stopped being a placeholder this round."""
+    assert provider_spec(Provider.CLAUDE).implemented is True
+    assert provider_spec(Provider.DEEPSEEK).implemented is True
+    assert provider_spec(Provider.DEEPSEEK).requires, "say what it still needs"
 
 
-def test_deepseek_may_be_selected_even_though_it_cannot_run(store: PreferencesStore) -> None:
-    """Selectable and runnable are different questions, and both get answered."""
+def test_implemented_is_not_available_until_a_credential_is_found() -> None:
+    """Code existing is not the same as the thing working.
+
+    ``IMPLEMENTED`` is the honest answer when nobody looked at the credential
+    store, and only a real probe may upgrade it. A status that showed green for
+    a provider whose key is absent would promise a call nobody can make.
+    """
+    spec = provider_spec(Provider.DEEPSEEK)
+    assert spec.readiness(secret_present=None) is RuntimeReadiness.IMPLEMENTED
+    assert spec.readiness(secret_present=False) is RuntimeReadiness.IMPLEMENTED_NOT_CONFIGURED
+    assert spec.readiness(secret_present=True) is RuntimeReadiness.AVAILABLE
+
+
+def test_an_unimplemented_provider_stays_unimplemented_whatever_the_key() -> None:
+    from dataclasses import replace
+
+    spec = replace(provider_spec(Provider.DEEPSEEK), implemented=False)
+    for present in (None, True, False):
+        assert spec.readiness(secret_present=present) is RuntimeReadiness.NOT_IMPLEMENTED
+
+
+def test_status_does_not_claim_configured_without_a_probe(store: PreferencesStore) -> None:
+    """This round reads no credential store, so nothing may look green."""
     store.set_provider_model(Provider.DEEPSEEK, "deepseek-reasoner")
     status = store.status()
 
     assert status.provider is Provider.DEEPSEEK
     assert status.model_label == "DeepSeek Reasoner"
-    assert status.provider_runtime is RuntimeReadiness.NOT_IMPLEMENTED
+    assert status.provider_runtime is RuntimeReadiness.IMPLEMENTED
     assert status.generation_ready is False
-    assert status.provider_requires
+
+
+def test_a_probe_can_report_a_configured_provider(store: PreferencesStore) -> None:
+    """What a future bot does, with a fake store rather than the real one."""
+    store.set_provider_model(Provider.DEEPSEEK, "deepseek-v4-pro")
+    stored: set[SecretName] = {SecretName.DEEPSEEK_API_KEY}
+
+    status = store.status(secret_present=lambda name: name in stored)
+    assert status.provider_runtime is RuntimeReadiness.AVAILABLE
+    assert status.generation_ready is True
+
+    status = store.status(secret_present=lambda name: name in set())
+    assert status.provider_runtime is RuntimeReadiness.IMPLEMENTED_NOT_CONFIGURED
+    assert status.generation_ready is False
+
+
+def test_the_probe_is_asked_only_about_the_selected_provider(
+    store: PreferencesStore,
+) -> None:
+    """Selecting Claude must never cause a DeepSeek key to be looked for."""
+    asked: list[SecretName] = []
+    store.set_provider_model(Provider.CLAUDE, "claude-opus-5")
+    store.status(secret_present=lambda name: bool(asked.append(name)) or True)
+    assert asked == [SecretName.ANTHROPIC_API_KEY]
 
 
 # --------------------------------------------------------------------------
@@ -240,7 +286,7 @@ def test_readiness_is_read_from_routing_not_stored(store: PreferencesStore) -> N
     assert set(document) == {
         "schema_version",
         "provider",
-        "model_id",
+        "selection_id",
         "article_type",
         "news_lookback_seconds",
     }
@@ -318,7 +364,7 @@ def test_a_valid_file_is_read_back(store: PreferencesStore) -> None:
     assert result.source is PreferencesSource.FILE
     assert result.health is PreferencesHealth.OK
     assert result.preferences is not None
-    assert result.preferences.model_id == "claude-haiku-4-5"
+    assert result.preferences.selection_id == "claude-haiku-4-5"
 
 
 @pytest.mark.parametrize(
@@ -350,9 +396,9 @@ def test_an_unsupported_version_is_reported(store: PreferencesStore) -> None:
 @pytest.mark.parametrize(
     "document",
     [
-        {"schema_version": "1", "provider": "DEEPSEEK", "model_id": "claude-opus-5"},
-        {"schema_version": "1", "provider": "OPENAI", "model_id": "gpt-4"},
-        {"schema_version": "1", "model_id": "not-a-model"},
+        {"schema_version": "1", "provider": "DEEPSEEK", "selection_id": "claude-opus-5"},
+        {"schema_version": "1", "provider": "OPENAI", "selection_id": "gpt-4"},
+        {"schema_version": "1", "selection_id": "not-a-model"},
         {"schema_version": "1", "news_lookback_seconds": 10},
         {"schema_version": "1", "news_lookback_seconds": 9_999_999},
         {"schema_version": "1", "article_type": "SOMETHING_ELSE"},
@@ -378,7 +424,7 @@ def test_extra_fields_are_refused(store: PreferencesStore) -> None:
             {
                 "schema_version": "1",
                 "provider": "CLAUDE",
-                "model_id": "claude-opus-5",
+                "selection_id": "claude-opus-5",
                 "reviewer_model": "claude-opus-5",
             }
         ),
@@ -417,7 +463,7 @@ def test_a_failed_write_leaves_the_original_intact(
         store.set_provider_model(Provider.CLAUDE, "claude-haiku-4-5")
 
     assert store.path.read_bytes() == original
-    assert store.read().preferences.model_id == "claude-sonnet-5"  # type: ignore[union-attr]
+    assert store.read().preferences.selection_id == "claude-sonnet-5"  # type: ignore[union-attr]
 
 
 def test_no_temporary_files_are_left_behind(store: PreferencesStore) -> None:
@@ -428,13 +474,13 @@ def test_no_temporary_files_are_left_behind(store: PreferencesStore) -> None:
 
 def test_the_last_writer_wins_on_the_whole_object(store: PreferencesStore) -> None:
     """The documented concurrency contract: never corrupt, possibly superseded."""
-    store.write(UserPreferences(provider=Provider.CLAUDE, model_id="claude-haiku-4-5"))
-    store.write(UserPreferences(provider=Provider.CLAUDE, model_id="claude-opus-5"))
+    store.write(UserPreferences(provider=Provider.CLAUDE, selection_id="claude-haiku-4-5"))
+    store.write(UserPreferences(provider=Provider.CLAUDE, selection_id="claude-opus-5"))
     result = store.read()
 
     assert result.health is PreferencesHealth.OK
     assert result.preferences is not None
-    assert result.preferences.model_id == "claude-opus-5"
+    assert result.preferences.selection_id == "claude-opus-5"
 
 
 # --------------------------------------------------------------------------
@@ -444,7 +490,7 @@ def test_the_last_writer_wins_on_the_whole_object(store: PreferencesStore) -> No
 
 def test_provider_and_model_change_together(store: PreferencesStore) -> None:
     updated = store.set_provider_model(Provider.DEEPSEEK, "deepseek-v4-flash")
-    assert (updated.provider, updated.model_id) == (Provider.DEEPSEEK, "deepseek-v4-flash")
+    assert (updated.provider, updated.selection_id) == (Provider.DEEPSEEK, "deepseek-v4-flash")
 
 
 def test_an_invalid_pairing_writes_nothing(store: PreferencesStore) -> None:
@@ -459,7 +505,7 @@ def test_one_change_preserves_the_others(store: PreferencesStore) -> None:
     updated = store.set_article_type(ArticleType.NEWS_DIGEST)
 
     assert updated.provider is Provider.CLAUDE
-    assert updated.model_id == "claude-haiku-4-5"
+    assert updated.selection_id == "claude-haiku-4-5"
     assert updated.news_lookback == timedelta(hours=48)
     assert updated.article_type is ArticleType.NEWS_DIGEST
 
@@ -510,7 +556,7 @@ def test_status_shows_labels_a_person_can_read(store: PreferencesStore) -> None:
 
     assert status.provider_label == "Claude API"
     assert status.model_label == "Sonnet 5"
-    assert status.model_id == "claude-sonnet-5"
+    assert status.selection_id == "claude-sonnet-5"
     assert status.news_lookback_seconds == 86_400
 
 
@@ -598,7 +644,7 @@ def test_an_arbitrary_string_cannot_become_a_key(hostile: str, store: Preference
 )
 def test_a_model_id_cannot_name_a_path(hostile: str) -> None:
     with pytest.raises(ValueError):
-        UserPreferences(provider=Provider.CLAUDE, model_id=hostile)
+        UserPreferences(provider=Provider.CLAUDE, selection_id=hostile)
 
 
 def test_preferences_are_not_production_config_keys() -> None:

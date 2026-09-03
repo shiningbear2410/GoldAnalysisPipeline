@@ -323,6 +323,7 @@ def _finalize_revision(
         postcheck_findings=outcome.findings,
         model=response.model,
         provider=response.provider,
+        selection_id=response.selection_id,
         prompt_version=prompt.prompt_version,
         usage=response.usage,
         now=now,
@@ -344,6 +345,7 @@ def _build_result(
     model: str | None,
     provider: str | None,
     prompt_version: str | None,
+    selection_id: str | None = None,
     usage: FinalizerUsage,
     now: datetime | None,
 ) -> FinalizerResult:
@@ -361,6 +363,7 @@ def _build_result(
         postcheck_findings=postcheck_findings,
         model=model,
         provider=provider,
+        selection_id=selection_id,
         prompt_version=prompt_version,
         created_at=now or utc_now(),
         context_sha256=inputs.context_sha256,

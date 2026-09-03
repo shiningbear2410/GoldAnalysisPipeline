@@ -170,6 +170,7 @@ def _execute(
         title=output.title,
         model=response.model,
         provider=response.provider,
+        selection_id=response.selection_id,
         prompt_version=prompt.prompt_version,
         context_sha256=context_digest,
         draft_file=DRAFT_FILENAME,

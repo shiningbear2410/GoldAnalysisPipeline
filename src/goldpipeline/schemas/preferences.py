@@ -32,6 +32,7 @@ from pydantic import Field, model_validator
 from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import StrictModel
 from goldpipeline.schemas.news import DEFAULT_LOOKBACK, MAX_LOOKBACK, MIN_LOOKBACK
+from goldpipeline.schemas.secrets import SecretName
 
 PREFERENCES_SCHEMA_VERSION = "1"
 """Version of the preferences document.
@@ -58,90 +59,183 @@ class Provider(StrEnum):
 
 
 class RuntimeReadiness(StrEnum):
-    """Whether a provider can actually be called today.
+    """How close a provider is to actually being callable.
 
-    Deliberately separate from whether it may be *selected*. The catalog is the
-    menu; this says which dishes the kitchen can currently cook. Conflating them
-    would mean either hiding a planned option or pretending an unimplemented one
-    works, and the second is how a bot ends up reporting success for a call it
-    never made.
+    Four states rather than two, because "the code exists" and "it will work"
+    are different facts and a status line that conflates them is a status line
+    that shows green for a call nobody can make.
     """
 
-    AVAILABLE = "AVAILABLE"
     NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
+    """No adapter exists. Selectable so a menu can show what is coming."""
+
+    IMPLEMENTED = "IMPLEMENTED"
+    """An adapter exists; whether its credential is present was not checked.
+
+    The honest answer when nobody asked the credential store. Deliberately not
+    ``AVAILABLE``: unchecked is not the same as present, and only a real probe
+    may upgrade this.
+    """
+
+    IMPLEMENTED_NOT_CONFIGURED = "IMPLEMENTED_NOT_CONFIGURED"
+    """An adapter exists and its credential was looked for and not found."""
+
+    AVAILABLE = "AVAILABLE"
+    """An adapter exists and its credential is present. The only green one."""
+
+
+class ThinkingMode(StrEnum):
+    """Whether a selection asks the vendor to think before answering.
+
+    Carried per *selection* rather than per vendor model, because that is where
+    the distinction now lives: two of the four DeepSeek choices point at the
+    same vendor model and differ only in this.
+    """
+
+    ENABLED = "ENABLED"
+    DISABLED = "DISABLED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    """The provider has no such control. Claude, today."""
 
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """One model a user may pick, and what to call it on screen."""
+    """One choice a user may pick, and what it means at the vendor.
 
-    model_id: str
-    """The provider's own id, e.g. ``claude-opus-5``. Never shown as the label."""
+    **Three ids, deliberately.** Until DeepSeek retired its aliases these were
+    one string, and collapsing them was fine. They are not one string any more:
 
+    * ``selection_id`` is what a person picked and what gets stored. It must
+      stay stable across vendor changes, because it is the thing an operator
+      recognises and the thing a preferences file remembers.
+    * ``api_model_id`` is what goes on the wire. It changes when the vendor
+      changes it, and nothing outside the adapter should care.
+    * ``label`` is what appears on a button.
+
+    Keeping a retired alias as the wire value would send the vendor something it
+    no longer accepts; dropping the alias as a *choice* would take away an option
+    the operator asked for. Separating the two costs one field and keeps both.
+    """
+
+    selection_id: str
     label: str
-    """What a person sees, e.g. ``Opus 5``."""
+    api_model_id: str
+    thinking: ThinkingMode = ThinkingMode.NOT_APPLICABLE
 
 
 @dataclass(frozen=True)
 class ProviderSpec:
-    """One provider, its models, and whether it can be called yet."""
+    """One provider, its choices, and what it needs before it can be called."""
 
     provider: Provider
     label: str
-    runtime: RuntimeReadiness
+    implemented: bool
+    secret: SecretName
     models: tuple[ModelSpec, ...]
     requires: str = ""
-    """What is still missing, when ``runtime`` is not ``AVAILABLE``."""
+    """What is still missing, in words an operator can act on."""
 
-    @property
-    def available(self) -> bool:
-        return self.runtime is RuntimeReadiness.AVAILABLE
+    def model(self, selection_id: str) -> ModelSpec | None:
+        return next((m for m in self.models if m.selection_id == selection_id), None)
 
-    def model(self, model_id: str) -> ModelSpec | None:
-        return next((m for m in self.models if m.model_id == model_id), None)
+    def readiness(self, *, secret_present: bool | None) -> RuntimeReadiness:
+        """How runnable this provider is, given what is known about its key.
+
+        ``None`` means nobody looked. That is its own answer rather than a
+        pessimistic guess, and it is what this round reports: no credential
+        store is consulted here, so nothing may claim to be configured.
+        """
+        if not self.implemented:
+            return RuntimeReadiness.NOT_IMPLEMENTED
+        if secret_present is None:
+            return RuntimeReadiness.IMPLEMENTED
+        return (
+            RuntimeReadiness.AVAILABLE
+            if secret_present
+            else RuntimeReadiness.IMPLEMENTED_NOT_CONFIGURED
+        )
 
 
 CATALOG: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         provider=Provider.CLAUDE,
         label="Claude API",
-        runtime=RuntimeReadiness.AVAILABLE,
+        implemented=True,
+        secret=SecretName.ANTHROPIC_API_KEY,
         models=(
-            ModelSpec(model_id="claude-haiku-4-5", label="Haiku 4.5"),
-            ModelSpec(model_id="claude-sonnet-5", label="Sonnet 5"),
-            ModelSpec(model_id="claude-opus-5", label="Opus 5"),
+            ModelSpec(
+                selection_id="claude-haiku-4-5",
+                label="Haiku 4.5",
+                api_model_id="claude-haiku-4-5",
+            ),
+            ModelSpec(
+                selection_id="claude-sonnet-5",
+                label="Sonnet 5",
+                api_model_id="claude-sonnet-5",
+            ),
+            ModelSpec(
+                selection_id="claude-opus-5",
+                label="Opus 5",
+                api_model_id="claude-opus-5",
+            ),
         ),
     ),
     ProviderSpec(
         provider=Provider.DEEPSEEK,
         label="DeepSeek API",
-        runtime=RuntimeReadiness.NOT_IMPLEMENTED,
+        implemented=True,
+        secret=SecretName.DEEPSEEK_API_KEY,
         models=(
-            ModelSpec(model_id="deepseek-v4-pro", label="DeepSeek-V4 Pro"),
-            ModelSpec(model_id="deepseek-v4-flash", label="DeepSeek-V4 Flash"),
-            ModelSpec(model_id="deepseek-chat", label="DeepSeek Chat"),
-            ModelSpec(model_id="deepseek-reasoner", label="DeepSeek Reasoner"),
+            ModelSpec(
+                selection_id="deepseek-v4-pro",
+                label="DeepSeek-V4 Pro",
+                api_model_id="deepseek-v4-pro",
+                thinking=ThinkingMode.ENABLED,
+            ),
+            ModelSpec(
+                selection_id="deepseek-v4-flash",
+                label="DeepSeek-V4 Flash",
+                api_model_id="deepseek-v4-flash",
+                thinking=ThinkingMode.ENABLED,
+            ),
+            ModelSpec(
+                selection_id="deepseek-chat",
+                label="DeepSeek Chat",
+                api_model_id="deepseek-v4-flash",
+                thinking=ThinkingMode.DISABLED,
+            ),
+            ModelSpec(
+                selection_id="deepseek-reasoner",
+                label="DeepSeek Reasoner",
+                api_model_id="deepseek-v4-flash",
+                thinking=ThinkingMode.ENABLED,
+            ),
         ),
-        requires="a DeepSeek writer and finalizer client, and a stored API key",
+        requires="a DeepSeek API key stored in the credential manager",
     ),
 )
-"""Every provider/model combination a user may select, in menu order.
+"""Every choice a user may select, in menu order.
 
 One table, so a future bot renders a keyboard from it rather than carrying its
-own copy of the model list - which is how a menu comes to offer something the
-server refuses.
+own copy - which is how a menu comes to offer something the server refuses. A
+tuple rather than a mapping: the order is what a person sees, and that should be
+a decision made here rather than whatever a hash produces.
 
-A tuple rather than a dict of sets: the order is what a person sees, and it
-should be a decision made here rather than whatever a hash happens to produce.
+**Two DeepSeek choices point at the same vendor model.** ``deepseek-chat`` and
+``deepseek-reasoner`` were vendor aliases until they were retired on 2026-07-24;
+the two current ids are ``deepseek-v4-pro`` and ``deepseek-v4-flash``, and both
+support thinking and non-thinking modes. So the four choices survive as choices,
+``DeepSeek Reasoner`` and ``DeepSeek-V4 Flash`` resolve to the same runtime
+behaviour, and ``DeepSeek Chat`` is that model with thinking off.
 
-DeepSeek is listed and *not* runnable. Declaring it before it works is the same
-choice the article-routing table makes for ``TRADE_PLAN``: the day it arrives is
-one reviewable change to this table plus the client it points at, rather than a
-schema migration under pressure.
+That collision is deliberately not disguised. Inventing a difference the vendor
+no longer offers would mean a menu that promises something the API cannot do,
+and the first person to notice would be a reader wondering why two buttons
+produce the same article.
 """
 
 DEFAULT_PROVIDER = Provider.CLAUDE
-DEFAULT_MODEL_ID = "claude-opus-5"
+DEFAULT_SELECTION_ID = "claude-opus-5"
 """What an operator who has never expressed a preference gets.
 
 Chosen to match what production already does, not to improve on it. The writer
@@ -161,20 +255,20 @@ def provider_spec(provider: Provider) -> ProviderSpec:
     return next(spec for spec in CATALOG if spec.provider is provider)
 
 
-def resolve_model(provider: Provider, model_id: str) -> ModelSpec:
-    """The model *provider* offers under *model_id*.
+def resolve_model(provider: Provider, selection_id: str) -> ModelSpec:
+    """The choice *provider* offers under *selection_id*.
 
     Raises:
-        ValueError: The provider does not offer that model. Compatibility is
+        ValueError: The provider does not offer that choice. Compatibility is
             decided here, server-side, from the table - never inferred from the
-            shape of the id. ``claude-`` is a naming convention, and a rule that
+            shape of an id. ``claude-`` is a naming convention, and a rule that
             read a provider out of a prefix would be a rule an id could lie to.
     """
     spec = provider_spec(provider)
-    model = spec.model(model_id)
+    model = spec.model(selection_id)
     if model is None:
-        offered = ", ".join(m.model_id for m in spec.models)
-        raise ValueError(f"{spec.label} does not offer {model_id!r}; it offers: {offered}")
+        offered = ", ".join(m.selection_id for m in spec.models)
+        raise ValueError(f"{spec.label} does not offer {selection_id!r}; it offers: {offered}")
     return model
 
 
@@ -190,9 +284,12 @@ class UserPreferences(StrictModel):
 
     schema_version: Literal["1"] = "1"
     provider: Provider = DEFAULT_PROVIDER
-    model_id: str = Field(
-        default=DEFAULT_MODEL_ID,
-        description="A model id this catalog declares for `provider`. Never free text.",
+    selection_id: str = Field(
+        default=DEFAULT_SELECTION_ID,
+        description=(
+            "A choice this catalog declares for `provider`. Never free text, and "
+            "never a vendor model id: what goes on the wire is the catalog's job."
+        ),
     )
     article_type: ArticleType = Field(
         default=DEFAULT_ARTICLE_TYPE,
@@ -216,7 +313,7 @@ class UserPreferences(StrictModel):
         field is wrong on its own: ``DEEPSEEK`` is a real provider and
         ``claude-opus-5`` is a real model. It is the pairing that is not a thing.
         """
-        resolve_model(self.provider, self.model_id)
+        resolve_model(self.provider, self.selection_id)
         return self
 
     @property
@@ -295,8 +392,14 @@ class PreferencesStatus(StrictModel):
         default=None, description="What the provider still needs, when it is not runnable."
     )
 
-    model_id: str | None = None
+    selection_id: str | None = Field(
+        default=None, description="What the operator picked. Stable across vendor changes."
+    )
     model_label: str | None = None
+    api_model_id: str | None = Field(
+        default=None, description="What this selection actually sends to the vendor."
+    )
+    thinking: ThinkingMode | None = None
 
     article_type: ArticleType | None = None
     article_type_ready: bool | None = Field(
@@ -333,7 +436,7 @@ class PreferencesStatus(StrictModel):
 __all__ = [
     "CATALOG",
     "DEFAULT_ARTICLE_TYPE",
-    "DEFAULT_MODEL_ID",
+    "DEFAULT_SELECTION_ID",
     "DEFAULT_PREFERENCES",
     "DEFAULT_PROVIDER",
     "PREFERENCES_FILENAME",
@@ -344,6 +447,7 @@ __all__ = [
     "PreferencesStatus",
     "Provider",
     "ProviderSpec",
+    "ThinkingMode",
     "RuntimeReadiness",
     "UserPreferences",
     "provider_spec",

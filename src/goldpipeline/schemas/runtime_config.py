@@ -79,7 +79,13 @@ deserves to be told rather than ignored.
 """
 
 FORBIDDEN_KEYS = frozenset(
-    {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN", "INGEST_TOKEN"}
+    {
+        "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "OPENAI_API_KEY",
+        "TELEGRAM_BOT_TOKEN",
+        "INGEST_TOKEN",
+    }
 )
 """Credentials, refused by name.
 

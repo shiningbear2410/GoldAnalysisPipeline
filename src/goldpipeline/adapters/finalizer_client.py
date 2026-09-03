@@ -38,8 +38,12 @@ class FinalizeResponse:
 
     output: FinalizerModelOutput
     model: str
+    """The vendor model that actually served the request."""
+
     provider: str
     usage: FinalizerUsage = field(default_factory=FinalizerUsage)
+    selection_id: str | None = None
+    """The catalog choice behind `model`, when the two differ. See WriterResponse."""
 
 
 @runtime_checkable

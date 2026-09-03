@@ -33,8 +33,17 @@ class WriterResponse:
 
     output: WriterModelOutput
     model: str
+    """The vendor model that actually served the request."""
+
     provider: str
     usage: WriterUsage = field(default_factory=WriterUsage)
+    selection_id: str | None = None
+    """The catalog choice behind `model`, when the two differ.
+
+    ``None`` whenever the selection *is* the vendor id - every Claude model, and
+    the offline fake. Set by a provider whose choices no longer map one to one
+    onto vendor models, so an artifact can still say what was asked for.
+    """
 
 
 @runtime_checkable

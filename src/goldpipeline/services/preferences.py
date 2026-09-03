@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -56,10 +57,18 @@ from goldpipeline.schemas.preferences import (
     provider_spec,
     resolve_model,
 )
+from goldpipeline.schemas.secrets import SecretName
 from goldpipeline.services.article_routing import spec_for
 from goldpipeline.storage.atomic import atomic_write_bytes, encode_json
 
 logger = logging.getLogger(__name__)
+
+SecretProbe = Callable[[SecretName], bool]
+"""How a caller answers "is this provider's credential stored?".
+
+Injected rather than imported, so this module never reaches a credential
+store on its own and a status render costs nothing until somebody asks it to.
+"""
 
 
 @dataclass(frozen=True)
@@ -178,7 +187,7 @@ class PreferencesStore:
         logger.info(
             "preferences.write provider=%s model=%s type=%s lookback=%ds",
             checked.provider,
-            checked.model_id,
+            checked.selection_id,
             checked.article_type,
             checked.news_lookback_seconds,
         )
@@ -186,7 +195,7 @@ class PreferencesStore:
 
     # -- typed mutation ----------------------------------------------------
 
-    def set_provider_model(self, provider: Provider, model_id: str) -> UserPreferences:
+    def set_provider_model(self, provider: Provider, selection_id: str) -> UserPreferences:
         """Choose a provider and a model together.
 
         One operation, because they are one decision. Setting them separately
@@ -198,8 +207,8 @@ class PreferencesStore:
             ValueError: The catalog does not offer that pairing.
             PreferencesUnavailableError: The stored file is damaged.
         """
-        resolve_model(provider, model_id)
-        return self._update(provider=provider, model_id=model_id)
+        resolve_model(provider, selection_id)
+        return self._update(provider=provider, selection_id=selection_id)
 
     def set_article_type(self, article_type: ArticleType) -> UserPreferences:
         """Choose which product mode to produce.
@@ -253,13 +262,19 @@ class PreferencesStore:
 
     # -- the read model ----------------------------------------------------
 
-    def status(self) -> PreferencesStatus:
+    def status(self, *, secret_present: SecretProbe | None = None) -> PreferencesStatus:
         """What a future ``/status`` command may show.
 
-        Display labels rather than ids where a person is reading, readiness
-        asked of the routing table rather than remembered here, and nothing that
-        touches a credential: this view is built entirely from the preferences
-        document and two code-defined tables.
+        Display labels where a person is reading, readiness asked of the routing
+        table rather than remembered here, and nothing that touches a
+        credential unless the caller hands over a way to look.
+
+        Args:
+            secret_present: An optional probe answering "is this provider's key
+                stored?". Omitted here and in every test, so this round reports
+                ``IMPLEMENTED`` - the honest answer when nobody looked - rather
+                than claiming a provider is configured because its code exists.
+                A bot that wants a green light passes a real probe.
         """
         current = self.read()
         preferences = current.preferences
@@ -272,18 +287,21 @@ class PreferencesStore:
             )
 
         provider = provider_spec(preferences.provider)
-        model = resolve_model(preferences.provider, preferences.model_id)
+        model = resolve_model(preferences.provider, preferences.selection_id)
         routing = spec_for(preferences.article_type)
+        available = secret_present(provider.secret) if secret_present else None
 
         return PreferencesStatus(
             source=current.source,
             health=current.health,
             provider=preferences.provider,
             provider_label=provider.label,
-            provider_runtime=provider.runtime,
+            provider_runtime=provider.readiness(secret_present=available),
             provider_requires=provider.requires or None,
-            model_id=model.model_id,
+            selection_id=model.selection_id,
             model_label=model.label,
+            api_model_id=model.api_model_id,
+            thinking=model.thinking,
             article_type=preferences.article_type,
             article_type_ready=routing.ready,
             article_type_requires=routing.requires or None,
@@ -307,6 +325,7 @@ def _first_problem(exc: PydanticValidationError) -> str:
 
 __all__ = [
     "PreferencesHealth",
+    "SecretProbe",
     "PreferencesRead",
     "PreferencesSource",
     "PreferencesStore",

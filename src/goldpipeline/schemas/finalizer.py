@@ -200,8 +200,15 @@ class FinalizerResult(StrictModel):
         description="Deterministic findings on the final article, after revision.",
     )
 
+    selection_id: str | None = Field(
+        default=None,
+        description=(
+            "The catalog choice behind `model`, when they differ. Null for a "
+            "passthrough, and on artifacts written before selections existed."
+        ),
+    )
     model: str | None = Field(
-        default=None, description="Model that revised it, or null for a passthrough."
+        default=None, description="Vendor model that revised it, or null for a passthrough."
     )
     provider: str | None = Field(default=None)
     prompt_version: str | None = Field(
