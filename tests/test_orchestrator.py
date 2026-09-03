@@ -236,14 +236,19 @@ def test_a_rejected_review_runs_nothing_downstream(runs_dir: Any, tmp_path: Any)
 def blocked_outcome(runs_dir: Any, tmp_path: Any) -> tuple[Any, TrackedClients]:
     """A Run the gate refuses.
 
-    The article is too short to publish but long enough for the writer to accept
-    and clean enough for the reviewer to pass, so the gate is unambiguously the
-    stage that stops it.
+    The final article is too short to publish, while the draft the writer
+    produced is a valid ANALYSIS - so the writer's own contract is not what
+    stops this Run, and the gate is unambiguously the stage that does.
     """
     clients = make_tracked_clients()
     article = "Vàng đang giằng co trong biên hẹp, chưa có tín hiệu rõ ràng."
     outcome = run_orchestrated(
-        runs_dir, tmp_path, clients, article=article, mode=PipelineMode.PUBLISH
+        runs_dir,
+        tmp_path,
+        clients,
+        article=article,
+        mode=PipelineMode.PUBLISH,
+        enforce_contract=False,
     )
     assert outcome.result.publish_decision is Decision.BLOCKED, "fixture did not block"
     return outcome, clients
@@ -317,7 +322,12 @@ def test_a_partial_delivery_is_never_retried(runs_dir: Any, tmp_path: Any) -> No
     )
 
     outcome = run_orchestrated(
-        runs_dir, tmp_path, clients, article=long_article, mode=PipelineMode.PUBLISH
+        runs_dir,
+        tmp_path,
+        clients,
+        article=long_article,
+        mode=PipelineMode.PUBLISH,
+        enforce_contract=False,
     )
 
     assert outcome.result.publish_status is PublishStatus.PARTIAL

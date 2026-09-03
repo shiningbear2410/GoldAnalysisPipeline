@@ -490,29 +490,27 @@ class TestArticleBehaviourUnchanged:
         assert SPECS[ArticleType.NEWS_DIGEST].ready is False
         assert SPECS[ArticleType.TRADE_PLAN].ready is False
 
-    def test_the_writer_prompt_is_still_v3(self) -> None:
+    def test_the_analysis_writer_prompt_is_the_current_version(self) -> None:
         from goldpipeline.prompts import DEFAULT_WRITER_PROMPT
         from goldpipeline.schemas.article import ArticleType
         from goldpipeline.services.article_routing import SPECS
 
-        assert DEFAULT_WRITER_PROMPT == "gold_writer_v3"
+        assert DEFAULT_WRITER_PROMPT == "gold_writer_v4"
         assert SPECS[ArticleType.ANALYSIS].prompt_id == DEFAULT_WRITER_PROMPT
 
-    def test_the_round_64a_checks_are_still_unused_by_production(self) -> None:
-        new_modules = {
-            "goldpipeline.schemas.article_contract",
-            "goldpipeline.schemas.output_findings",
-            "goldpipeline.services.article_contract_checks",
-            "goldpipeline.services.style_symptoms",
-            "goldpipeline.services.causality_language",
-            "goldpipeline.services.numeric_mentions",
-            "goldpipeline.services.market_comparison",
-        }
-        own = {name.rsplit(".", 1)[1] for name in new_modules}
+    def test_the_comparison_service_is_still_unused_by_production(self) -> None:
+        """Round 6.4e wired the ANALYSIS checks; the comparison stayed a tool.
+
+        The market-source comparison exists to inform a decision a person makes,
+        not to run inside the pipeline, so nothing may import it. The article
+        checks are a separate question, pinned in `test_article_contracts`.
+        """
+        unused = {"goldpipeline.services.market_comparison"}
+        own = {name.rsplit(".", 1)[1] for name in unused}
         for path in SRC.rglob("*.py"):
             if path.stem in own:
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module in new_modules:
+                if isinstance(node, ast.ImportFrom) and node.module in unused:
                     raise AssertionError(f"{path.name} imports {node.module}")

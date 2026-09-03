@@ -10,6 +10,7 @@ import pytest
 from conftest import (
     FAKE_API_KEY,
     WRITER_NOW,
+    analysis_article,
     make_analysis_payload,
     make_market_payload,
     make_normalized_run,
@@ -41,13 +42,11 @@ from goldpipeline.services.writer import (
 from goldpipeline.storage.atomic import sha256_bytes
 from goldpipeline.storage.run_store import RunStore
 
-ARTICLE = (
-    "🕯 NHẬN ĐỊNH VÀNG\n\n"
-    "⚡ Chốt nhanh\n"
-    "Giá gần nhất trong dữ liệu quanh 3305.40, thị trường đang tích luỹ.\n\n"
-    "⚠️ Lưu ý\n"
-    "Đây là quan điểm cá nhân, không phải khuyến nghị đầu tư."
+ARTICLE = analysis_article(
+    verdict="thị trường đang tích luỹ, chưa bên nào dứt điểm.",
+    price="Giá gần nhất trong dữ liệu quanh 3305.40. Chưa đủ để nói bên nào đang thắng.",
 )
+"""A realistic draft, shaped to the contract the writer now enforces."""
 
 
 def run_writer(
@@ -182,10 +181,9 @@ def test_manifest_is_updated_with_events_and_hashes(normalized_run: Any, runs_di
 
 def test_vietnamese_article_round_trips(normalized_run: Any, runs_dir: Path) -> None:
     """Requirement 22.13."""
-    vietnamese = (
-        "🕯 NHẬN ĐỊNH VÀNG\n\n"
-        "Vàng đang giằng co quanh vùng hỗ trợ, chưa có tín hiệu dứt khoát.\n"
-        "Ưu tiên quan sát thêm trước khi vào lệnh."
+    vietnamese = analysis_article(
+        verdict="giằng co quanh vùng hỗ trợ, chưa có tín hiệu dứt khoát.",
+        watching="Ưu tiên quan sát thêm trước khi vào lệnh.",
     )
     result = run_writer(
         runs_dir, normalized_run.run_id, client=client_returning(article=vietnamese)

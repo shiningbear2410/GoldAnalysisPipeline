@@ -329,7 +329,9 @@ def test_an_unsupported_gate_version_is_refused(ready_run: Any, runs_dir: Path) 
 
 def test_a_long_article_is_split_and_fully_delivered(runs_dir: Path, tmp_path: Path) -> None:
     """Golden case B."""
-    ready = make_published_ready_run(runs_dir, tmp_path, article=LONG_ARTICLE, claims=[])
+    ready = make_published_ready_run(
+        runs_dir, tmp_path, article=LONG_ARTICLE, enforce_contract=False, claims=[]
+    )
     client = FakePublisherClient()
     outcome = run_publish(runs_dir, ready.run_id, client=client)
 
@@ -340,7 +342,9 @@ def test_a_long_article_is_split_and_fully_delivered(runs_dir: Path, tmp_path: P
 
 def test_the_chunks_reassemble_into_the_approved_article(runs_dir: Path, tmp_path: Path) -> None:
     """Requirement 39.14, through the whole stage rather than the chunker alone."""
-    ready = make_published_ready_run(runs_dir, tmp_path, article=LONG_ARTICLE, claims=[])
+    ready = make_published_ready_run(
+        runs_dir, tmp_path, article=LONG_ARTICLE, enforce_contract=False, claims=[]
+    )
     approved = (Path(ready.run_dir) / "claude_final.md").read_text(encoding="utf-8")
 
     client = FakePublisherClient()
@@ -351,7 +355,9 @@ def test_the_chunks_reassemble_into_the_approved_article(runs_dir: Path, tmp_pat
 
 def test_no_part_marker_is_added_to_any_chunk(runs_dir: Path, tmp_path: Path) -> None:
     """Requirements 39.21-39.22."""
-    ready = make_published_ready_run(runs_dir, tmp_path, article=LONG_ARTICLE, claims=[])
+    ready = make_published_ready_run(
+        runs_dir, tmp_path, article=LONG_ARTICLE, enforce_contract=False, claims=[]
+    )
     client = FakePublisherClient()
     run_publish(runs_dir, ready.run_id, client=client)
 
@@ -363,7 +369,9 @@ def test_no_part_marker_is_added_to_any_chunk(runs_dir: Path, tmp_path: Path) ->
 
 def test_multi_chunk_sends_are_paced(runs_dir: Path, tmp_path: Path) -> None:
     """Requirement 39.45: a burst is how a channel trips flood control."""
-    ready = make_published_ready_run(runs_dir, tmp_path, article=LONG_ARTICLE, claims=[])
+    ready = make_published_ready_run(
+        runs_dir, tmp_path, article=LONG_ARTICLE, enforce_contract=False, claims=[]
+    )
     sleep = RecordingSleep()
     outcome = run_publish(runs_dir, ready.run_id, sleep=sleep)
 
@@ -443,7 +451,9 @@ def test_an_ambiguous_send_is_uncertain_and_never_retried(
 
 def test_an_ambiguous_send_stops_the_remaining_chunks(runs_dir: Path, tmp_path: Path) -> None:
     """Requirement 39.50."""
-    ready = make_published_ready_run(runs_dir, tmp_path, article=LONG_ARTICLE, claims=[])
+    ready = make_published_ready_run(
+        runs_dir, tmp_path, article=LONG_ARTICLE, enforce_contract=False, claims=[]
+    )
     client = FakePublisherClient(failures={1: PublisherTransportAmbiguousError("timed out")})
     outcome = run_publish(runs_dir, ready.run_id, client=client)
 
@@ -456,7 +466,9 @@ def test_an_ambiguous_send_stops_the_remaining_chunks(runs_dir: Path, tmp_path: 
 
 def test_uncertain_outranks_partial(runs_dir: Path, tmp_path: Path) -> None:
     """Requirement 24: if the last chunk's fate is unknown, so is the attempt's."""
-    ready = make_published_ready_run(runs_dir, tmp_path, article=LONG_ARTICLE, claims=[])
+    ready = make_published_ready_run(
+        runs_dir, tmp_path, article=LONG_ARTICLE, enforce_contract=False, claims=[]
+    )
     client = FakePublisherClient(failures={1: PublisherTransportAmbiguousError("connection reset")})
     outcome = run_publish(runs_dir, ready.run_id, client=client)
 
@@ -492,7 +504,9 @@ def test_a_permission_refusal_is_categorised(ready_run: Any, runs_dir: Path) -> 
 
 def test_a_later_explicit_refusal_is_partial(runs_dir: Path, tmp_path: Path) -> None:
     """Requirements 39.47 and 39.49 / golden case E."""
-    ready = make_published_ready_run(runs_dir, tmp_path, article=LONG_ARTICLE, claims=[])
+    ready = make_published_ready_run(
+        runs_dir, tmp_path, article=LONG_ARTICLE, enforce_contract=False, claims=[]
+    )
     client = FakePublisherClient(
         failures={1: PublisherPermissionError("forbidden", status_code=403)}
     )
@@ -594,7 +608,9 @@ def test_even_an_unsuccessful_attempt_is_final(
 
 def test_published_requires_every_chunk_confirmed(runs_dir: Path, tmp_path: Path) -> None:
     """Requirements 39.53 and 39.78."""
-    ready = make_published_ready_run(runs_dir, tmp_path, article=LONG_ARTICLE, claims=[])
+    ready = make_published_ready_run(
+        runs_dir, tmp_path, article=LONG_ARTICLE, enforce_contract=False, claims=[]
+    )
     client = FakePublisherClient(failures={1: PublisherPermissionError("no", status_code=403)})
     outcome = run_publish(runs_dir, ready.run_id, client=client)
 

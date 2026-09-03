@@ -693,7 +693,9 @@ def test_manifest_says_reviewed_only_after_the_artifact_exists(
 def test_an_article_demanding_a_pass_does_not_get_one(runs_dir: Path, tmp_path: Path) -> None:
     """Requirements 27.7 and 28: the security fixture, end to end."""
     article = (FIXTURES / "article_injection.md").read_text(encoding="utf-8")
-    drafted = make_drafted_run(runs_dir, tmp_path, article=article, claims=[])
+    drafted = make_drafted_run(
+        runs_dir, tmp_path, article=article, claims=[], enforce_contract=False
+    )
     result = run_reviewer(runs_dir, drafted.run_id, client=passing_client())
 
     review = load_review(result.run_dir)

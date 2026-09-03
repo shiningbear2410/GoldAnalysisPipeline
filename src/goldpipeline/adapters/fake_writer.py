@@ -33,38 +33,50 @@ FAKE_PROVIDER = "fake"
 FAKE_MODEL = "fake-writer-v1"
 
 
+NO_DRIVER = "Chưa thấy gì đáng kể."
+"""What the contract requires when a side has no material driver."""
+
+DISCLAIMER = "🔴 Nhận định cá nhân, không phải lời khuyên đầu tư."
+
+
 def _default_article(request: WriterRequest) -> str:
     """A plausible Vietnamese draft built only from what the prompt carried.
 
     Deliberately assembled from the prompt rather than hardcoded, so a smoke run
     shows real numbers from the Run rather than a fixed sample that would hide a
     plumbing mistake.
+
+    It emits the ``ANALYSIS`` shape the deterministic contract enforces, for the
+    same reason `fake_mt5` models a real terminal's awkward parts: a double that
+    produces something production would refuse is a double that lets a broken
+    pipeline pass its own tests. The bearish side is deliberately the
+    placeholder - an offline draft has no drivers to report, and inventing one
+    to fill the section is exactly what the contract forbids.
     """
     facts = _extract_facts(request)
     close = facts.get("close", "n/a")
-    high = facts.get("high", "n/a")
-    low = facts.get("low", "n/a")
-    symbol = facts.get("symbol", "XAUUSD")
-    timeframe = facts.get("timeframe", "")
+    date = facts.get("article_date", "")
 
-    return (
-        "🕯 NHẬN ĐỊNH VÀNG\n"
-        "\n"
-        "⚡ Chốt nhanh\n"
-        f"Giá gần nhất trong dữ liệu quanh {close}. Thị trường chưa cho tín hiệu dứt khoát, "
-        "vẫn đang tích luỹ trong biên hẹp.\n"
-        "\n"
-        "📍 Giá đang ở đâu\n"
-        f"Nến {timeframe} gần nhất của {symbol} đóng cửa tại {close}, "
-        f"với đỉnh {high} và đáy {low}.\n"
-        "\n"
-        "🔍 Điều đáng chú ý\n"
-        "Biên độ nến gần nhất khá hẹp, cho thấy hai bên mua bán đang cân bằng. "
-        "Cần thêm dữ liệu trước khi kết luận về xu hướng.\n"
-        "\n"
-        "⚠️ Lưu ý\n"
-        "Đây là bản nháp do writer offline tạo ra để kiểm thử pipeline, "
-        "không phải khuyến nghị đầu tư."
+    return "\n".join(
+        [
+            f"🕯 PHÂN TÍCH VÀNG — {date}",
+            "",
+            "⚡ Chốt: bản nháp offline, chưa có hướng nào rõ để nghiêng theo.",
+            "",
+            "🟢 Đẩy lên:",
+            NO_DRIVER,
+            "",
+            "🔴 Kéo xuống:",
+            NO_DRIVER,
+            "",
+            "📈 Giá đang nói gì?",
+            f"Giá gần nhất quanh {close}. Chưa đủ để nói bên nào đang thắng.",
+            "",
+            "🧭 Mình đang chờ:",
+            "Thêm dữ liệu thật. Đây là bản nháp do writer offline dựng ra để kiểm thử.",
+            "",
+            DISCLAIMER,
+        ]
     )
 
 
@@ -93,6 +105,8 @@ def _extract_facts(request: WriterRequest) -> dict[str, str]:
         "low": str(candle.get("low", "")),
         "symbol": str(instrument.get("symbol", "")),
         "timeframe": str(instrument.get("timeframe", "")),
+        # Copied, never computed - the same rule the real writer is held to.
+        "article_date": str(payload.get("article_date", "")),
     }
 
 
@@ -163,7 +177,7 @@ class FakeWriterClient:
         return WriterModelOutput(
             run_id=request.run_id,
             status=WriterStatus.COMPLETED,
-            title="Nhận định vàng - bản nháp offline",
+            title="Phân tích vàng - bản nháp offline",
             article=_default_article(request),
             source_claims=claims,
             warnings=[],
@@ -193,8 +207,10 @@ def malformed_client(message: str = "response was not valid JSON") -> FakeWriter
 
 
 __all__ = [
+    "DISCLAIMER",
     "FAKE_MODEL",
     "FAKE_PROVIDER",
+    "NO_DRIVER",
     "FakeWriterClient",
     "erroring_client",
     "failing_client",

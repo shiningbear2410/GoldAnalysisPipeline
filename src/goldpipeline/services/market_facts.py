@@ -18,9 +18,11 @@ describe price behaviour without doing sums in its head.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+from goldpipeline.schemas.common import resolve_timezone
 from goldpipeline.schemas.context import AnalysisContext
 from goldpipeline.schemas.market import OHLCBar
 
@@ -31,6 +33,27 @@ MIN_PRICE_DECIMALS = 2
 zero does not change the value, and a single convention is what stops one
 paragraph reading ``3315.1`` and the next ``3315.10``.
 """
+
+
+ARTICLE_TIMEZONE = "Asia/Ho_Chi_Minh"
+"""Whose calendar day the article is dated by.
+
+The reader is in Vietnam, and an article published at 07:00 local on the 4th is
+dated the 4th even though UTC still says the 3rd. Dating it by UTC would put
+yesterday's date on this morning's piece for the seven hours that matter most.
+"""
+
+ARTICLE_DATE_FORMAT = "%d.%m.%Y"
+
+
+def article_date(moment: datetime) -> str:
+    """The article's headline date, in the reader's own calendar.
+
+    Computed here and handed to the model as data, never left for it to work
+    out: a model asked for "today" answers from its training cutoff or from
+    whatever the harness implies, and neither is this Run's date.
+    """
+    return moment.astimezone(resolve_timezone(ARTICLE_TIMEZONE)).strftime(ARTICLE_DATE_FORMAT)
 
 
 def format_price(value: Decimal) -> str:
@@ -288,7 +311,10 @@ def _iso(value: Any) -> str:
 
 
 __all__ = [
+    "ARTICLE_DATE_FORMAT",
+    "ARTICLE_TIMEZONE",
     "MIN_PRICE_DECIMALS",
+    "article_date",
     "MarketFacts",
     "build_market_facts",
     "format_price",

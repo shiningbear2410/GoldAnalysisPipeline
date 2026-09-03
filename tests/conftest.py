@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 
+from goldpipeline.services.market_facts import article_date
+
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures"
 
 BASE_TIME = datetime(2026, 8, 28, 0, 0, tzinfo=UTC)
@@ -252,23 +254,137 @@ not contain is precisely what the reviewer stage flags, so the fixtures must not
 be able to drift into that state by accident.
 """
 
-CLEAN_ARTICLE = (
-    "\U0001f56f NHẬN ĐỊNH VÀNG\n"
-    "\n"
-    "⚡ Chốt nhanh\n"
-    f"Giá gần nhất trong dữ liệu quanh {LATEST_CLOSE}, thị trường đang tích luỹ.\n"
-    "\n"
-    "📍 Giá đang ở đâu\n"
-    f"Nến M15 gần nhất của XAUUSD đóng cửa tại {LATEST_CLOSE}, "
-    f"đỉnh {LATEST_HIGH} và đáy {LATEST_LOW}.\n"
-    "\n"
-    "🎯 Kịch bản\n"
-    "Ưu tiên quan sát thêm. Nếu giá giữ được vùng hỗ trợ, kịch bản tăng vẫn còn hiệu lực.\n"
-    "\n"
-    "⚠️ Lưu ý\n"
-    "Đây là quan điểm cá nhân, không phải khuyến nghị đầu tư."
+FIXTURE_ARTICLE_DATE = article_date(datetime.fromisoformat(_LATEST_BAR["timestamp"]))
+"""The Vietnam calendar date the fixture series ends on.
+
+Derived from the same candle the context is built from, so a fixture article
+carries the date the writer would have been handed - not the date the test
+happens to run on.
+"""
+
+NO_DRIVER = "Chưa thấy gì đáng kể."
+
+DISCLAIMER = "🔴 Nhận định cá nhân, không phải lời khuyên đầu tư."
+
+CLEAN_ARTICLE = "\n".join(
+    [
+        f"\U0001f56f PHÂN TÍCH VÀNG — {FIXTURE_ARTICLE_DATE}",
+        "",
+        "⚡ Chốt: chưa bên nào dứt điểm, giá vẫn đang tích luỹ.",
+        "",
+        "🟢 Đẩy lên:",
+        NO_DRIVER,
+        "",
+        "🔴 Kéo xuống:",
+        NO_DRIVER,
+        "",
+        "📈 Giá đang nói gì?",
+        f"Giá gần nhất quanh {LATEST_CLOSE}. Chưa đủ để nói bên nào đang thắng.",
+        "",
+        "🧭 Mình đang chờ:",
+        "Một phiên có thanh khoản thật. Trước đó thì mọi kết luận đều sớm.",
+        "",
+        DISCLAIMER,
+    ]
 )
-"""An article whose every number comes from the generated fixture series."""
+"""An article whose every number comes from the generated fixture series.
+
+Shaped to the ANALYSIS output contract, because the writer stage now refuses a
+draft that is not - a fixture producing something production would reject is a
+fixture that lets a broken pipeline pass.
+"""
+
+
+def analysis_article(
+    *,
+    verdict: str = "chưa bên nào dứt điểm, giá vẫn đang tích luỹ.",
+    up: str = NO_DRIVER,
+    down: str = NO_DRIVER,
+    price: str | None = None,
+    watching: str = "Một phiên có thanh khoản thật. Trước đó thì mọi kết luận đều sớm.",
+    date: str = FIXTURE_ARTICLE_DATE,
+    extra: str = "",
+) -> str:
+    """Wrap body text in the ANALYSIS shape the writer contract enforces.
+
+    Tests of *downstream* stages need a Run that reached DRAFTED, and they get
+    one by driving the real writer. So their articles have to satisfy the same
+    contract a real draft does, and this builds one around whatever the test
+    actually cares about - a hostile sentence, a wrong number, an odd
+    character - without every such test restating the whole shape.
+
+    ``extra`` is appended inside the price section, which is where a test that
+    wants to inject a sentence usually wants it: inside the article, before the
+    disclaimer, and not disturbing any required heading.
+    """
+    body = price or f"Giá gần nhất quanh {LATEST_CLOSE}. Chưa đủ để nói bên nào đang thắng."
+    if extra:
+        body = f"{body} {extra}"
+    return "\n".join(
+        [
+            f"🕯 PHÂN TÍCH VÀNG — {date}",
+            "",
+            f"⚡ Chốt: {verdict}",
+            "",
+            "🟢 Đẩy lên:",
+            up,
+            "",
+            "🔴 Kéo xuống:",
+            down,
+            "",
+            "📈 Giá đang nói gì?",
+            body,
+            "",
+            "🧭 Mình đang chờ:",
+            watching,
+            "",
+            DISCLAIMER,
+        ]
+    )
+
+
+def replace_draft_article(runs_dir: Path, run_id: str, article: str) -> None:
+    """Install *article* as a Run's draft, re-stamping every digest that names it.
+
+    Since Round 6.4e the writer refuses a draft that is not shaped like an
+    ANALYSIS, which is right for anything written today and wrong for a fixture
+    that needs a Run the current contract could never produce: a 4,800-character
+    article for a chunking test, an injection sample, a piece drafted under an
+    older prompt. Those Runs are real - old ones exist on disk and will keep
+    loading - so the fixture manufactures one directly rather than production
+    growing a switch that turns the contract off.
+
+    The same shape as :func:`republish_article`, one stage earlier: the artifact
+    chain must stay consistent, or a test about content trips the integrity
+    check instead of reaching what it was aiming at.
+    """
+    import json
+
+    from goldpipeline.storage.atomic import encode_text, sha256_bytes
+    from goldpipeline.storage.run_store import RunStore
+
+    store = RunStore(runs_dir)
+    run = store.open(run_id)
+    run_dir = Path(run.path)
+
+    payload = encode_text(article)
+    (run_dir / "claude_draft.md").write_bytes(payload)
+    digest = sha256_bytes(payload)
+
+    metadata_path = run_dir / "claude_writer.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["article_sha256"] = digest
+    metadata["article_chars"] = max(1, len(article.strip()))
+    encoded = (json.dumps(metadata, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    metadata_path.write_bytes(encoded)
+
+    manifest = run.load_manifest()
+    for ref in manifest.artifact_files:
+        if ref.name == "claude_draft.md":
+            ref.sha256, ref.size_bytes = digest, len(payload)
+        elif ref.name == "claude_writer.json":
+            ref.sha256, ref.size_bytes = sha256_bytes(encoded), len(encoded)
+    run.save_manifest(manifest)
 
 
 def make_drafted_run(
@@ -282,12 +398,20 @@ def make_drafted_run(
     analysis: dict[str, Any] | None = None,
     market: dict[str, Any] | None = None,
     writer_status: Any = None,
+    enforce_contract: bool = True,
 ) -> Any:
     """Create a real DRAFTED Run whose article is *article*.
 
     Built by driving the actual writer stage with a fake client rather than by
     writing files and patching digests: the reviewer stage should be tested
     against Runs the pipeline itself produced, hashes and all.
+
+    ``enforce_contract=False`` is for the cases where that is impossible - an
+    article the current ANALYSIS contract would refuse, which is exactly what a
+    chunking test or an injection sample needs. The Run is still drafted for
+    real; the article is then swapped in by :func:`replace_draft_article`, so
+    the escape hatch lives in the fixture and production keeps one
+    unconditional rule.
     """
     from goldpipeline.adapters.fake_writer import FakeWriterClient
     from goldpipeline.schemas.writer import (
@@ -310,8 +434,8 @@ def make_drafted_run(
         return WriterModelOutput(
             run_id=request.run_id,
             status=writer_status or WriterStatus.COMPLETED,
-            title="Nhận định vàng",
-            article=article,
+            title="Phân tích vàng",
+            article=article if enforce_contract else CLEAN_ARTICLE,
             source_claims=default_claims if claims is None else claims,
             news_claims=news_claims or [],
             warnings=warnings or [],
@@ -324,6 +448,8 @@ def make_drafted_run(
         now=WRITER_NOW,
     )
     assert drafted.succeeded, f"fixture run failed to draft: {drafted.error}"
+    if not enforce_contract:
+        replace_draft_article(runs_dir, normalized.run_id, article)
     return drafted
 
 
@@ -375,6 +501,7 @@ def make_reviewed_run(
     analysis: dict[str, Any] | None = None,
     market: dict[str, Any] | None = None,
     review_client: Any = None,
+    enforce_contract: bool = True,
 ) -> Any:
     """Create a real REVIEWED Run, ready for the finalizer.
 
@@ -395,6 +522,7 @@ def make_reviewed_run(
         news_claims=news_claims,
         analysis=analysis,
         market=market,
+        enforce_contract=enforce_contract,
     )
     reviewed = review_draft(
         run_id=drafted.run_id,
@@ -462,6 +590,7 @@ def make_finalized_run(
     market: dict[str, Any] | None = None,
     review_client: Any = None,
     finalizer_client: Any = None,
+    enforce_contract: bool = True,
 ) -> Any:
     """Create a real FINALIZED Run, ready for the publish gate.
 
@@ -482,6 +611,7 @@ def make_finalized_run(
         analysis=analysis,
         market=market,
         review_client=review_client,
+        enforce_contract=enforce_contract,
     )
     finalized = finalize_run(
         run_id=reviewed.run_id,
@@ -490,6 +620,12 @@ def make_finalized_run(
         now=FINALIZE_NOW,
     )
     assert finalized.succeeded, f"fixture run failed to finalize: {finalized.error}"
+    if not enforce_contract:
+        # The draft was swapped after the writer ran, but the finalizer wrote
+        # its own output from the clean article it was handed. A fixture that
+        # asked for a non-conforming article wants it on the artifact the gate
+        # and the publisher actually read, so it is installed there too.
+        republish_article(runs_dir, finalized.run_id, article)
     return finalized
 
 
@@ -574,6 +710,7 @@ def make_published_ready_run(
     article: str = CLEAN_ARTICLE,
     claims: list[Any] | None = None,
     analysis: dict[str, Any] | None = None,
+    enforce_contract: bool = True,
 ) -> Any:
     """Create a real READY_TO_PUBLISH Run, gate approval and all.
 
@@ -585,7 +722,12 @@ def make_published_ready_run(
     from goldpipeline.storage.run_store import RunStore
 
     finalized = make_finalized_run(
-        runs_dir, tmp_path, article=article, claims=claims, analysis=analysis
+        runs_dir,
+        tmp_path,
+        article=article,
+        claims=claims,
+        analysis=analysis,
+        enforce_contract=enforce_contract,
     )
     gated = gate_publish(run_id=finalized.run_id, store=RunStore(runs_dir), now=GATE_NOW)
     assert gated.approved, f"fixture run was blocked: {gated.decision.blockers}"
@@ -738,6 +880,7 @@ def run_orchestrated(
     article: str | None = None,
     analysis: dict[str, Any] | None = None,
     market: dict[str, Any] | None = None,
+    enforce_contract: bool = True,
 ) -> Any:
     """Drive a fresh Run end to end through the orchestrator.
 
@@ -752,7 +895,12 @@ def run_orchestrated(
     from goldpipeline.storage.run_store import RunStore
 
     if article is not None:
-        clients.writer = _writer_returning(article)
+        clients.writer = _writer_returning(article if enforce_contract else CLEAN_ARTICLE)
+    if not enforce_contract and article is not None:
+        # The gate judges the *final* article, so a test that wants it blocked
+        # has to put the offending text where the gate reads it. The draft stays
+        # contract-valid, which is what the writer would really have produced.
+        clients.finalizer = _finalizer_returning(article)
 
     sources = tmp_path / "sources"
     sources.mkdir(parents=True, exist_ok=True)
@@ -768,6 +916,45 @@ def run_orchestrated(
         expected_symbol="XAUUSD",
         now=PIPELINE_NOW,
     )
+
+
+def _finalizer_returning(article: str) -> Any:
+    """A fake finalizer whose final article is exactly *article*.
+
+    For the handful of tests that need a Run to reach the gate carrying
+    something the gate refuses - a foreign instrument, a stub, an invented
+    indicator. The writer contract cannot be the thing that stops them, because
+    what they are testing happens two stages later.
+    """
+    from goldpipeline.adapters.fake_finalizer import (
+        FakeFinalizerClient,
+        read_prompt_review,
+    )
+    from goldpipeline.schemas.finalizer import (
+        FinalizerModelOutput,
+        IssueResolution,
+        ResolutionStatus,
+    )
+
+    def build(request: Any) -> Any:
+        # Every review issue still has to be accounted for, or the finalizer
+        # policy refuses the output before the gate ever sees the article.
+        review = read_prompt_review(request)
+        return FinalizerModelOutput(
+            run_id=request.run_id,
+            article=article,
+            issue_resolutions=[
+                IssueResolution(
+                    issue_id=str(issue.get("issue_id", "")),
+                    resolution=ResolutionStatus.APPLIED,
+                    description="Fixed as requested.",
+                )
+                for issue in review.get("issues", [])
+            ],
+            warnings=[],
+        )
+
+    return FakeFinalizerClient(output_factory=build)
 
 
 def _writer_returning(article: str) -> Any:

@@ -42,7 +42,7 @@ def settings() -> TelegramSettings:
     )
 
 
-def request(text: str = "🕯 NHẬN ĐỊNH VÀNG\n\nVàng đi ngang.") -> SendRequest:
+def request(text: str = "🕯 PHÂN TÍCH VÀNG\n\nVàng đi ngang.") -> SendRequest:
     return SendRequest(target_chat=TARGET, text=text, chunk_index=0)
 
 
@@ -125,7 +125,7 @@ def test_link_previews_are_disabled() -> None:
 
 def test_the_text_reaches_the_transport_byte_for_byte() -> None:
     stub = StubHttp(response=StubResponse(200, ok_body()))
-    text = "🕯 NHẬN ĐỊNH VÀNG\n\n  Giá 3305.90.  \n\n⚠️ Lưu ý"
+    text = "🕯 PHÂN TÍCH VÀNG\n\n  Giá 3305.90.  \n\n⚠️ Lưu ý"
     client(stub).send(request(text))
 
     assert stub.calls[0][1]["text"] == text

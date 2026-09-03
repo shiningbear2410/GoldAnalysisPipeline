@@ -210,7 +210,7 @@ def test_the_schema_has_no_field_for_a_rewritten_article() -> None:
                 "status": "PASS",
                 "score": 95,
                 "summary": "ok",
-                "revised_article": "🕯 NHẬN ĐỊNH VÀNG ...",
+                "revised_article": "🕯 PHÂN TÍCH VÀNG ...",
             }
         )
 

@@ -264,9 +264,16 @@ class TestRoutingConsistency:
         assert SPECS[ArticleType.NEWS_DIGEST].ready is False
         assert SPECS[ArticleType.TRADE_PLAN].ready is False
 
-    def test_nothing_in_production_imports_the_new_modules(self) -> None:
-        """The contracts and checks exist; nothing runs them yet."""
-        new = {
+    def test_only_the_analysis_contract_wires_the_checks_into_production(self) -> None:
+        """Round 6.4e connected these, and only through one seam.
+
+        They were unused when this file was written; the ANALYSIS writer now
+        enforces its own contract. What the test still pins is the *shape* of
+        that dependency: exactly one service composes the checks, and the
+        writer reaches them only through it. A second call site appearing
+        elsewhere is how a narrow rule quietly becomes a global gate.
+        """
+        checks = {
             "goldpipeline.schemas.article_contract",
             "goldpipeline.schemas.output_findings",
             "goldpipeline.services.article_contract_checks",
@@ -275,12 +282,17 @@ class TestRoutingConsistency:
             "goldpipeline.services.numeric_mentions",
             "goldpipeline.services.prose",
         }
-        new_files = {name.rsplit(".", 1)[1] for name in new}
+        own = {name.rsplit(".", 1)[1] for name in checks}
+        composer = "analysis_contract"
         for path in SRC.rglob("*.py"):
-            if path.stem in new_files:
+            if path.stem in own or path.stem == composer:
                 continue
-            imported = _imports(path)
-            assert not (imported & new), f"{path.name} imports {imported & new}"
+            imported = _imports(path) & checks
+            assert not imported, f"{path.name} imports {imported} directly"
+
+        writer = _imports(SRC / "services" / "writer.py")
+        assert "goldpipeline.services.analysis_contract" in writer
+        assert not (writer & checks), "the writer must go through analysis_contract"
 
 
 def _imports(path: Path) -> set[str]:

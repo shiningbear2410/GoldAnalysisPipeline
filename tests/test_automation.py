@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from conftest import (
     AUTOMATION_NOW,
+    BTCUSD_ARTICLE,
     SAMPLE_EVENT_ID,
     FrozenElapsed,
     event_aged,
@@ -788,7 +789,7 @@ def test_a_rejected_review_is_not_retried(
     A gate spoke. Retrying it produces the same verdict and burns a reviewer
     call to do so.
     """
-    from conftest import BTCUSD_ARTICLE, make_reviewed_run
+    from conftest import make_reviewed_run
 
     from goldpipeline.schemas.review import ReviewStatus
 
@@ -817,6 +818,7 @@ def test_a_blocked_gate_is_not_retried(
         tmp_path,
         clients,
         article="Vàng đang giằng co trong biên hẹp, chưa có tín hiệu rõ ràng.",
+        enforce_contract=False,
     )
     assert blocked.result.run_status is RunStatus.PUBLISH_BLOCKED
     decision = (Path(blocked.run_dir) / "publish_decision.json").read_bytes()

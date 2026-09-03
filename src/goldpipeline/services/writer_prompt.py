@@ -40,7 +40,11 @@ from goldpipeline.schemas.context import AnalysisContext
 from goldpipeline.schemas.writer import WriterPrompt
 from goldpipeline.services.claim_paths import build_catalog
 from goldpipeline.services.fencing import fence_marker, fenced_block, make_nonce
-from goldpipeline.services.market_facts import build_market_facts, format_recent_bars
+from goldpipeline.services.market_facts import (
+    article_date,
+    build_market_facts,
+    format_recent_bars,
+)
 from goldpipeline.services.news_provenance import eligible_item_ids
 from goldpipeline.services.source_guard import SourceGuardReport, build_guard_notice
 
@@ -88,6 +92,9 @@ def build_writer_prompt(
     payload = {
         "run_id": context.run_id,
         "context_schema_version": context.schema_version,
+        # Supplied, never inferred. The article's title carries this string
+        # verbatim and a deterministic check confirms it did.
+        "article_date": article_date(context.timing.latest_candle_at),
         **facts.to_dict(),
         "recent_candles": format_recent_bars(context, recent_bar_limit),
     }

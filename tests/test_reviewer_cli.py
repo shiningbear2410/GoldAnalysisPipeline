@@ -247,7 +247,9 @@ def test_the_injection_article_is_rejected_end_to_end(
 ) -> None:
     """Requirement 28, through the command an operator would actually run."""
     article = (FIXTURES / "article_injection.md").read_text(encoding="utf-8")
-    drafted = make_drafted_run(runs_dir, tmp_path, article=article, claims=[])
+    drafted = make_drafted_run(
+        runs_dir, tmp_path, article=article, claims=[], enforce_contract=False
+    )
 
     assert invoke(review_args(drafted.run_id, runs_dir, "--json")) == EXIT_OK
     payload = json.loads(capsys.readouterr().out)

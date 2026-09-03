@@ -98,7 +98,7 @@ def test_the_summary_does_not_dump_the_article(
     invoke(run_args(runs_dir))
     out = capsys.readouterr().out
 
-    assert "NHẬN ĐỊNH VÀNG" not in out
+    assert "PHÂN TÍCH VÀNG" not in out
     assert len(out.splitlines()) < 20
 
 
@@ -268,6 +268,7 @@ def test_a_blocked_gate_exits_blocked(
         tmp_path,
         clients,
         article="Vàng đang giằng co trong biên hẹp, chưa có tín hiệu rõ ràng.",
+        enforce_contract=False,
     )
     capsys.readouterr()
 

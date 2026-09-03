@@ -306,6 +306,7 @@ def test_a_blocked_decision_is_never_published(
         tmp_path,
         make_tracked_clients(),
         article="Vàng đang giằng co trong biên hẹp, chưa có tín hiệu rõ ràng.",
+        enforce_contract=False,
     )
     assert blocked.result.run_status is RunStatus.PUBLISH_BLOCKED
 

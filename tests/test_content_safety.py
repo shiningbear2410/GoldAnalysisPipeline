@@ -25,7 +25,7 @@ from goldpipeline.services.content_safety import (
 )
 
 CLEAN = (
-    "🕯 NHẬN ĐỊNH VÀNG\n\n"
+    "🕯 PHÂN TÍCH VÀNG\n\n"
     "⚡ Chốt nhanh\n"
     "Giá gần nhất trong dữ liệu quanh 3305.90, thị trường đang tích luỹ trong biên hẹp.\n\n"
     "🎯 Kịch bản\n"

@@ -194,6 +194,7 @@ def test_a_blocked_run_does_not_rerun_the_gate(runs_dir: Path, tmp_path: Path) -
         tmp_path,
         clients,
         article="Vàng đang giằng co trong biên hẹp, chưa có tín hiệu rõ ràng.",
+        enforce_contract=False,
     )
     assert blocked.result.run_status is RunStatus.PUBLISH_BLOCKED
     decision_before = (Path(blocked.run_dir) / "publish_decision.json").read_bytes()
@@ -241,6 +242,7 @@ def test_a_partially_published_run_is_never_resumed(runs_dir: Path, tmp_path: Pa
         clients,
         article=CLEAN_ARTICLE + "\n\n" + "\n\n".join([paragraph] * 30),
         mode=PipelineMode.PUBLISH,
+        enforce_contract=False,
     )
     assert partial.result.run_status is RunStatus.PARTIALLY_PUBLISHED
 

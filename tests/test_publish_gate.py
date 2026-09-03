@@ -831,7 +831,9 @@ def test_the_shipped_injection_fixture_never_reaches_publication(
 ) -> None:
     """The adversarial article, end to end: rejected earlier, and never gated."""
     article = (FIXTURES / "article_injection.md").read_text(encoding="utf-8")
-    reviewed = make_reviewed_run(runs_dir, tmp_path, article=article, claims=[])
+    reviewed = make_reviewed_run(
+        runs_dir, tmp_path, article=article, claims=[], enforce_contract=False
+    )
 
     # The reviewer rejects it, so it never finalizes - and the gate refuses a
     # Run that is not FINALIZED, which is the second line of the same defence.

@@ -20,7 +20,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import GATE_NOW, LATEST_CLOSE, make_finalized_run, republish_article
+from conftest import (
+    GATE_NOW,
+    LATEST_CLOSE,
+    analysis_article,
+    make_finalized_run,
+    republish_article,
+)
 
 from goldpipeline.schemas.provenance import ClaimVerdict, ProvenanceState
 from goldpipeline.schemas.publish import BlockerCode, CheckId, CheckStatus, Decision
@@ -39,16 +45,13 @@ from tests.test_producer import make_item
 PRODUCER_ANALYSIS = {"source": "internal_producer", "raw_text": brief_with(*DEFAULT_ITEMS)}
 """An inbox payload as the internal producer writes one."""
 
-SOURCED_ARTICLE = (
-    "🕯 NHẬN ĐỊNH VÀNG\n\n"
-    "⚡ Chốt nhanh\n"
-    "Fed vừa công bố giữ nguyên lãi suất, và thị trường vàng phản ứng khá tích cực "
-    "trong phiên hôm nay.\n\n"
-    "📍 Giá đang ở đâu\n"
-    f"Giá gần nhất trong dữ liệu quanh {LATEST_CLOSE}. Biên độ nến gần nhất vẫn hẹp, "
-    "cho thấy hai bên mua bán đang cân bằng.\n\n"
-    "⚠️ Lưu ý\n"
-    "Đây là nhận định tham khảo, không phải khuyến nghị đầu tư.\n"
+SOURCED_ARTICLE = analysis_article(
+    verdict="dòng tin nghiêng tích cực, giá đang đi cùng hướng.",
+    up=(
+        "Fed vừa công bố giữ nguyên lãi suất, và thị trường vàng phản ứng khá tích cực "
+        "trong phiên hôm nay."
+    ),
+    price=f"Giá gần nhất trong dữ liệu quanh {LATEST_CLOSE}. Biên độ nến gần nhất vẫn hẹp.",
 )
 """A realistic producer-fed article: one relayed news fact, one price fact."""
 
@@ -125,6 +128,7 @@ def test_a_non_producer_run_is_unaffected(runs_dir: Path, tmp_path: Path) -> Non
         runs_dir,
         tmp_path,
         article=SOURCED_ARTICLE,
+        enforce_contract=False,
         claims=DEFAULT_CLAIMS,
         news_claims=[SUPPORTING],
     )
@@ -356,6 +360,7 @@ def test_end_to_end_producer_event_to_gate(runs_dir: Path, tmp_path: Path) -> No
         runs_dir,
         tmp_path,
         article=SOURCED_ARTICLE,
+        enforce_contract=False,
         claims=DEFAULT_CLAIMS,
         news_claims=[SUPPORTING],
         analysis={"source": event.source, "raw_text": event.raw_text},

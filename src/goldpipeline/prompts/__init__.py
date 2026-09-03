@@ -11,6 +11,7 @@ keep recording the version they were written with.
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -46,15 +47,57 @@ written by v2 and quietly changing what that name means would detach them from
 the rules they were actually written under.
 """
 
+GOLD_WRITER_V4 = "gold_writer_v4"
+"""Current writer prompt id. New ANALYSIS shape and voice.
+
+Same claim contract as v3 - `source_claims`, `news_claims` and every Round 5.1
+provenance rule survive unchanged - but a different article: a fixed five-section
+shape, a stated view, required asymmetry when one side has no driver, temporal
+rather than causal wording about price, and a hard character ceiling instead of a
+word-count suggestion.
+
+A new file rather than an edit to v3, because Runs record the prompt they were
+written under and quietly changing what `gold_writer_v3` means would detach them
+from the rules they were actually written to.
+"""
+
+GOLD_HUMAN_STYLE_V1 = "gold_human_style_v1"
+"""The shared voice contract, versioned on its own.
+
+Included by prose article prompts rather than copied into them, so the day the
+voice changes it changes in one place and every prompt that includes it records
+which version it got. Intended for `NEWS_DIGEST` too when that arrives.
+
+Never included by a `TRADE_PLAN` prompt, because there will not be one: that
+document is rendered deterministically and has no voice to contract.
+"""
+
 GOLD_REVIEWER_V1 = "gold_reviewer_v1"
 """Current reviewer prompt id."""
 
 GOLD_FINALIZER_V1 = "gold_finalizer_v1"
 """Current finalizer prompt id."""
 
-DEFAULT_WRITER_PROMPT = GOLD_WRITER_V3
+DEFAULT_WRITER_PROMPT = GOLD_WRITER_V4
 DEFAULT_REVIEWER_PROMPT = GOLD_REVIEWER_V1
 DEFAULT_FINALIZER_PROMPT = GOLD_FINALIZER_V1
+
+INCLUDE_PATTERN = re.compile(r"^<!-- include: ([a-z0-9_]+) -->$", re.MULTILINE)
+"""How a prompt pulls in a shared, separately versioned block.
+
+One level only, and resolved at load time. The alternative - pasting the voice
+contract into every prompt that needs it - means the copies drift, and then two
+prompts claiming the same style produce different articles for a reason nobody
+can see in a diff.
+"""
+
+STANDALONE_PROMPTS = frozenset({GOLD_HUMAN_STYLE_V1})
+"""Fragments meant to be included, not loaded as a prompt in their own right.
+
+They carry no `# SYSTEM RULES` and no `# OUTPUT CONTRACT`, so the section check
+would refuse them - correctly, since sending one to a model on its own would
+produce an article with no rules at all.
+"""
 
 REQUIRED_SECTIONS = ("# SYSTEM RULES", "# OUTPUT CONTRACT")
 """Headings the system prompt must contain.
@@ -80,11 +123,41 @@ def load_prompt(prompt_id: str = DEFAULT_WRITER_PROMPT) -> str:
     if not path.is_file():
         raise FileNotFoundError(f"no prompt template named {prompt_id!r} in {PROMPTS_DIR}")
 
-    text = path.read_text(encoding="utf-8")
+    text = _resolve_includes(path.read_text(encoding="utf-8"), prompt_id)
+    if prompt_id in STANDALONE_PROMPTS:
+        return text
+
     missing = [section for section in REQUIRED_SECTIONS if section not in text]
     if missing:
         raise ValueError(f"prompt {prompt_id!r} is missing required sections: {missing}")
     return text
+
+
+def _resolve_includes(text: str, prompt_id: str) -> str:
+    """Substitute each `<!-- include: id -->` with that fragment's text.
+
+    One level deep, deliberately: a fragment that could include another is a
+    graph, and a prompt assembled from a graph is one nobody can read in full.
+    Raises rather than leaving the marker in place - a prompt that silently
+    shipped with its voice contract missing would still call the API, still cost
+    money, and produce a differently-written article for no visible reason.
+    """
+
+    def substitute(match: re.Match[str]) -> str:
+        included = match.group(1)
+        if included == prompt_id:
+            raise ValueError(f"prompt {prompt_id!r} includes itself")
+        fragment = PROMPTS_DIR / f"{included}.md"
+        if not fragment.is_file():
+            raise FileNotFoundError(
+                f"prompt {prompt_id!r} includes {included!r}, which does not exist"
+            )
+        body = fragment.read_text(encoding="utf-8")
+        if INCLUDE_PATTERN.search(body):
+            raise ValueError(f"included fragment {included!r} contains its own include")
+        return body.strip()
+
+    return INCLUDE_PATTERN.sub(substitute, text)
 
 
 __all__ = [
@@ -92,11 +165,15 @@ __all__ = [
     "DEFAULT_REVIEWER_PROMPT",
     "DEFAULT_WRITER_PROMPT",
     "GOLD_FINALIZER_V1",
+    "GOLD_HUMAN_STYLE_V1",
     "GOLD_REVIEWER_V1",
     "GOLD_WRITER_V1",
     "GOLD_WRITER_V2",
     "GOLD_WRITER_V3",
+    "GOLD_WRITER_V4",
+    "INCLUDE_PATTERN",
     "PROMPTS_DIR",
+    "STANDALONE_PROMPTS",
     "REQUIRED_SECTIONS",
     "load_prompt",
 ]

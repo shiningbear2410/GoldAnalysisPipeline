@@ -172,7 +172,7 @@ def test_full_pipeline_from_fixtures(runs_dir: Path, capsys: pytest.CaptureFixtu
 
     assert payload["status"] == "DRAFTED"
     draft = Path(payload["draft"]).read_text(encoding="utf-8")
-    assert "NHẬN ĐỊNH VÀNG" in draft
+    assert "PHÂN TÍCH VÀNG" in draft
     assert "3314.20" in draft
 
 

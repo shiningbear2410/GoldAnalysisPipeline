@@ -33,7 +33,7 @@ from goldpipeline.schemas.finalizer import (
 
 RUN_ID = "20260828_022701_a83f2c"
 
-ARTICLE = "🕯 NHẬN ĐỊNH VÀNG\n\nGiá gần nhất quanh 3305.90, thị trường đang tích luỹ."
+ARTICLE = "🕯 PHÂN TÍCH VÀNG\n\nGiá gần nhất quanh 3305.90, thị trường đang tích luỹ."
 
 
 def settings() -> FinalizerSettings:

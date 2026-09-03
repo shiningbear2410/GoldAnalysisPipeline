@@ -454,7 +454,7 @@ def test_the_message_carries_what_a_reviewer_needs(runs_dir: Any, tmp_path: Path
 def test_a_long_article_is_chunked_and_reassembles(runs_dir: Any, tmp_path: Path) -> None:
     """Requirement 12.20 - the project's existing exact chunking, reused."""
     long_article = "\n\n".join(f"Đoạn {index}. {CLEAN_ARTICLE}" for index in range(12))
-    run = ready_run(runs_dir, tmp_path, article=long_article)
+    run = ready_run(runs_dir, tmp_path, article=long_article, enforce_contract=False)
     client = RecordingClient()
 
     outcome = deliver(runs_dir, run.run_id, client, chunk_limit=600)

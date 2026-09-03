@@ -39,6 +39,7 @@ from goldpipeline.domain.errors import (
     WriterResponseError,
 )
 from goldpipeline.prompts import DEFAULT_WRITER_PROMPT
+from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.context import AnalysisContext
 from goldpipeline.schemas.manifest import RunError, RunManifest, RunStatus
@@ -50,7 +51,14 @@ from goldpipeline.schemas.writer import (
     WriterStatus,
     WriterWarning,
 )
+from goldpipeline.services.analysis_contract import (
+    describe,
+    inspect_article,
+    is_enforced,
+    missing_article_date,
+)
 from goldpipeline.services.claim_resolver import ClaimPathError, resolve_path
+from goldpipeline.services.market_facts import article_date
 from goldpipeline.services.pipeline import CONTEXT_FILENAME
 from goldpipeline.services.source_guard import (
     SourceGuardReport,
@@ -158,7 +166,12 @@ def _execute(
     response = client.generate(
         WriterRequest(prompt=prompt, run_id=run.run_id, max_tokens=max_tokens)
     )
-    output = _validate_output(response.output, context)
+    # Provenance is absent on Runs created before it existed, and those Runs
+    # were all ANALYSIS - which is exactly what the manifest field itself
+    # defaults to. Reading through a None here would crash the writer on the
+    # oldest Runs in the store.
+    article_type = manifest.provenance.article_type if manifest.provenance else ArticleType.ANALYSIS
+    output = _validate_output(response.output, context, article_type)
 
     warnings = _merge_warnings(output, context, guard)
     article = output.article.strip()
@@ -294,11 +307,16 @@ _MAX_REPORTED_PATHS = 10
 """How many bad paths the error names. Enough to diagnose, bounded for the manifest."""
 
 
-def _validate_output(output: WriterModelOutput, context: AnalysisContext) -> WriterModelOutput:
+def _validate_output(
+    output: WriterModelOutput,
+    context: AnalysisContext,
+    article_type: ArticleType = ArticleType.ANALYSIS,
+) -> WriterModelOutput:
     """Check a provider answer against *this* Run.
 
     Schema validity is already guaranteed by the client. What is checked here is
-    whether the answer is about the right Run and substantial enough to publish -
+    whether the answer is about the right Run, substantial enough to publish, and
+    - since Round 6.4e - shaped like the product it claims to be. All three are
     conditions no schema can express.
     """
     if output.run_id != context.run_id:
@@ -320,8 +338,52 @@ def _validate_output(output: WriterModelOutput, context: AnalysisContext) -> Wri
         raise WriterResponseError("response contains an empty title")
 
     _require_resolvable_claims(output, context)
+    _require_article_shape(output, context, article_type)
 
     return output
+
+
+def _require_article_shape(
+    output: WriterModelOutput, context: AnalysisContext, article_type: ArticleType
+) -> None:
+    """Refuse a draft that is not the shape its product contract describes.
+
+    Runs before the draft is written, so a malformed article never becomes an
+    artifact the reviewer and the finalizer then have to reason about. Only
+    structural facts block - length, sections, disclaimer count, and the one
+    causal wording the prompt forbids outright. Style symptoms are counted and
+    logged; giving them a verdict is a later round's decision, and a connective
+    count is not a judgment about prose.
+    """
+    if not is_enforced(article_type):
+        return
+
+    article = output.article.strip()
+    report = inspect_article(article, article_type)
+
+    expected_date = article_date(context.timing.latest_candle_at)
+    findings = report.blocking
+    if findings:
+        raise WriterResponseError(
+            f"the article does not match the {article_type} output contract: {describe(findings)}",
+            article_type=str(article_type),
+            article_chars=report.chars,
+            codes=[str(finding.code) for finding in findings],
+        )
+    if missing_article_date(article, expected_date):
+        raise WriterResponseError(
+            "the article does not carry the date it was given; it was supplied as "
+            "data to be copied, not computed",
+            expected_date=expected_date,
+        )
+
+    logger.info(
+        "writer.contract type=%s chars=%d within_target=%s style_findings=%s",
+        article_type,
+        report.chars,
+        report.within_target,
+        [str(finding.code) for finding in report.style_findings],
+    )
 
 
 def _require_resolvable_claims(output: WriterModelOutput, context: AnalysisContext) -> None:

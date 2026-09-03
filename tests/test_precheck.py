@@ -26,7 +26,9 @@ def check(runs_dir: Any, tmp_path: Any, article: str, **kwargs: Any) -> Any:
     from goldpipeline.schemas.context import AnalysisContext
     from goldpipeline.schemas.writer import WriterResult
 
-    drafted = make_drafted_run(runs_dir, tmp_path, article=article, **kwargs)
+    drafted = make_drafted_run(
+        runs_dir, tmp_path, article=article, **kwargs, enforce_contract=False
+    )
     run_dir = Path(drafted.run_dir)
     context = AnalysisContext.model_validate_json(
         (run_dir / "context.json").read_text(encoding="utf-8")

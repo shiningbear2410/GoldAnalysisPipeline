@@ -276,7 +276,9 @@ def test_the_injection_fixture_never_reaches_a_final_article(
 ) -> None:
     """Requirement 28, through the command an operator runs."""
     article = (FIXTURES / "article_injection.md").read_text(encoding="utf-8")
-    reviewed = make_reviewed_run(runs_dir, tmp_path, article=article, claims=[])
+    reviewed = make_reviewed_run(
+        runs_dir, tmp_path, article=article, claims=[], enforce_contract=False
+    )
 
     code = invoke(finalize_args(reviewed.run_id, runs_dir, "--json"))
     payload = json.loads(capsys.readouterr().out)

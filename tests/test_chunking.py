@@ -18,7 +18,7 @@ from goldpipeline.services.chunking import (
 )
 
 ARTICLE = (
-    "🕯 NHẬN ĐỊNH VÀNG\n\n"
+    "🕯 PHÂN TÍCH VÀNG\n\n"
     "⚡ Chốt nhanh\n"
     "Giá gần nhất trong dữ liệu quanh 3305.90, thị trường đang tích luỹ.\n\n"
     "⚠️ Lưu ý\n"

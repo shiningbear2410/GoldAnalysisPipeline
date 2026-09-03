@@ -47,7 +47,7 @@ def valid_output(**overrides: Any) -> WriterModelOutput:
         "run_id": RUN_ID,
         "status": WriterStatus.COMPLETED,
         "title": "Nhận định vàng",
-        "article": "🕯 NHẬN ĐỊNH VÀNG\n\nGiá gần nhất quanh 3314.20, thị trường đi ngang.",
+        "article": "🕯 PHÂN TÍCH VÀNG\n\nGiá gần nhất quanh 3314.20, thị trường đi ngang.",
         "source_claims": [],
         "warnings": [],
     }
