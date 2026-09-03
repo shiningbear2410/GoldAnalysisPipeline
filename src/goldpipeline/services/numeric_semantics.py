@@ -71,6 +71,73 @@ class SemanticType(StrEnum):
     UNKNOWN_PRICE_LIKE = "UNKNOWN_PRICE_LIKE"
     """Nothing vouched for it. Treated as a possible fabricated price."""
 
+    # ---- refinements ------------------------------------------------------
+    # Finer meanings a later check needs, each a member of one of the coarse
+    # families above. The scanner in production only ever constructs the five
+    # coarse members, and `family` maps every refinement back to one of them,
+    # so nothing that compares by family changes behaviour. Refinements exist
+    # because a digest must keep "net change +105" apart from "range 139":
+    # both are magnitudes, and one word for both is how they get swapped.
+    #
+    # None of these says where a number came from. ABSOLUTE_PRICE is
+    # ABSOLUTE_PRICE whether MT5, TradingView or any later provider produced
+    # the authoritative value; provenance is a separate field on the fact.
+
+    PRICE_NET_CHANGE = "PRICE_NET_CHANGE"
+    """End minus start over a window. Signed. A magnitude, not a price."""
+
+    PRICE_RANGE = "PRICE_RANGE"
+    """High minus low over a window. Never negative. Not the net change."""
+
+    PERCENT_CHANGE = "PERCENT_CHANGE"
+    """A proportion of a price: ``0.21%``. A percentage."""
+
+    QUANTITY = "QUANTITY"
+    """A measured amount with a unit that is not price: lots, ounces, holdings."""
+
+    MASS_TONNES = "MASS_TONNES"
+    """Tonnes, as ETF flows are reported. ``9.98 tấn`` is never a quote."""
+
+    COUNT = "COUNT"
+    """A whole number of things: sessions, candles, days."""
+
+    MONETARY_NON_PRICE = "MONETARY_NON_PRICE"
+    """Money that is not the instrument's price: ``141 triệu USD`` of inflows."""
+
+    DATE_TIME = "DATE_TIME"
+    """A clock time or calendar date. Digits, but not a number about the market."""
+
+    UNKNOWN = "UNKNOWN"
+    """Nothing vouched for it and nothing says it is a price either.
+
+    Distinct from :attr:`UNKNOWN_PRICE_LIKE` because a bare ``9.98`` and a bare
+    ``4323`` are both unexplained, and only one of them looks like gold.
+    """
+
+    @property
+    def family(self) -> SemanticType:
+        """The coarse meaning this member belongs to.
+
+        The five original members are their own family. Every refinement maps
+        to exactly one of them, so a check written against the coarse
+        vocabulary keeps working when handed a refined value.
+        """
+        return _FAMILY.get(self, self)
+
+
+_FAMILY: dict[SemanticType, SemanticType] = {
+    SemanticType.PRICE_NET_CHANGE: SemanticType.MAGNITUDE,
+    SemanticType.PRICE_RANGE: SemanticType.MAGNITUDE,
+    SemanticType.PERCENT_CHANGE: SemanticType.PERCENTAGE,
+    SemanticType.QUANTITY: SemanticType.NON_MARKET_NUMBER,
+    SemanticType.MASS_TONNES: SemanticType.NON_MARKET_NUMBER,
+    SemanticType.COUNT: SemanticType.NON_MARKET_NUMBER,
+    SemanticType.MONETARY_NON_PRICE: SemanticType.NON_MARKET_NUMBER,
+    SemanticType.DATE_TIME: SemanticType.NON_MARKET_NUMBER,
+    SemanticType.UNKNOWN: SemanticType.UNKNOWN,
+}
+"""Refinement to family. Everything not listed is its own family."""
+
 
 class DerivedFactKind(StrEnum):
     """The closed list of formulas the scanner will reproduce.
@@ -103,8 +170,30 @@ class KnownNumber:
 
         No widening. A magnitude does not become a price because the numbers
         match, which is the entire point of carrying the type around.
+
+        A requirement stated coarsely (``MAGNITUDE``) is met by any member of
+        that family, so a value refined as ``PRICE_RANGE`` satisfies it. A
+        requirement stated finely (``PRICE_NET_CHANGE``) is met only by that
+        exact meaning - a range is not a net change, whatever the family. For
+        the coarse members production constructs today this is identity.
         """
+        if required.family is required:
+            return self.semantic.family is required
         return self.semantic is required
+
+
+REFINED_DERIVED_KIND: dict[DerivedFactKind, SemanticType] = {
+    DerivedFactKind.NET_CHANGE: SemanticType.PRICE_NET_CHANGE,
+    DerivedFactKind.NET_CHANGE_PERCENT: SemanticType.PERCENT_CHANGE,
+    DerivedFactKind.WINDOW_RANGE: SemanticType.PRICE_RANGE,
+}
+"""What each derived formula means, in the refined vocabulary.
+
+The formula catalog itself still labels its values with the coarse family -
+that is production, and it is not touched. This table is how a later check
+asks "which magnitude is this?" without the catalog having to change first.
+Complete by construction; a test holds it equal to the enum.
+"""
 
 
 # --------------------------------------------------------------------------
@@ -237,6 +326,7 @@ def rendered_as(value: Decimal, literal: str) -> bool:
 
 
 __all__ = [
+    "REFINED_DERIVED_KIND",
     "DerivedFactKind",
     "KnownNumber",
     "SemanticType",
