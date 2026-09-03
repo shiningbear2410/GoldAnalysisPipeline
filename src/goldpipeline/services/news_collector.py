@@ -37,7 +37,10 @@ from goldpipeline.domain.errors import NewsConfigurationError, NewsError, NewsPa
 from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.news import (
     COVERING_STOPS,
+    DEFAULT_LOOKBACK,
     MAX_ITEM_CHARS,
+    MAX_LOOKBACK,
+    MIN_LOOKBACK,
     CollectionOutcome,
     CuratedItem,
     CuratedNews,
@@ -61,16 +64,6 @@ DEFAULT_CHANNELS: tuple[str, ...] = ("tintucvnws", "pcnewsfx", "ktnews24", "UGLi
 
 Server-side configuration, never read from a page. A channel that appears in
 scraped text is content, not a source.
-"""
-
-DEFAULT_LOOKBACK = timedelta(hours=24)
-MIN_LOOKBACK = timedelta(hours=1)
-MAX_LOOKBACK = timedelta(days=7)
-"""Bounds on the requested window.
-
-Seven days is the ceiling because a preview page holds twenty messages: asking
-for a month means paginating a busy channel dozens of times for news nobody will
-read against this morning's candles.
 """
 
 DEFAULT_MAX_PAGES_PER_SOURCE = 80

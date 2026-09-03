@@ -28,6 +28,22 @@ from goldpipeline.schemas.common import StrictModel, UtcDatetime
 
 NEWS_SCHEMA_VERSION = "1.0.0"
 
+DEFAULT_LOOKBACK = timedelta(hours=24)
+MIN_LOOKBACK = timedelta(hours=1)
+MAX_LOOKBACK = timedelta(days=7)
+"""The one authority on how far back a news window may reach.
+
+Three modules need these bounds - the collector that walks the pages, the
+producer request that names a window, and the preference that remembers one -
+and until they lived here there were two copies with a comment on each saying it
+matched the other. That is the arrangement where the third copy disagrees.
+
+Seven days is the ceiling for a concrete reason: a preview page holds twenty
+messages, so a month of a busy channel is dozens of pages of news nobody will
+read against this morning's candles. One hour is the floor because a shorter
+window is a question about the last few posts, not about the market.
+"""
+
 MAX_ITEM_CHARS = 4000
 """Hard ceiling on one stored item's normalized text.
 
@@ -260,7 +276,10 @@ class CuratedNews(StrictModel):
 
 
 __all__ = [
+    "DEFAULT_LOOKBACK",
     "MAX_ITEM_CHARS",
+    "MAX_LOOKBACK",
+    "MIN_LOOKBACK",
     "NEWS_SCHEMA_VERSION",
     "CollectionOutcome",
     "CuratedItem",

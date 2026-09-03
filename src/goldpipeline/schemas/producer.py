@@ -31,7 +31,12 @@ from pydantic import Field, field_validator
 
 from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import StrictModel, UtcDatetime
-from goldpipeline.schemas.news import CollectionOutcome
+from goldpipeline.schemas.news import (
+    DEFAULT_LOOKBACK,
+    MAX_LOOKBACK,
+    MIN_LOOKBACK,
+    CollectionOutcome,
+)
 
 PRODUCER_SCHEMA_VERSION = "1"
 """Version of the producer request and result contracts."""
@@ -69,16 +74,15 @@ slashes, dots-at-the-front and everything else that could turn an id into a path
 caller generates, not a sentence a user typed.
 """
 
-DEFAULT_NEWS_LOOKBACK = timedelta(hours=24)
-MIN_NEWS_LOOKBACK = timedelta(hours=1)
-MAX_NEWS_LOOKBACK = timedelta(days=7)
-"""Bounds on the requested news window.
+DEFAULT_NEWS_LOOKBACK = DEFAULT_LOOKBACK
+MIN_NEWS_LOOKBACK = MIN_LOOKBACK
+MAX_NEWS_LOOKBACK = MAX_LOOKBACK
+"""The collector's bounds, under this module's names.
 
-The same bounds the collector enforces, restated here so a request that could
-never be honoured is refused while it is still only a request. Seven days is the
-ceiling for the collector's reason: a preview page holds twenty messages, and a
-month of a busy channel is dozens of pages of news nobody will read against this
-morning's candles.
+Aliases rather than copies. A request that could never be honoured is refused
+while it is still only a request, and the numbers it is refused against are the
+ones the collector will actually enforce - not a second set that happens to
+agree today.
 """
 
 MAX_CLOCK_SKEW = timedelta(minutes=5)

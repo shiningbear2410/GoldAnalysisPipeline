@@ -748,6 +748,25 @@ class RemoteArticleTypeNotAllowedError(PipelineError):
     code = "REMOTE_ARTICLE_TYPE_NOT_ALLOWED"
 
 
+# --- operator preferences ------------------------------------------------
+
+
+class PreferencesUnavailableError(PipelineError):
+    """The stored preferences exist but cannot be used.
+
+    Raised instead of quietly falling back to defaults. An operator who chose
+    Sonnet 5 last week and whose file was truncated by a power cut must be told
+    the file is damaged, not handed a selection nobody made - and a mutation on
+    top of that file must refuse rather than write one chosen field beside three
+    guessed ones.
+
+    Never raised for an *absent* file. Having expressed no preference is a
+    perfectly good state, and it resolves to the documented defaults.
+    """
+
+    code = "PREFERENCES_UNAVAILABLE"
+
+
 # --- internal producer ---------------------------------------------------
 
 
@@ -1117,6 +1136,7 @@ __all__ = [
     "PublisherNotApprovedError",
     "PublisherPermissionError",
     "PublisherPreviousAttemptUncertainError",
+    "PreferencesUnavailableError",
     "ProducerRequestError",
     "PublisherRateLimitError",
     "PublisherRejectedError",
