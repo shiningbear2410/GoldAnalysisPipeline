@@ -17,7 +17,7 @@ import secrets
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +89,7 @@ from goldpipeline.schemas.automation import AutomationTickResult, TickStatus
 from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.ingestion import IngestOutcome, IngestResult
 from goldpipeline.schemas.orchestration import PipelineMode, PipelineStatus
+from goldpipeline.schemas.producer import ProducerOutcome, ProducerRequest, ProducerResult
 from goldpipeline.schemas.quality import DataQuality
 from goldpipeline.schemas.runtime_config import (
     ConfigKey,
@@ -111,7 +112,7 @@ from goldpipeline.services.automation import (
 )
 from goldpipeline.services.automation_state import AutomationStore, read_defer, read_json
 from goldpipeline.services.finalizer import finalize_run
-from goldpipeline.services.inbox import Inbox
+from goldpipeline.services.inbox import INDEX, Inbox, Ledger
 from goldpipeline.services.ingestion import (
     IngestionContext,
     ingest_file,
@@ -126,6 +127,7 @@ from goldpipeline.services.orchestrator import (
     run_pipeline,
 )
 from goldpipeline.services.pipeline import create_run, validate_sources
+from goldpipeline.services.producer import LiveNewsCollector, build_request, produce
 from goldpipeline.services.publish_gate import gate_publish
 from goldpipeline.services.publisher import publish_run
 from goldpipeline.services.reviewer import review_draft
@@ -398,6 +400,42 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--file", required=True, type=Path, metavar="PATH")
     submit.add_argument("--inbox-dir", type=Path, default=None)
     submit.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+
+    producer = subparsers.add_parser(
+        "producer-generate",
+        help=(
+            "Collect news and place one analysis event in the inbox. Does not "
+            "process it, call a model, or publish anything."
+        ),
+    )
+    producer.add_argument(
+        "--lookback",
+        default="24h",
+        metavar="DURATION",
+        help="News window, e.g. 6h, 12h, 24h (default), 48h, 72h, 7d.",
+    )
+    producer.add_argument(
+        "--request-id",
+        default=None,
+        metavar="ID",
+        help=(
+            "Idempotency handle. Reusing one never creates a second Run. "
+            "Generated and printed when omitted."
+        ),
+    )
+    producer.add_argument(
+        "--requested-at",
+        type=_parse_now,
+        default=None,
+        metavar="ISO8601",
+        help=(
+            "End of the news window, with an explicit offset. Defaults to now. "
+            "A retry must repeat both --request-id and --requested-at to be "
+            "recognised as the same request; both are printed."
+        ),
+    )
+    producer.add_argument("--inbox-dir", type=Path, default=None)
+    producer.add_argument("--json", action="store_true", help="Emit the result as JSON.")
 
     reconcile_parser = subparsers.add_parser(
         "inbox-reconcile",
@@ -1532,6 +1570,98 @@ def _cmd_inbox_submit(args: argparse.Namespace) -> int:
         print(f"Submitted: {event.event_id}")
         print(f"Waiting at: {target}")
     return EXIT_OK
+
+
+_LOOKBACK_UNITS = {"m": 60, "h": 3_600, "d": 86_400}
+"""Suffixes ``--lookback`` accepts. Minutes, hours, days - nothing ambiguous."""
+
+
+def _parse_lookback(value: str) -> timedelta:
+    """Turn ``24h`` into a duration.
+
+    Raises:
+        _UsageError: The text is not a duration. Deliberately not defaulted to
+            24h on a typo: silently collecting a different window than the one
+            asked for is exactly the kind of quiet substitution this pipeline
+            refuses everywhere else.
+    """
+    text = value.strip().lower()
+    if len(text) < 2 or text[-1] not in _LOOKBACK_UNITS or not text[:-1].isdigit():
+        raise _UsageError(
+            f"--lookback must be a number followed by m, h or d (got {value!r}); "
+            "for example 6h, 24h or 7d"
+        )
+    return timedelta(seconds=int(text[:-1]) * _LOOKBACK_UNITS[text[-1]])
+
+
+def _generate_request_id(now: datetime) -> str:
+    """A fresh idempotency handle for a manual run.
+
+    Generated once, here, and printed - so an operator whose terminal died
+    mid-command can retry with the same id and get the original event back
+    instead of a second one.
+    """
+    return f"cli-{now.strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
+
+
+def _cmd_producer_generate(args: argparse.Namespace) -> int:
+    """Collect news and submit one analysis event. Nothing downstream runs.
+
+    Both halves of the request's identity are the caller's to supply, and both
+    are printed. A retry that repeats only the id is asking a *different*
+    question - the window has moved - and is correctly answered with a conflict
+    rather than a second event.
+    """
+    moment = utc_now()
+    request_id = args.request_id or _generate_request_id(moment)
+    request = build_request(
+        request_id=request_id,
+        requested_at=args.requested_at or moment,
+        lookback=_parse_lookback(args.lookback),
+    )
+
+    inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env(_config_env())
+    inbox = Inbox(inbox_root)
+    inbox.ensure_layout()
+
+    result = produce(
+        request,
+        collector=LiveNewsCollector(),
+        inbox=inbox,
+        ledger=Ledger(inbox.directory(INDEX)),
+        now=moment,
+    )
+    return _report_producer(result, request=request, as_json=args.json)
+
+
+def _report_producer(result: ProducerResult, *, request: ProducerRequest, as_json: bool) -> int:
+    """Print the outcome. Counts and ids only - never collected news text."""
+    if as_json:
+        print(result.model_dump_json(indent=2))
+    else:
+        stamp = request.requested_at.isoformat().replace("+00:00", "Z")
+        print(f"Outcome:    {result.outcome}")
+        print(f"Request:    {result.request_id}")
+        print(f"Requested:  {stamp}")
+        print(f"Event:      {result.event_id or '-'}")
+        if result.run_id:
+            print(f"Run:        {result.run_id}")
+        if result.news_outcome is not None:
+            print(f"News:       {result.news_outcome}")
+            print(f"Coverage:   {'complete' if result.coverage_complete else 'partial'}")
+            print(f"Items:      {result.item_count}")
+        if result.detail:
+            print(f"Detail:     {result.detail}")
+    return _producer_exit_code(result)
+
+
+def _producer_exit_code(result: ProducerResult) -> int:
+    """A refusal is not a crash, and a repeat is not a failure."""
+    if result.succeeded:
+        return EXIT_OK
+    if result.outcome is ProducerOutcome.INVALID_REQUEST:
+        return EXIT_INVALID_DATA
+    return EXIT_BLOCKED
 
 
 def _cmd_inbox_reconcile(args: argparse.Namespace) -> int:
@@ -2783,6 +2913,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "pipeline-ingest": _cmd_pipeline_ingest,
         "inbox-process-one": _cmd_inbox_process_one,
         "inbox-submit": _cmd_inbox_submit,
+        "producer-generate": _cmd_producer_generate,
         "inbox-reconcile": _cmd_inbox_reconcile,
         "mt5-check": _cmd_mt5_check,
         "automation-run-once": _cmd_automation_run_once,

@@ -748,6 +748,23 @@ class RemoteArticleTypeNotAllowedError(PipelineError):
     code = "REMOTE_ARTICLE_TYPE_NOT_ALLOWED"
 
 
+# --- internal producer ---------------------------------------------------
+
+
+class ProducerRequestError(PipelineError):
+    """A producer request that cannot be interpreted at all.
+
+    Raised while *building* the request, before anything is collected or
+    written, so a malformed id or an unusable window costs no network call and
+    leaves no inbox file. Routine refusals - an unfinished article type, a
+    failed collection - are outcomes on
+    :class:`~goldpipeline.schemas.producer.ProducerResult`, not exceptions;
+    this is for input that never became a request in the first place.
+    """
+
+    code = "PRODUCER_REQUEST_INVALID"
+
+
 # --- remote intake (optional upstream source) ----------------------------
 
 
@@ -1100,6 +1117,7 @@ __all__ = [
     "PublisherNotApprovedError",
     "PublisherPermissionError",
     "PublisherPreviousAttemptUncertainError",
+    "ProducerRequestError",
     "PublisherRateLimitError",
     "PublisherRejectedError",
     "PublisherResponseError",
