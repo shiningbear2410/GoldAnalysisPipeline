@@ -31,6 +31,7 @@ from goldpipeline.adapters.windows_credentials import (
     WindowsCredentialSecretProvider,
 )
 from goldpipeline.cli import EXIT_ERROR, EXIT_INVALID_DATA, EXIT_OK, main
+from goldpipeline.schemas.secrets import SecretName
 
 SENTINELS = (FAKE_API_KEY, FAKE_OPENAI_KEY, TELEGRAM_TOKEN_SENTINEL)
 
@@ -189,6 +190,8 @@ def test_setting_a_credential_prompts_invisibly(
     ("short", "entry"),
     [
         ("anthropic", "anthropic_api_key"),
+        ("deepseek", "deepseek_api_key"),
+        ("ingest", "ingest_token"),
         ("openai", "openai_api_key"),
         ("telegram", "telegram_bot_token"),
     ],
@@ -496,3 +499,117 @@ def test_the_credential_commands_open_no_socket(
 
     monkeypatch.setattr(socket.socket, "connect", explode)
     assert invoke(["secrets-status"]) == EXIT_OK
+
+
+# --- the table that must not go stale ---------------------------------------
+
+
+def test_every_credential_can_be_typed_in() -> None:
+    """The regression this file exists for after Round 6.3.
+
+    ``secrets-status`` iterates :class:`SecretName`, the provider accepts any
+    member, and persistent config refuses each by name - so a new credential
+    arrives supported everywhere except the one hand-written table, and nothing
+    says so until an operator tries to store it. That is precisely how
+    ``DEEPSEEK_API_KEY`` reached an activation round unstorable, with
+    ``INGEST_TOKEN`` in the same state behind it.
+
+    Equality rather than a subset: a member here that is not a real credential
+    would be just as wrong as one missing, and "which of these two lists is
+    stale?" is not a question anybody should have to answer at 3am.
+    """
+    assert set(cli._SECRET_CHOICES.values()) == set(SecretName)
+
+
+def test_each_short_name_means_exactly_one_credential() -> None:
+    """No alias, and no two names for the same thing.
+
+    Two keys mapping to one credential would make ``secrets-delete`` ambiguous
+    in a way that only shows up when somebody removes the wrong one.
+    """
+    values = list(cli._SECRET_CHOICES.values())
+    assert len(values) == len(set(values))
+    assert len(cli._SECRET_CHOICES) == len(SecretName)
+
+
+def test_the_short_names_are_stable() -> None:
+    """An operator's muscle memory and any written runbook depend on these."""
+    assert sorted(cli._SECRET_CHOICES) == [
+        "anthropic",
+        "deepseek",
+        "ingest",
+        "openai",
+        "telegram",
+    ]
+
+
+@pytest.mark.parametrize("command", ["secrets-set", "secrets-delete"])
+def test_both_commands_offer_the_same_credentials(command: str) -> None:
+    """They share the table, so neither can drift from the other."""
+    for short in cli._SECRET_CHOICES:
+        args = cli.build_parser().parse_args([command, short])
+        assert cli._SECRET_CHOICES[args.name] in set(SecretName)
+
+
+@pytest.mark.parametrize("command", ["secrets-set", "secrets-delete"])
+def test_an_unknown_credential_is_refused(command: str) -> None:
+    for unknown in ("gemini", "DEEPSEEK", "deepseek-api-key", "", "all"):
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args([command, unknown])
+
+
+def test_status_and_set_agree_on_the_known_credentials(
+    store: FakeKeyringModule, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """What the status lists is exactly what an operator can act on.
+
+    A credential reported as MISSING that cannot then be stored is a dead end,
+    and the operator has no way to tell from the status line which kind it is.
+    """
+    assert invoke(["secrets-status", "--json"]) == EXIT_OK
+    reported = {entry["name"] for entry in json.loads(capsys.readouterr().out)["secrets"]}
+
+    assert reported == {name.value for name in cli._SECRET_CHOICES.values()}
+
+
+@pytest.mark.parametrize("short", ["deepseek", "ingest"])
+def test_the_newly_exposed_credentials_prompt_invisibly(
+    store: FakeKeyringModule,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    short: str,
+) -> None:
+    """The two that were unreachable get the same hidden-input treatment."""
+    import getpass
+
+    sentinel = "not-a-real-credential-value"  # noqa: S105 - fixture, never a secret
+    asked: list[str] = []
+
+    def prompt(message: str = "") -> str:
+        asked.append(message)
+        return sentinel
+
+    monkeypatch.setattr(getpass, "getpass", prompt)
+
+    code = invoke(["secrets-set", short])
+    captured = capsys.readouterr()
+
+    assert code == EXIT_OK
+    assert asked, "prompted, not passed as an argument"
+    assert sentinel not in captured.out
+    assert sentinel not in captured.err
+    assert sentinel not in " ".join(asked), "the prompt names the credential, not its value"
+
+
+@pytest.mark.parametrize("short", ["deepseek", "ingest"])
+def test_storing_them_writes_no_file(
+    store: FakeKeyringModule, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, short: str
+) -> None:
+    """No .env, no config.json, no fallback on disk."""
+    import getpass
+
+    monkeypatch.setattr(getpass, "getpass", lambda *a, **k: "a-value")
+    monkeypatch.chdir(tmp_path)
+
+    assert invoke(["secrets-set", short]) == EXIT_OK
+    assert list(tmp_path.iterdir()) == [], "the credential store is the only destination"

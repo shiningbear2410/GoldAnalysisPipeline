@@ -2481,10 +2481,33 @@ def _cmd_automation_task_plan(args: argparse.Namespace) -> int:
 
 _SECRET_CHOICES = {
     "anthropic": SecretName.ANTHROPIC_API_KEY,
+    "deepseek": SecretName.DEEPSEEK_API_KEY,
+    "ingest": SecretName.INGEST_TOKEN,
     "openai": SecretName.OPENAI_API_KEY,
     "telegram": SecretName.TELEGRAM_BOT_TOKEN,
 }
-"""Short names an operator types, mapped to the credential each stands for."""
+"""Short names an operator types, mapped to the credential each stands for.
+
+**Every** :class:`SecretName` appears here exactly once, and a test enforces it.
+That rule exists because this table is the only part of the credential path that
+is written out by hand: ``secrets-status`` iterates the enum, the provider takes
+any member, and ``FORBIDDEN_KEYS`` is checked by name - so a new credential
+arrives fully supported everywhere except here, and the gap is invisible until
+somebody tries to store one.
+
+Which is exactly what happened. ``DEEPSEEK_API_KEY`` shipped as a real member,
+was reported by ``secrets-status`` as missing, was refused from persistent
+config by name, and could not be stored at all; ``INGEST_TOKEN`` had been in the
+same state, unnoticed, since remote intake is off. The short names are kept
+hand-written rather than derived - ``telegram`` for ``TELEGRAM_BOT_TOKEN`` is a
+kindness to whoever is typing - so the test, not a derivation rule, is what
+keeps the table honest.
+
+``REQUIRED``, ``CONDITIONAL`` and ``OPTIONAL`` say when a credential's *absence*
+is a fault. None of them says whether an operator may store one, and every
+member here is storable: a credential nobody can enter is not optional, it is
+unusable.
+"""
 
 
 def _credential_store() -> WindowsCredentialSecretProvider:
