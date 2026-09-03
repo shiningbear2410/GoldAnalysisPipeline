@@ -45,6 +45,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from goldpipeline.domain.errors import PreferencesUnavailableError
 from goldpipeline.schemas.article import ArticleType
+from goldpipeline.schemas.generation import GenerationSelection
 from goldpipeline.schemas.preferences import (
     DEFAULT_PREFERENCES,
     PREFERENCES_FILENAME,
@@ -309,6 +310,27 @@ class PreferencesStore:
         )
 
 
+def resolve_generation(store: PreferencesStore) -> GenerationSelection:
+    """Freeze the current preferences into one Run's generation choice.
+
+    The single point where mutable operator state becomes immutable Run
+    evidence. Called once, at Run creation, and never again for that Run.
+
+    Fails closed on a damaged file rather than falling back to defaults. The
+    difference matters: an operator who selected DeepSeek and whose file was
+    truncated must not have an article quietly written by Claude and stamped
+    with a selection nobody made. An *absent* file is not damage - having
+    expressed no preference is a valid state, and it resolves to the documented
+    defaults with ``preference_source=DEFAULT`` recorded so an audit can tell
+    the two apart.
+
+    Raises:
+        PreferencesUnavailableError: The stored preferences cannot be used.
+    """
+    current = store.read()
+    return GenerationSelection.from_preferences(current.usable, source=current.source)
+
+
 def _first_problem(exc: PydanticValidationError) -> str:
     """One readable sentence from a validation error.
 
@@ -329,4 +351,5 @@ __all__ = [
     "PreferencesRead",
     "PreferencesSource",
     "PreferencesStore",
+    "resolve_generation",
 ]

@@ -693,28 +693,45 @@ def test_no_live_preferences_file_exists() -> None:
     assert not (Path("automation") / PREFERENCES_FILENAME).exists()
 
 
-def test_nothing_reads_preferences_in_the_pipeline_yet() -> None:
-    """The mapping is documented and deliberately not wired.
+def test_only_two_seams_read_preferences() -> None:
+    """Preferences are read at exactly two boundaries, and nowhere else.
 
-    Preferences will drive the writer and the finalizer, and the producer's
-    article type and window. None of that happens this round, and a grep is the
-    cheapest way to notice the day somebody wires it without meaning to.
+    Round 6.2 wired them in. The risk that replaced "nothing reads them" is
+    subtler: a stage reading them for itself. That is what would let a
+    preference changed mid-Run reach the finalizer, so the seams are pinned by
+    name rather than by intention.
     """
     import ast
 
-    for name in (
-        "writer.py",
-        "finalizer.py",
-        "producer.py",
-        "reviewer.py",
-        "orchestrator.py",
-        "automation.py",
-    ):
-        source = Path("src/goldpipeline/services") / name
+    allowed = {
+        "services/ingestion.py",  # once, at Run creation, into the snapshot
+        "services/producer.py",  # once, at producer invocation
+        "services/automation.py",  # carries the store into the ingestion context
+        "cli.py",  # constructs the store
+    }
+
+    for source in Path("src/goldpipeline").rglob("*.py"):
+        relative = source.relative_to(Path("src/goldpipeline")).as_posix()
+        if relative in allowed or relative.startswith(("schemas/", "services/preferences")):
+            continue
         modules = {
             node.module or ""
             for node in ast.walk(ast.parse(source.read_text(encoding="utf-8")))
             if isinstance(node, ast.ImportFrom)
         }
-        assert "goldpipeline.services.preferences" not in modules, name
-        assert "goldpipeline.schemas.preferences" not in modules, name
+        assert "goldpipeline.services.preferences" not in modules, relative
+
+
+@pytest.mark.parametrize("name", ["writer.py", "finalizer.py", "reviewer.py", "orchestrator.py"])
+def test_no_stage_reads_preferences_for_itself(name: str) -> None:
+    """A stage that read them could be given a different answer than the Run's."""
+    import ast
+
+    source = Path("src/goldpipeline/services") / name
+    modules = {
+        node.module or ""
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8")))
+        if isinstance(node, ast.ImportFrom)
+    }
+    assert "goldpipeline.services.preferences" not in modules
+    assert "goldpipeline.schemas.preferences" not in modules

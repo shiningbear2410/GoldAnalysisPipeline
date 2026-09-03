@@ -61,6 +61,7 @@ from goldpipeline.domain.errors import (
     MarketDataConfigurationError,
     MarketDataError,
     PipelineError,
+    PreferencesUnavailableError,
     PublisherConfigurationError,
     RemoteIntakeError,
     ReviewConfigurationError,
@@ -98,6 +99,7 @@ from goldpipeline.services.orchestrator import (
     PipelineRunResult,
     resume_pipeline,
 )
+from goldpipeline.services.preferences import PreferencesStore
 from goldpipeline.services.review_delivery import deliver_review, is_eligible
 from goldpipeline.services.run_lock import WORKER_LOCK_FILENAME, RunLock
 from goldpipeline.storage.atomic import encode_json
@@ -153,6 +155,13 @@ class WorkerContext:
     settings: AutomationSettings
     market_source: MarketDataSource
     clients: PipelineClients
+    preferences: PreferencesStore | None = None
+    """Where each new Run's generation choice is read from, once.
+
+    ``None`` disables the snapshot entirely and every stage resolves its own
+    model from configuration - the behaviour of every tick before this existed.
+    """
+
     expected_symbol: str | None = None
     publisher_target: str | None = None
     """The configured Telegram destination, read once by the caller.
@@ -852,7 +861,8 @@ def classify(error: PipelineError) -> RetryClass:
         | ReviewConfigurationError
         | FinalizeConfigurationError
         | PublisherConfigurationError
-        | MarketDataConfigurationError,
+        | MarketDataConfigurationError
+        | PreferencesUnavailableError,
     ):
         return RetryClass.CONFIGURATION
     if isinstance(error, MarketDataError):
@@ -956,6 +966,16 @@ def _ingest_one(
     """Ingest one claimed event, then advance the Run it produced."""
     result = ingest_claimed(ingestion, claimed, now=moment)
 
+    if result.outcome is IngestOutcome.PREFERENCES_UNAVAILABLE:
+        # Operator-repairable and nothing durable was written, so the event is
+        # back in the queue and simply waits. Deliberately a defer rather than a
+        # failure: the analysis is fine, and the file beside it is what needs a
+        # person. Never exhausted, for the same reason a configuration retry is
+        # not - fixing the file should resume the work, not require clearing a
+        # backoff record too.
+        _handle_preferences_unavailable(context, tick, result, moment)
+        return
+
     if result.outcome is IngestOutcome.MARKET_UNAVAILABLE:
         # The ingestion service put the event back in the queue. Whether it
         # waits or needs a person depends on *which* market failure it was.
@@ -980,6 +1000,23 @@ def _ingest_one(
 
     if result.succeeded and result.run_id:
         _advance(context, tick, result.run_id, moment)
+
+
+def _handle_preferences_unavailable(
+    context: WorkerContext, tick: _Tick, result: IngestResult, moment: datetime
+) -> None:
+    """Put a damaged-preferences event back to wait for a person."""
+    queued = context.inbox.directory(INCOMING) / f"{result.event_id}.json"
+    if not queued.is_file():  # pragma: no cover - the service just put it there
+        return
+    _defer(
+        context,
+        tick,
+        queued,
+        code=result.failure_code or "PREFERENCES_UNAVAILABLE",
+        reason=result.detail or "the stored generation preferences cannot be used",
+        moment=moment,
+    )
 
 
 def _handle_market_unavailable(
@@ -1026,6 +1063,7 @@ def _ingestion_context(context: WorkerContext) -> IngestionContext:
         store=context.store,
         market_source=context.market_source,
         expected_symbol=context.expected_symbol,
+        preferences=context.preferences,
     )
 
 

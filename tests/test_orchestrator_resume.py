@@ -346,9 +346,9 @@ def test_resuming_at_the_gate_needs_no_ai_clients(runs_dir: Path, tmp_path: Path
     """
     finalized = make_finalized_run(runs_dir, tmp_path)
     clients = PipelineClients(
-        writer=exploding_factory("writer"),
+        writer=lambda _selection: exploding_factory("writer")(),
         reviewer=exploding_factory("reviewer"),
-        finalizer=exploding_factory("finalizer"),
+        finalizer=lambda _selection: exploding_factory("finalizer")(),
         publisher=exploding_factory("publisher"),
     )
 
@@ -363,9 +363,9 @@ def test_publishing_an_approved_run_needs_no_ai_clients(runs_dir: Path, tmp_path
     ready = make_published_ready_run(runs_dir, tmp_path)
     publisher = FakePublisherClient()
     clients = PipelineClients(
-        writer=exploding_factory("writer"),
+        writer=lambda _selection: exploding_factory("writer")(),
         reviewer=exploding_factory("reviewer"),
-        finalizer=exploding_factory("finalizer"),
+        finalizer=lambda _selection: exploding_factory("finalizer")(),
         publisher=lambda: (publisher, TEST_TARGET_CHAT),
     )
 
@@ -412,10 +412,10 @@ def test_the_lock_is_held_while_a_stage_runs(runs_dir: Path, tmp_path: Path) -> 
     tracked = make_tracked_clients()
     wired = tracked.as_pipeline_clients()
 
-    def watching_writer() -> Any:
+    def watching_writer(selection: Any = None) -> Any:
         seen.append((run_dir / LOCK_FILENAME).is_file())
         assert wired.writer is not None
-        return wired.writer()
+        return wired.writer(selection)
 
     clients = PipelineClients(
         writer=watching_writer, reviewer=wired.reviewer, finalizer=wired.finalizer

@@ -30,6 +30,7 @@ from pathlib import Path
 from goldpipeline.adapters.base import AnalysisSource, MarketDataSource
 from goldpipeline.domain.errors import PipelineError
 from goldpipeline.schemas.context import AnalysisContext
+from goldpipeline.schemas.generation import GenerationSelection
 from goldpipeline.schemas.manifest import RunError, RunManifest, RunProvenance, RunStatus
 from goldpipeline.services.context_builder import build_context
 from goldpipeline.services.normalizer import normalize_analysis, normalize_market_data
@@ -67,6 +68,7 @@ def create_run(
     store: RunStore,
     expected_symbol: str | None = None,
     run_id: str | None = None,
+    generation: GenerationSelection | None = None,
     now: datetime | None = None,
 ) -> RunResult:
     """Execute the Round 1 pipeline and persist an immutable Run.
@@ -77,6 +79,11 @@ def create_run(
         store: Run storage root.
         expected_symbol: Instrument the caller expects; mismatches are fatal.
         run_id: Force a specific id. Mainly for tests; collides loudly.
+        generation: The provider and model this Run will generate with, already
+            resolved by the caller. Recorded in provenance and never re-read, so
+            a preference changed mid-Run cannot reach the stages that follow.
+            ``None`` keeps the legacy behaviour: each stage resolves its own
+            model from configuration, exactly as it did before preferences.
         now: Injection point for tests; defaults to the current UTC time.
 
     Returns:
@@ -98,6 +105,7 @@ def create_run(
             analysis_source=analysis_source,
             market_source=market_source,
             expected_symbol=expected_symbol,
+            generation=generation,
             now=now,
         )
     except PipelineError as exc:
@@ -127,6 +135,7 @@ def _execute(
     analysis_source: AnalysisSource,
     market_source: MarketDataSource,
     expected_symbol: str | None,
+    generation: GenerationSelection | None,
     now: datetime | None,
 ) -> AnalysisContext:
     """Ingest, normalize and persist. Raises :class:`PipelineError` on bad data."""
@@ -147,6 +156,7 @@ def _execute(
     # is the only one who knows what it took to load it.
     manifest.provenance = RunProvenance(
         article_type=loaded_analysis.article_type,
+        generation=generation,
         analysis_origin=loaded_analysis.origin,
         market_origin=loaded_market.origin,
         analysis=dict(loaded_analysis.provenance),

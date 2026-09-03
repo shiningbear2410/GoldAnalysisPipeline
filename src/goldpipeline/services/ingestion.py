@@ -40,9 +40,11 @@ from goldpipeline.domain.errors import (
     InboxPayloadError,
     MarketDataError,
     PipelineError,
+    PreferencesUnavailableError,
 )
 from goldpipeline.domain.run_id import generate_run_id
 from goldpipeline.schemas.common import utc_now
+from goldpipeline.schemas.generation import GenerationSelection
 from goldpipeline.schemas.inbox import AnalysisEvent
 from goldpipeline.schemas.ingestion import (
     IngestOutcome,
@@ -53,6 +55,7 @@ from goldpipeline.schemas.ingestion import (
 from goldpipeline.schemas.manifest import RunStatus
 from goldpipeline.services.inbox import ClaimedEvent, Inbox, Ledger
 from goldpipeline.services.pipeline import create_run
+from goldpipeline.services.preferences import PreferencesStore, resolve_generation
 from goldpipeline.storage.run_store import RunStore
 
 logger = logging.getLogger(__name__)
@@ -71,6 +74,13 @@ class IngestionContext:
     store: RunStore
     market_source: MarketDataSource
     expected_symbol: str | None = None
+    preferences: PreferencesStore | None = None
+    """Where the generation choice is read from, once, per Run.
+
+    ``None`` keeps the pre-preferences behaviour: no snapshot is taken and every
+    stage resolves its own model from configuration. That is what an operator
+    driving a single Run by hand gets, and what every historical Run had.
+    """
 
     @property
     def ledger(self) -> Ledger:
@@ -140,6 +150,24 @@ def ingest_claimed(
     if settled is not None:
         return settled
 
+    # Resolve the generation choice before reserving, for the same reason the
+    # market is fetched first: nothing durable exists yet, so putting the event
+    # back is provably safe. A damaged preferences file is operator-repairable
+    # and must not consume the event or half-create a Run.
+    try:
+        generation = _generation_for(context)
+    except PreferencesUnavailableError as exc:
+        returned = context.inbox.release(path)
+        logger.warning("ingest.preferences_unavailable event=%s", event.event_id)
+        return IngestResult(
+            outcome=IngestOutcome.PREFERENCES_UNAVAILABLE,
+            event_id=event.event_id,
+            payload_sha256=digest,
+            source_path=str(returned),
+            failure_code=exc.code,
+            detail=f"[{exc.code}] {exc.message}",
+        )
+
     # Fetch before reserving. A terminal that is briefly unreachable must leave
     # no ledger entry and no Run - only then is putting the event back safe.
     try:
@@ -168,7 +196,7 @@ def ingest_claimed(
         )
     )
 
-    return _create(context, claimed, event, run_id=run_id, now=moment)
+    return _create(context, claimed, event, run_id=run_id, generation=generation, now=moment)
 
 
 # --------------------------------------------------------------------------
@@ -255,12 +283,25 @@ def _check_ledger(
     )
 
 
+def _generation_for(context: IngestionContext) -> GenerationSelection | None:
+    """The generation choice for the Run about to be created.
+
+    Read exactly once, here, and handed to ``create_run`` so it lands in the
+    Run's provenance before the writer exists. No later stage reads preferences
+    again, which is what makes a mid-Run change harmless.
+    """
+    if context.preferences is None:
+        return None
+    return resolve_generation(context.preferences)
+
+
 def _create(
     context: IngestionContext,
     claimed: ClaimedEvent,
     event: AnalysisEvent,
     *,
     run_id: str,
+    generation: GenerationSelection | None,
     now: datetime,
 ) -> IngestResult:
     """Create the Run under the reserved id and settle everything behind it."""
@@ -273,6 +314,7 @@ def _create(
         store=context.store,
         expected_symbol=context.expected_symbol,
         run_id=run_id,
+        generation=generation,
         now=now,
     )
 

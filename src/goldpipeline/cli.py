@@ -87,9 +87,10 @@ from goldpipeline.domain.errors import (
 from goldpipeline.logging_setup import configure_logging
 from goldpipeline.schemas.automation import AutomationTickResult, TickStatus
 from goldpipeline.schemas.common import utc_now
+from goldpipeline.schemas.generation import GenerationSelection
 from goldpipeline.schemas.ingestion import IngestOutcome, IngestResult
 from goldpipeline.schemas.orchestration import PipelineMode, PipelineStatus
-from goldpipeline.schemas.producer import ProducerOutcome, ProducerRequest, ProducerResult
+from goldpipeline.schemas.producer import ProducerOutcome, ProducerResult
 from goldpipeline.schemas.quality import DataQuality
 from goldpipeline.schemas.runtime_config import (
     ConfigKey,
@@ -112,6 +113,7 @@ from goldpipeline.services.automation import (
 )
 from goldpipeline.services.automation_state import AutomationStore, read_defer, read_json
 from goldpipeline.services.finalizer import finalize_run
+from goldpipeline.services.generation import build_finalizer_client, build_writer_client
 from goldpipeline.services.inbox import INDEX, Inbox, Ledger
 from goldpipeline.services.ingestion import (
     IngestionContext,
@@ -127,7 +129,8 @@ from goldpipeline.services.orchestrator import (
     run_pipeline,
 )
 from goldpipeline.services.pipeline import create_run, validate_sources
-from goldpipeline.services.producer import LiveNewsCollector, build_request, produce
+from goldpipeline.services.preferences import PreferencesStore
+from goldpipeline.services.producer import LiveNewsCollector, produce_from_preferences
 from goldpipeline.services.publish_gate import gate_publish
 from goldpipeline.services.publisher import publish_run
 from goldpipeline.services.reviewer import review_draft
@@ -410,9 +413,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     producer.add_argument(
         "--lookback",
-        default="24h",
+        default=None,
         metavar="DURATION",
-        help="News window, e.g. 6h, 12h, 24h (default), 48h, 72h, 7d.",
+        help=(
+            "Override the news window for this request, e.g. 6h, 24h, 7d. "
+            "Without it the stored preference decides (24h when none is stored)."
+        ),
     )
     producer.add_argument(
         "--request-id",
@@ -863,14 +869,25 @@ def _report_failure(exc: PipelineError, *, as_json: bool) -> int:
     return code
 
 
-def _writer_client(*, fake: bool, model: str | None) -> WriterClient:
+def _writer_client(
+    *, fake: bool, model: str | None, selection: GenerationSelection | None = None
+) -> WriterClient:
     """Pick the writer client for this invocation.
 
     ``fake`` short-circuits before any credential is read, so a smoke run cannot
     accidentally reach the provider or need a key present.
+
+    A *selection* is the Run's own frozen choice, and when one is present it is
+    the single authority: the provider and the model both come from it, and
+    ``ANTHROPIC_MODEL`` is not consulted. When it is absent - a Run created
+    before preferences, or one an operator is driving by hand - the model
+    resolves exactly as it always did. There is never a moment when both decide.
     """
     if fake:
         return FakeWriterClient()
+    if selection is not None:
+        return build_writer_client(selection.provider, selection.selection_id)
+
     settings = WriterSettings.from_env(
         _config_env(), model_override=model, secrets=_secret_provider()
     )
@@ -1036,16 +1053,25 @@ def _cmd_review_draft(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _finalizer_client(*, fake: bool, model: str | None) -> FinalizerClient:
+def _finalizer_client(
+    *, fake: bool, model: str | None, selection: GenerationSelection | None = None
+) -> FinalizerClient:
     """Build the finalizer client.
 
     Only ever called through :class:`LazyFinalizerClient`, so credentials are
     read lazily and only for the real revision path: a PASS is a byte copy and a
     REJECT is a refusal, and neither should demand an API key from an operator
     who is only trying to finish a Run.
+
+    Takes the Run's frozen selection when there is one - the same object the
+    writer was built from, so one Run is drafted and edited by one model.
+    ``ANTHROPIC_FINALIZER_MODEL`` is then not consulted; it stays authoritative
+    only for Runs that carry no selection.
     """
     if fake:
         return FakeFinalizerClient()
+    if selection is not None:
+        return build_finalizer_client(selection.provider, selection.selection_id)
 
     from goldpipeline.adapters.anthropic_finalizer import AnthropicFinalizerClient
 
@@ -1308,17 +1334,22 @@ def _pipeline_clients(args: argparse.Namespace) -> PipelineClients:
     # re-reads after registering the task.
     fake_ai = args.fake_ai
     return PipelineClients(
-        writer=lambda: _writer_client(
+        writer=lambda selection: _writer_client(
             fake=fake_ai or getattr(args, "fake_writer", False),
             model=getattr(args, "writer_model", None),
+            selection=selection,
         ),
+        finalizer=lambda selection: _finalizer_client(
+            fake=fake_ai or getattr(args, "fake_finalizer", False),
+            model=getattr(args, "finalizer_model", None),
+            selection=selection,
+        ),
+        # No selection reaches this one, by signature. The review is the
+        # judgement that disagrees with the draft; it takes its model from its
+        # own configuration and nothing a preference can say changes that.
         reviewer=lambda: _reviewer_client(
             fake=fake_ai or getattr(args, "fake_reviewer", False),
             model=getattr(args, "reviewer_model", None),
-        ),
-        finalizer=lambda: _finalizer_client(
-            fake=fake_ai or getattr(args, "fake_finalizer", False),
-            model=getattr(args, "finalizer_model", None),
         ),
         publisher=lambda: _publisher_client(fake=args.fake_publisher),
     )
@@ -1614,32 +1645,40 @@ def _cmd_producer_generate(args: argparse.Namespace) -> int:
     """
     moment = utc_now()
     request_id = args.request_id or _generate_request_id(moment)
-    request = build_request(
-        request_id=request_id,
-        requested_at=args.requested_at or moment,
-        lookback=_parse_lookback(args.lookback),
-    )
+    requested_at = args.requested_at or moment
 
     inbox_root = args.inbox_dir if args.inbox_dir is not None else inbox_dir_from_env(_config_env())
     inbox = Inbox(inbox_root)
     inbox.ensure_layout()
 
-    result = produce(
-        request,
+    automation_dir = (
+        args.automation_dir
+        if getattr(args, "automation_dir", None) is not None
+        else AutomationSettings().automation_dir
+    )
+    result = produce_from_preferences(
+        request_id=request_id,
+        requested_at=requested_at,
+        preferences=PreferencesStore(automation_dir),
         collector=LiveNewsCollector(),
         inbox=inbox,
         ledger=Ledger(inbox.directory(INDEX)),
+        # An explicit window is an operator override; without one the stored
+        # preference decides. There is deliberately no --provider, --model or
+        # --article-type: those are product configuration, and a command line
+        # nobody re-reads is the wrong place to keep them.
+        lookback=_parse_lookback(args.lookback) if args.lookback is not None else None,
         now=moment,
     )
-    return _report_producer(result, request=request, as_json=args.json)
+    return _report_producer(result, requested_at=requested_at, as_json=args.json)
 
 
-def _report_producer(result: ProducerResult, *, request: ProducerRequest, as_json: bool) -> int:
+def _report_producer(result: ProducerResult, *, requested_at: datetime, as_json: bool) -> int:
     """Print the outcome. Counts and ids only - never collected news text."""
     if as_json:
         print(result.model_dump_json(indent=2))
     else:
-        stamp = request.requested_at.isoformat().replace("+00:00", "Z")
+        stamp = requested_at.isoformat().replace("+00:00", "Z")
         print(f"Outcome:    {result.outcome}")
         print(f"Request:    {result.request_id}")
         print(f"Requested:  {stamp}")
@@ -1881,6 +1920,7 @@ def _worker_context(
         event_transport=event_transport if ingest.enabled else None,
         market_source=_market_source(args),
         clients=_pipeline_clients(args),
+        preferences=PreferencesStore(settings.automation_dir),
         expected_symbol=MarketDataSettings.from_env(source).canonical_symbol,
         publisher_target=target,
         config=config,

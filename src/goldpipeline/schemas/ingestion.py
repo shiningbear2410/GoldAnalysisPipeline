@@ -46,6 +46,13 @@ class IngestOutcome(StrEnum):
     CONFLICT = "CONFLICT"
     UNRESOLVED = "UNRESOLVED"
     MARKET_UNAVAILABLE = "MARKET_UNAVAILABLE"
+    PREFERENCES_UNAVAILABLE = "PREFERENCES_UNAVAILABLE"
+    """The stored generation preferences are damaged.
+
+    Operator-repairable and nothing durable was written, so the event goes
+    back to the queue exactly as an unreachable market does. Deliberately not
+    a failure: the analysis is fine, the file beside it is not.
+    """
     INVALID_PAYLOAD = "INVALID_PAYLOAD"
     RUN_FAILED = "RUN_FAILED"
     NOTHING_TO_DO = "NOTHING_TO_DO"

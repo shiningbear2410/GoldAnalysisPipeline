@@ -58,6 +58,7 @@ from goldpipeline.services.admission import resolve as resolve_admission
 from goldpipeline.services.article_routing import require_ready
 from goldpipeline.services.inbox import Inbox, Ledger
 from goldpipeline.services.news_collector import NewsSettings, collect_news, curate
+from goldpipeline.services.preferences import PreferencesStore
 from goldpipeline.services.producer_brief import PRODUCER_BRIEF_VERSION, render_brief
 
 logger = logging.getLogger(__name__)
@@ -130,6 +131,61 @@ def build_request(
         )
     except ValueError as exc:
         raise ProducerRequestError(f"producer request is not usable: {exc}") from exc
+
+
+def produce_from_preferences(
+    *,
+    request_id: str,
+    requested_at: datetime,
+    preferences: PreferencesStore,
+    collector: NewsCollector,
+    inbox: Inbox,
+    ledger: Ledger,
+    lookback: timedelta | None = None,
+    now: datetime | None = None,
+) -> ProducerResult:
+    """Produce one event using the operator's stored choices.
+
+    The seam a future ``/generate`` calls, and the one the CLI already calls, so
+    the bot and the command line cannot drift into two different notions of what
+    a request means.
+
+    **Preferences are read once, here, at invocation.** That is the honest
+    boundary for a request-driven producer: what the operator had selected when
+    they asked is what they asked for. Note the timing this creates and does not
+    hide - the *generation* choice is snapshotted later, when the Run is created
+    from this event, so a preference changed in between reaches the model even
+    though the article type and window are already fixed. That window is
+    seconds-to-minutes wide, both halves are recorded on the Run, and closing it
+    would mean a durable request journal this architecture has no seam for. It
+    is documented rather than papered over.
+
+    Args:
+        lookback: An explicit operator override for the news window. The stored
+            preference is used when it is absent. There is deliberately no
+            equivalent override for provider, model or article type: a window is
+            a question about the news, and the rest is product configuration.
+
+    Raises:
+        PreferencesUnavailableError: The stored preferences are damaged. Raised
+            before anything is collected or written, so a broken file costs no
+            request to a public server and leaves no inbox file.
+        ProducerRequestError: The inputs do not form a request.
+    """
+    current = preferences.read().usable
+    request = build_request(
+        request_id=request_id,
+        requested_at=requested_at,
+        article_type=current.article_type,
+        lookback=lookback if lookback is not None else current.news_lookback,
+    )
+    logger.info(
+        "producer.from_preferences request=%s type=%s lookback=%ds",
+        request_id,
+        request.article_type,
+        request.news_lookback_seconds,
+    )
+    return produce(request, collector=collector, inbox=inbox, ledger=ledger, now=now)
 
 
 def produce(
@@ -437,4 +493,5 @@ __all__ = [
     "NewsCollector",
     "build_request",
     "produce",
+    "produce_from_preferences",
 ]

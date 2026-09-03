@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from goldpipeline import CONTEXT_SCHEMA_VERSION, PIPELINE_VERSION
 from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import UtcDatetime, utc_now
+from goldpipeline.schemas.generation import GenerationSelection
 
 
 class RunStatus(StrEnum):
@@ -128,6 +129,14 @@ class RunProvenance(MutableModel):
         description=(
             "Which product mode this Run was created for. Defaults to ANALYSIS, "
             "which is what every Run written before article types existed was."
+        ),
+    )
+    generation: GenerationSelection | None = Field(
+        default=None,
+        description=(
+            "The provider and model this Run was created under, frozen once. "
+            "Null on Runs created before preferences drove generation, which "
+            "therefore keep resolving their model the way they always did."
         ),
     )
     analysis_origin: str = Field(description="Human-readable source of the analysis.")

@@ -763,7 +763,7 @@ def test_a_missing_credential_waits_rather_than_hammering(
 
     run = make_normalized_run(runs_dir, tmp_path)
 
-    def no_key() -> Any:
+    def no_key(_selection: Any = None) -> Any:
         raise WriterConfigurationError("ANTHROPIC_API_KEY is not set", setting="ANTHROPIC_API_KEY")
 
     context = make_worker_context(

@@ -56,6 +56,7 @@ from goldpipeline.domain.errors import (
 )
 from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import utc_now
+from goldpipeline.schemas.generation import GenerationSelection
 from goldpipeline.schemas.manifest import RunStatus
 from goldpipeline.schemas.orchestration import (
     PipelineEvent,
@@ -153,11 +154,18 @@ class PipelineClients:
     deliberately no way to pass a target chat into this module: an orchestrator
     that accepted one would put the destination within reach of a command line,
     a config file, or in the worst case a Run's own content.
+
+    **The reviewer factory takes no argument, and that is the enforcement.** The
+    two generation factories receive the Run's frozen
+    :class:`GenerationSelection`; the reviewer has nowhere to put one. The
+    review exists to disagree with the draft, and it cannot do that from the
+    same choice the draft came from - so rather than trusting nobody to pass it,
+    the signature makes it unsayable.
     """
 
-    writer: Callable[[], WriterClient] | None = None
+    writer: Callable[[GenerationSelection | None], WriterClient] | None = None
+    finalizer: Callable[[GenerationSelection | None], FinalizerClient] | None = None
     reviewer: Callable[[], ReviewerClient] | None = None
-    finalizer: Callable[[], FinalizerClient] | None = None
     publisher: Callable[[], tuple[PublisherClient, str]] | None = None
 
 
@@ -452,7 +460,7 @@ def _run_write(
     result = write_draft(
         run_id=execution.run_id,
         store=store,
-        client=_require(clients.writer, "writer")(),
+        client=_require(clients.writer, "writer")(_generation_of(store, execution.run_id)),
         prompt_version=prompt_id,
         now=now,
     )
@@ -526,11 +534,15 @@ def _run_finalize(
             return stop
 
     client = clients.finalizer
+    # The same snapshot the writer used, re-read from the Run rather than
+    # remembered: a scheduler restart between the two stages must not be able to
+    # change which model edits an article another model drafted.
+    selection = _generation_of(store, execution.run_id)
     result = finalize_run(
         run_id=execution.run_id,
         store=store,
         # Wrapped, not built: a PASS is a byte copy and must not require a key.
-        client=LazyFinalizerClient(client) if client is not None else None,
+        client=LazyFinalizerClient(lambda: client(selection)) if client is not None else None,
         now=now,
     )
 
@@ -653,6 +665,21 @@ def _article_type_of(store: RunStore, run_id: str) -> ArticleType:
     return manifest.provenance.article_type
 
 
+def _generation_of(store: RunStore, run_id: str) -> GenerationSelection | None:
+    """The provider and model this Run was created under.
+
+    Read from the manifest every time it is needed, never carried in memory, so
+    a resumed Run generates the way the original did and a process restart
+    between the writer and the finalizer changes nothing.
+
+    ``None`` for a Run created before preferences drove generation, and for one
+    an operator drove by hand. Both mean the same thing to the caller: resolve
+    the model the way it has always been resolved.
+    """
+    manifest = store.open(run_id).load_manifest()
+    return manifest.provenance.generation if manifest.provenance else None
+
+
 def _check_resumed_verdict(
     store: RunStore, execution: _Execution, started: datetime
 ) -> PipelineRunResult | None:
@@ -673,7 +700,7 @@ def _check_resumed_verdict(
     return None
 
 
-def _require[ClientT](factory: Callable[[], ClientT] | None, name: str) -> Callable[[], ClientT]:
+def _require[FactoryT](factory: FactoryT | None, name: str) -> FactoryT:
     """Fail loudly when a mode was asked for without the client it needs.
 
     A wiring mistake, not a pipeline outcome, so it raises rather than becoming a

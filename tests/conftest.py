@@ -674,9 +674,12 @@ class TrackedClients:
     publisher: Any
     target_chat: str = "@fake_offline_channel"
     built: list[str] = field(default_factory=list)
+    selections: list[tuple[str, Any]] = field(default_factory=list)
+    """Which generation selection each stage was built from, in order."""
 
-    def _hand_out(self, name: str, client: Any) -> Any:
+    def _hand_out(self, name: str, client: Any, selection: Any = None) -> Any:
         self.built.append(name)
+        self.selections.append((name, selection))
         return client
 
     def as_pipeline_clients(self) -> Any:
@@ -684,9 +687,12 @@ class TrackedClients:
         from goldpipeline.services.orchestrator import PipelineClients
 
         return PipelineClients(
-            writer=lambda: self._hand_out("writer", self.writer),
+            # The generation factories receive the Run's frozen selection and
+            # record it, so a test can assert which choice each stage was built
+            # from. The reviewer factory takes none - by signature.
+            writer=lambda selection: self._hand_out("writer", self.writer, selection),
+            finalizer=lambda selection: self._hand_out("finalizer", self.finalizer, selection),
             reviewer=lambda: self._hand_out("reviewer", self.reviewer),
-            finalizer=lambda: self._hand_out("finalizer", self.finalizer),
             publisher=lambda: (
                 self._hand_out("publisher", self.publisher),
                 self.target_chat,
