@@ -923,14 +923,16 @@ class TestProtocolBoundary:
 
 
 class TestProductionUnchanged:
-    def test_the_cli_market_source_still_defaults_to_mt5(self) -> None:
+    def test_the_cli_selects_tradingview_as_the_production_authority(self) -> None:
         from pathlib import Path
 
         cli = (Path(__file__).resolve().parents[1] / "src" / "goldpipeline" / "cli.py").read_text(
             encoding="utf-8"
         )
-        assert '"--market-source", choices=("mt5", "file"), default="mt5"' in cli
-        assert "tradingview" not in cli
+        assert 'PRODUCTION_MARKET_SOURCE = "tradingview"' in cli
+        assert 'default="mt5"' not in cli
+        # MT5 stays selectable, and is never a fallback.
+        assert '"tradingview", "mt5", "file"' in cli
 
     def test_nothing_in_the_services_layer_imports_this_provider(self) -> None:
         """Prose may mention the feed; no service may call it.

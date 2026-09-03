@@ -6,11 +6,14 @@ protocol the MetaTrader 5 source implements, and returns the same
 tell which provider filled it in beyond reading ``provider``, which is the
 point: this round adds a feed, it does not change what the pipeline believes.
 
-**Production authority is unchanged.** No caller is migrated here. The CLI's
-``--market-source`` still defaults to ``mt5``, the scheduled worker still uses
-the MT5 path, and whether TradingView should ever become authoritative is a
-question for the next round, answered by comparing the two - not by this file
-existing.
+**This is the production market-data authority.** Round 6.4c compared it
+against the incumbent MT5 feed over M1/M5/M15/H1/H4 and found exact timestamp
+alignment on the four intraday grids, identical gap structure, and a small
+stable venue offset; round 6.4d made it the default source the scheduled worker
+resolves. MT5 remains available as an explicit legacy and diagnostic
+selection - never as an automatic fallback. If this provider fails, production
+fails closed, because a Run that silently changed feed halfway would carry
+prices from two venues under one provenance record.
 
 **Read-only and unauthenticated.** One host, ``wss://data.tradingview.com``,
 opened with the public no-account token. There is no login, no cookie, no
@@ -72,6 +75,7 @@ from goldpipeline.adapters.tradingview_protocol import (
 from goldpipeline.domain.errors import (
     InsufficientBarsError,
     MarketDataConfigurationError,
+    StaleMarketDataError,
     TradingViewCandleError,
     TradingViewConnectionError,
     TradingViewCriticalError,
@@ -213,8 +217,10 @@ def connect_tradingview(timeout: float) -> WebSocketConnection:
     except ImportError as exc:  # pragma: no cover - exercised by injecting a fake
         raise TradingViewNotInstalledError(
             "the websocket-client package is not installed in this interpreter. "
-            'Install it with `pip install -e ".[tradingview]"`; it is an optional '
-            "extra because every test and the MT5 market path run without it.",
+            "It is a hard dependency of this project since TradingView became the "
+            "production market-data authority; reinstall with `pip install -e .`. "
+            "The import stays lazy so the schemas, the services and the whole test "
+            "suite still run without it.",
             setting="websocket-client",
         ) from exc
 
@@ -261,6 +267,7 @@ class TradingViewMarketDataSource:
         connector: Connector | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_retries: int = 0,
+        max_data_age_minutes: int | None = None,
         now: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] | None = None,
         session_id: str | None = None,
@@ -278,6 +285,13 @@ class TradingViewMarketDataSource:
             timeout_seconds: Per-receive timeout handed to the connection.
             max_retries: Extra attempts after a *transport* failure only. Zero
                 by default - see the class of failure each error names.
+            max_data_age_minutes: Refuse when the newest closed candle is older
+                than this. ``None`` disables the check, which is right for a
+                comparison or a diagnostic and wrong for production: the
+                pipeline has always refused to write about a Friday close on a
+                Sunday evening, and that guard lived in the MT5 adapter. The
+                production construction path passes the configured limit, and a
+                test asserts it does.
             now: Clock for the closed-candle proof. Injected so tests do not
                 depend on when they run.
             monotonic: Clock for the overall deadline. Separate from ``now`` on
@@ -301,6 +315,7 @@ class TradingViewMarketDataSource:
         self._connector = connector if connector is not None else connect_tradingview
         self._timeout = float(timeout_seconds)
         self._max_retries = max(0, int(max_retries))
+        self._max_data_age = _require_max_age(max_data_age_minutes)
         self._now = now if now is not None else utc_now
         self._monotonic = monotonic if monotonic is not None else time.monotonic
         self._session_id = session_id or f"cs_{secrets.token_hex(6)}"
@@ -333,6 +348,8 @@ class TradingViewMarketDataSource:
             TradingViewCriticalError: The feed reported a critical error.
             TradingViewCandleError: A returned bar was not usable.
             InsufficientBarsError: Fewer closed candles than were requested.
+            StaleMarketDataError: The newest closed candle is older than
+                ``max_data_age_minutes``, when one was configured.
         """
         if self._cached is not None:
             return self._cached
@@ -386,6 +403,7 @@ class TradingViewMarketDataSource:
             )
 
         selected = closed[-self._limit :]
+        self._require_fresh(selected[-1])
         payload = self._payload(selected, requested_at, retrieved_at)
         model = MarketDataInput.model_validate(payload)
 
@@ -740,6 +758,37 @@ class TradingViewMarketDataSource:
             bar for bar in bars if datetime.fromisoformat(bar["timestamp"]) + duration <= moment
         ]
 
+    def _require_fresh(self, latest: dict[str, Any]) -> None:
+        """Refuse a series whose newest closed candle is too old to write about.
+
+        The same policy the MT5 source has always enforced, moved to whichever
+        provider is authoritative rather than left behind with the old one.
+        Often a stale series just means the market is closed - which is still a
+        reason not to publish an analysis of it.
+
+        Skipped entirely when no limit was configured, so a comparison or a
+        diagnostic can look at last week without being refused.
+        """
+        if self._max_data_age is None:
+            return
+        duration = self._timeframe.duration
+        assert duration is not None, "every supported timeframe has a fixed duration"  # noqa: S101
+        closed_at = datetime.fromisoformat(latest["timestamp"]) + duration
+        age = (self._now() - closed_at).total_seconds() / 60
+        if age > self._max_data_age:
+            raise StaleMarketDataError(
+                f"the newest closed candle is {int(age)} minutes old, past the "
+                f"{self._max_data_age} minute limit. Often this just means the market is "
+                "closed - which is still a reason not to publish an analysis of it. Raise "
+                "GOLDPIPELINE_MAX_DATA_AGE_MINUTES deliberately if that is what you intend.",
+                setting="GOLDPIPELINE_MAX_DATA_AGE_MINUTES",
+                symbol=self._provider_symbol,
+                timeframe=str(self._timeframe),
+                candle_closed_at=_iso(closed_at),
+                age_minutes=int(age),
+                limit_minutes=self._max_data_age,
+            )
+
     def _payload(
         self, bars: list[dict[str, Any]], requested_at: datetime, retrieved_at: datetime
     ) -> dict[str, Any]:
@@ -804,6 +853,17 @@ def _require_symbol(provider_symbol: str) -> str:
             supported=sorted(SUPPORTED_SYMBOLS),
         )
     return cleaned
+
+
+def _require_max_age(minutes: int | None) -> int | None:
+    if minutes is None:
+        return None
+    if not isinstance(minutes, int) or isinstance(minutes, bool) or minutes <= 0:
+        raise MarketDataConfigurationError(
+            "max_data_age_minutes must be a positive whole number, or None to disable",
+            setting="max_data_age_minutes",
+        )
+    return minutes
 
 
 def _require_limit(limit: int) -> int:

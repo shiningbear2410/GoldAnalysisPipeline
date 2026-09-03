@@ -658,9 +658,13 @@ def _add_ingest_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--market-source",
-        choices=("mt5", "file"),
-        default="mt5",
-        help="Where candles come from. 'file' needs --ohlc. Default: mt5.",
+        choices=MARKET_SOURCES,
+        default=PRODUCTION_MARKET_SOURCE,
+        help=(
+            "Where candles come from. 'tradingview' is the production authority; "
+            "'mt5' is an explicit legacy/diagnostic selection; 'file' reads a local "
+            "JSON of candles and needs --ohlc. Default: tradingview."
+        ),
     )
     parser.add_argument(
         "--ohlc",
@@ -672,7 +676,10 @@ def _add_ingest_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--fake-mt5",
         action="store_true",
-        help="Use the offline candle stand-in. No terminal, no market data.",
+        help=(
+            "Use the offline candle stand-in for whichever market source is selected. "
+            "No terminal, no socket, no market data."
+        ),
     )
     parser.add_argument(
         "--normalize-only",
@@ -692,10 +699,21 @@ def _add_automation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     parser.add_argument("--automation-dir", type=Path, default=None)
     parser.add_argument(
-        "--market-source", choices=("mt5", "file"), default="mt5", help="Default: mt5."
+        "--market-source",
+        choices=MARKET_SOURCES,
+        default=PRODUCTION_MARKET_SOURCE,
+        help=(
+            "'tradingview' is the production authority and what the scheduled worker "
+            "uses; 'mt5' is an explicit legacy/diagnostic selection and is never a "
+            "fallback; 'file' needs --ohlc. Default: tradingview."
+        ),
     )
     parser.add_argument("--ohlc", type=Path, default=None, metavar="PATH")
-    parser.add_argument("--fake-mt5", action="store_true", help="Use the offline candle stand-in.")
+    parser.add_argument(
+        "--fake-mt5",
+        action="store_true",
+        help="Use the offline candle stand-in for whichever market source is selected.",
+    )
     parser.add_argument("--fake-ai", action="store_true", help="Use the offline AI clients.")
     parser.add_argument(
         "--fake-publisher",
@@ -1460,24 +1478,135 @@ def _fake_mt5_module() -> Any:
     return FakeMt5Module()
 
 
+def _fake_market_connector(timeframe: str, limit: int) -> tuple[Any, str]:
+    """The offline stand-in behind ``--fake-mt5`` for the production source.
+
+    ``--fake-mt5`` has always meant "use the offline candle stand-in; no
+    terminal, no market data", and that is a statement about *market data*
+    rather than about one vendor. When the authority moved to TradingView the
+    flag had to keep meaning what it says, or every offline path - the test
+    suite's whole-tick runs among them - would have started opening a socket.
+
+    Bars are generated at fetch time, not here, so the newest closed candle is
+    fresh relative to when the fetch happens. That matters: a series built once
+    at start-up would age past the staleness guard in a long session and fail
+    for a reason that has nothing to do with what was being tested.
+
+    Returns the connector and the series id it answers on. A real fetch invents
+    a random series handle and ignores messages about any other, so the offline
+    source has to be told which one this scripted conversation replies to -
+    otherwise it reads a whole valid exchange and finds no bars in it.
+    """
+    from goldpipeline.adapters.fake_tradingview import (
+        DEFAULT_SERIES_ID,
+        FakeConnection,
+        conversation,
+        make_series,
+    )
+
+    def connect(_timeout: float) -> Any:
+        rows = make_series(count=limit + 2, timeframe=timeframe, now=utc_now())
+        return FakeConnection(packets=[conversation(rows)])
+
+    return connect, DEFAULT_SERIES_ID
+
+
+MARKET_SOURCES = ("tradingview", "mt5", "file")
+"""Every market-data source an invocation may select.
+
+Order is meaningful only in help output: the production authority first.
+"""
+
+PRODUCTION_MARKET_SOURCE = "tradingview"
+"""What production resolves to, including the scheduled worker.
+
+The scheduled task runs ``automation-worker-tick`` with no ``--market-source``,
+so this default *is* the worker's authority - not a convenience for someone
+typing at a prompt. It lives here, in version control, rather than in the
+persistent config file, and that is a deliberate choice explained in
+:func:`_market_source`.
+"""
+
+TRADINGVIEW_PROVIDER_SYMBOL = "OANDA:XAUUSD"
+"""The venue and instrument production reads.
+
+Not configurable, and not derived from ``GOLDPIPELINE_MT5_SYMBOL``: that
+setting names an instrument on a broker's terminal, which is a different thing
+from a symbol on a data venue. Gold on another venue is a different instrument
+with a different spread, so the choice is pinned in code where a reviewer sees
+any change to it.
+"""
+
+
 def _market_source(args: argparse.Namespace) -> Any:
     """Build the market data source this invocation asked for.
 
-    Nothing is constructed until here, and the MetaTrader package is imported
-    only inside the source it belongs to - so `--market-source file` and
-    `--fake-mt5` work on a machine that has never had a terminal installed.
+    Nothing is constructed until here, and each provider's optional dependency
+    is imported only inside the source it belongs to - so ``--market-source
+    file`` and ``--fake-mt5`` work on a machine that has never had a terminal
+    installed, and the MT5 path works on one without the websocket client.
+
+    **There is no fallback, by construction.** Exactly one source is built and
+    returned. A failure inside it propagates to the caller, which fails the
+    Run; nothing here catches a TradingView error and tries the terminal
+    instead. That matters more than it looks: a Run whose candles came half
+    from one venue and half from another would carry two feeds' prices under
+    one provenance record, and no downstream check could tell.
+
+    **Why the default is not a config key.** ``REQUIRED_PRODUCTION_KEYS`` is
+    derived from ``ConfigKey``, so adding a member makes it mandatory for the
+    scheduled worker *immediately* - the running production file would be
+    incomplete the moment this shipped, and every tick would refuse to work
+    while Task Scheduler reported success. That is the exact defect strict
+    production config exists to prevent. The worker reads this default because
+    it passes no flag, so the default is already an authoritative, reviewable,
+    version-controlled decision; a config key would have to be added in a round
+    that can also write the production file.
     """
-    if args.market_source == "file":
+    selected = getattr(args, "market_source", PRODUCTION_MARKET_SOURCE)
+
+    if selected == "file":
         if args.ohlc is None:
             raise _UsageError("--market-source file needs --ohlc PATH")
         return JsonFileMarketDataSource(args.ohlc)
 
     settings = MarketDataSettings.from_env(_config_env())
 
-    from goldpipeline.adapters.mt5_market import MetaTrader5MarketDataSource
+    if selected == "tradingview":
+        from goldpipeline.adapters.tradingview_market import TradingViewMarketDataSource
 
-    return MetaTrader5MarketDataSource(
-        settings, module=_fake_mt5_module() if args.fake_mt5 else None
+        connector, series_id = (
+            _fake_market_connector(settings.timeframe, settings.bar_count)
+            if args.fake_mt5
+            else (None, None)
+        )
+        return TradingViewMarketDataSource(
+            provider_symbol=TRADINGVIEW_PROVIDER_SYMBOL,
+            timeframe=settings.timeframe,
+            limit=settings.bar_count,
+            connector=connector,
+            series_id=series_id,
+            # The staleness policy travels with whichever provider is
+            # authoritative. It used to live only in the MT5 source, so
+            # migrating without passing it would have quietly retired
+            # GOLDPIPELINE_MAX_DATA_AGE_MINUTES and let production write about
+            # a Friday close on a Sunday evening.
+            max_data_age_minutes=settings.max_data_age_minutes,
+        )
+
+    if selected == "mt5":
+        from goldpipeline.adapters.mt5_market import MetaTrader5MarketDataSource
+
+        return MetaTrader5MarketDataSource(
+            settings, module=_fake_mt5_module() if args.fake_mt5 else None
+        )
+
+    # Unreachable through argparse, which rejects an unknown choice before any
+    # command runs. Checked anyway: this function is also called with a
+    # hand-built namespace, and "unknown source" must never mean "use the
+    # default one".
+    raise _UsageError(
+        f"unknown --market-source {selected!r}; expected one of {', '.join(MARKET_SOURCES)}"
     )
 
 

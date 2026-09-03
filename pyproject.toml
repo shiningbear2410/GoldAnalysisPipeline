@@ -16,6 +16,12 @@ dependencies = [
     "openai>=1.50",
     "pydantic>=2.7",
     "tzdata>=2024.1; sys_platform == 'win32'",
+    # The websocket client behind the TradingView market-data provider. A hard
+    # dependency since round 6.4d, when TradingView became the production
+    # market-data authority: it was an optional extra while MT5 was primary,
+    # and leaving it optional would mean a fresh install of production could
+    # not fetch candles at all.
+    "websocket-client>=1.7",
 ]
 
 [project.optional-dependencies]
@@ -28,10 +34,6 @@ mt5 = ["MetaTrader5>=5.0.45; sys_platform == 'win32'"]
 # and the environment-variable path still works; it is what an unattended
 # scheduled task needs, since that inherits no session.
 secrets = ["keyring>=25.0"]
-# The websocket client behind the TradingView market-data provider. An extra
-# because the whole suite and the MT5 market path run without it: every test of
-# that provider drives a fake connection, and only a live fetch needs this.
-tradingview = ["websocket-client>=1.7"]
 
 [project.scripts]
 goldpipeline = "goldpipeline.cli:main"
