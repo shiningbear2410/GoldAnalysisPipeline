@@ -33,13 +33,26 @@ PATHS` catalog the user turn now carries, and derived figures and the analyst's
 note are explicitly not claimable.
 """
 
+GOLD_WRITER_V3 = "gold_writer_v3"
+"""Current writer prompt id. Adds explicit news provenance.
+
+Identical to v2 in voice, structure and every style rule - the article this
+writes is the article v2 wrote. What it adds is a `news_claims` contract: an
+assertion that a named economic actor *did* something must cite the collected
+news item it came from, by an id copied from a closed list in the user turn.
+
+A new file rather than an edit to v2, because seven Runs record having been
+written by v2 and quietly changing what that name means would detach them from
+the rules they were actually written under.
+"""
+
 GOLD_REVIEWER_V1 = "gold_reviewer_v1"
 """Current reviewer prompt id."""
 
 GOLD_FINALIZER_V1 = "gold_finalizer_v1"
 """Current finalizer prompt id."""
 
-DEFAULT_WRITER_PROMPT = GOLD_WRITER_V2
+DEFAULT_WRITER_PROMPT = GOLD_WRITER_V3
 DEFAULT_REVIEWER_PROMPT = GOLD_REVIEWER_V1
 DEFAULT_FINALIZER_PROMPT = GOLD_FINALIZER_V1
 
@@ -82,6 +95,7 @@ __all__ = [
     "GOLD_REVIEWER_V1",
     "GOLD_WRITER_V1",
     "GOLD_WRITER_V2",
+    "GOLD_WRITER_V3",
     "PROMPTS_DIR",
     "REQUIRED_SECTIONS",
     "load_prompt",

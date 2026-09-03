@@ -65,6 +65,8 @@ from goldpipeline.services import content_safety as safety
 from goldpipeline.services.finalizer import FINAL_FILENAME, FINALIZER_FILENAME
 from goldpipeline.services.finalizer_policy import MAX_EVIDENCE_PROBE_CHARS, FindingKey
 from goldpipeline.services.integrity import verify_artifact
+from goldpipeline.services.news_provenance import NewsProvenance
+from goldpipeline.services.news_provenance import verify as verify_news_claims
 from goldpipeline.services.pipeline import (
     ANALYSIS_SOURCE_FILENAME,
     CONTEXT_FILENAME,
@@ -156,6 +158,8 @@ class _Inputs:
     draft: str | None = None
     article: str | None = None
     digests: dict[str, str] = field(default_factory=dict)
+    provenance: NewsProvenance | None = None
+    """What was established about the article's news statements, if anything."""
 
 
 def gate_publish(
@@ -260,7 +264,14 @@ def _run_checks(run: RunDirectory, manifest: RunManifest) -> tuple[list[GateChec
     checks.append(_check_telegram_compatibility(inputs.article))
     checks.append(_check_instruction_text(inputs.article))
     checks.append(_check_credentials(inputs.article))
-    checks.append(_check_external_claims(inputs.article))
+
+    # Judged against the *final* article, not the draft: provenance describes
+    # the sentences about to be published, and the finalizer may have changed
+    # them since the writer vouched for them.
+    inputs.provenance = verify_news_claims(
+        inputs.context, inputs.writer_result.news_claims, inputs.article
+    )
+    checks.append(_check_external_claims(inputs.article, inputs.provenance))
 
     article_findings = run_prechecks(
         context=inputs.context,
@@ -712,26 +723,45 @@ def _check_credentials(article: str) -> GateCheck:
     )
 
 
-def _check_external_claims(article: str) -> GateCheck:
-    """The pipeline collects no news, so it may not report any."""
-    findings = [
-        GateFinding(
-            code=BlockerCode.EXTERNAL_FACT_WITHOUT_SOURCE,
-            severity=Severity.HIGH,
-            message=(
-                f"The final article asserts an economic event ({match.label}) that the "
-                "context has no data for."
-            ),
-            evidence=match.matched,
-            source=FINAL_FILENAME,
-            position=match.position,
+def _check_external_claims(article: str, provenance: NewsProvenance) -> GateCheck:
+    """Every asserted economic event must be sourced, or the article does not go.
+
+    The rule has not been relaxed - it has been given a way to be satisfied. An
+    article whose Run carries no producer brief has no verified statements, every
+    occurrence is uncovered, and this behaves exactly as it did before news
+    provenance existed. An article that faithfully quotes a collected item, cites
+    it by id, and still says so in the final text is covered *at that sentence*.
+
+    Coverage is per occurrence, and the finding is reported at the first one that
+    is not covered. Sourcing the first mention of the Fed does not license the
+    second: an article that relays one real item and invents a second event is
+    still an article that invents an event.
+    """
+    findings: list[GateFinding] = []
+    seen: set[str] = set()
+
+    for occurrence in safety.external_claim_occurrences(article):
+        if occurrence.entity in seen or provenance.covers(occurrence.start, occurrence.end):
+            continue
+        seen.add(occurrence.entity)
+        findings.append(
+            GateFinding(
+                code=BlockerCode.EXTERNAL_FACT_WITHOUT_SOURCE,
+                severity=Severity.HIGH,
+                message=(
+                    f"The final article asserts an economic event ({occurrence.label}) with "
+                    "no verified news source."
+                ),
+                evidence=safety.excerpt(article, occurrence.start, occurrence.end),
+                source=FINAL_FILENAME,
+                position=occurrence.start,
+            )
         )
-        for match in safety.find_external_claims(article)
-    ]
+
     return GateCheck(
         check_id=CheckId.EXTERNAL_FACT_WITHOUT_SOURCE,
         status=CheckStatus.FAIL if findings else CheckStatus.PASS,
-        description="The article asserts no news event the context cannot support.",
+        description="Every asserted news event is supported by a cited producer-brief item.",
         findings=findings,
     )
 
@@ -902,6 +932,7 @@ def _build_decision(
         review_sha256=digests.get(REVIEW_FILENAME),
         final_article_sha256=digests.get(FINAL_FILENAME),
         finalizer_metadata_sha256=digests.get(FINALIZER_FILENAME),
+        news_provenance=inputs.provenance.report() if inputs.provenance else None,
     )
 
 

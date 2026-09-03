@@ -10,6 +10,7 @@ import pytest
 from conftest import FAKE_API_KEY, make_analysis_payload, make_normalized_run
 
 from goldpipeline.cli import EXIT_INVALID_DATA, EXIT_OK, main
+from goldpipeline.prompts import DEFAULT_WRITER_PROMPT
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -68,7 +69,7 @@ def test_json_output_reports_the_essentials(
     assert payload["status"] == "DRAFTED"
     assert payload["writer_status"] == "COMPLETED"
     assert payload["provider"] == "fake"
-    assert payload["prompt_version"] == "gold_writer_v2"
+    assert payload["prompt_version"] == DEFAULT_WRITER_PROMPT
     assert payload["article_chars"] > 0
 
 

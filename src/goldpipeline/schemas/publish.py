@@ -18,6 +18,7 @@ from pydantic import Field
 
 from goldpipeline.schemas.common import StrictModel, UtcDatetime, utc_now
 from goldpipeline.schemas.finalizer import FinalizationMode
+from goldpipeline.schemas.provenance import NewsProvenanceReport
 from goldpipeline.schemas.review import ReviewStatus, Severity
 
 PUBLISH_SCHEMA_VERSION = "1.0.0"
@@ -206,6 +207,14 @@ class PublishDecision(StrictModel):
     final_article_sha256: str | None = Field(default=None, min_length=64, max_length=64)
     finalizer_metadata_sha256: str | None = Field(default=None, min_length=64, max_length=64)
 
+    news_provenance: NewsProvenanceReport | None = Field(
+        default=None,
+        description=(
+            "What was checked about the article's external-news statements. "
+            "Null on decisions written before news provenance existed."
+        ),
+    )
+
     @property
     def approved(self) -> bool:
         """Whether Round 6 may publish."""
@@ -230,5 +239,6 @@ __all__ = [
     "Decision",
     "GateCheck",
     "GateFinding",
+    "NewsProvenanceReport",
     "PublishDecision",
 ]

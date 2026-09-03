@@ -230,11 +230,23 @@ class TextMatch:
     position: int
 
 
-def _fold(text: str) -> str:
-    """Strip diacritics and case, so Vietnamese matches however it is typed."""
+def fold(text: str) -> str:
+    """Strip diacritics and case, so Vietnamese matches however it is typed.
+
+    **Character-preserving**, and callers depend on it: an offset in the folded
+    string is the same offset in the original, which is what lets a match found
+    here be reported - and later located - against the article a human reads.
+    Decomposition followed by dropping combining marks restores one base
+    character per precomposed one; the two explicit replacements handle ``đ``,
+    which is its own letter rather than ``d`` plus a mark.
+    """
     decomposed = unicodedata.normalize("NFD", text)
     stripped = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
     return stripped.replace("đ", "d").replace("Đ", "D").casefold()
+
+
+_fold = fold
+"""Internal alias, so the private call sites in this module read unchanged."""
 
 
 def excerpt(text: str, start: int, end: int, window: int = 50) -> str:
@@ -309,32 +321,87 @@ def find_credentials(article: str) -> list[TextMatch]:
     return sorted(matches, key=lambda match: match.position)
 
 
+@dataclass(frozen=True)
+class ClaimOccurrence:
+    """One place an article asserts that a named economic event happened.
+
+    Carries the whole span - from the entity through the end of the past-tense
+    marker - rather than only where it starts. A caller deciding whether some
+    piece of provenance covers this assertion has to know how far the assertion
+    reaches: "Fed" alone is not the claim, "Fed vừa công bố" is, and provenance
+    that covers only the first word covers nothing worth covering.
+    """
+
+    entity: str
+    marker: str
+    start: int
+    end: int
+
+    @property
+    def label(self) -> str:
+        return f"{self.entity} + '{self.marker}'"
+
+
+def external_claim_occurrences(article: str) -> list[ClaimOccurrence]:
+    """Every entity-plus-past-marker assertion in the article, in order.
+
+    All of them, not one per entity: an article may support its first mention of
+    the Fed and invent the second, and a caller that only ever saw the first
+    would approve the invention.
+    """
+    folded = fold(article)
+    found: list[ClaimOccurrence] = []
+
+    for entity in _NEWS_ENTITIES:
+        for hit in re.finditer(rf"\b{re.escape(entity)}\b", folded):
+            window = folded[hit.end() : hit.end() + NEWS_PROXIMITY_CHARS]
+            # First marker in table order, matching what this scanner has always
+            # reported. Which marker is named changes the label a human reads,
+            # so it is not a detail to quietly re-decide here.
+            marker = next((m for m in _PAST_OCCURRENCE_MARKERS if m in window), None)
+            if marker is None:
+                continue
+            offset = window.index(marker)
+            found.append(
+                ClaimOccurrence(
+                    entity=entity,
+                    marker=marker,
+                    start=hit.start(),
+                    end=hit.end() + offset + len(marker),
+                )
+            )
+
+    return sorted(found, key=lambda o: (o.start, o.end))
+
+
 def find_external_claims(article: str) -> list[TextMatch]:
     """Find claims that a named economic event has occurred.
 
     An entity alone is not enough - "vàng phản ứng với dữ liệu Mỹ" says nothing
     checkable. What is blocked is an entity paired with a past-tense marker
     close by, which asserts an event this pipeline has no source for.
-    """
-    folded = _fold(article)
-    matches: list[TextMatch] = []
-    seen: set[str] = set()
 
-    for entity in _NEWS_ENTITIES:
-        for hit in re.finditer(rf"\b{re.escape(entity)}\b", folded):
-            window = folded[hit.end() : hit.end() + NEWS_PROXIMITY_CHARS]
-            marker = next((m for m in _PAST_OCCURRENCE_MARKERS if m in window), None)
-            if marker is None or entity in seen:
-                continue
-            seen.add(entity)
-            matches.append(
-                TextMatch(
-                    label=f"{entity} + '{marker}'",
-                    matched=excerpt(article, hit.start(), hit.end()),
-                    position=hit.start(),
-                )
+    One finding per entity, at its first assertion: three sentences about the
+    Fed are one problem to fix, not three. Callers that need every occurrence -
+    because they are deciding coverage rather than reporting - use
+    :func:`external_claim_occurrences` instead.
+    """
+    seen: set[str] = set()
+    matches: list[TextMatch] = []
+
+    for occurrence in external_claim_occurrences(article):
+        if occurrence.entity in seen:
+            continue
+        seen.add(occurrence.entity)
+        matches.append(
+            TextMatch(
+                label=occurrence.label,
+                matched=excerpt(
+                    article, occurrence.start, occurrence.start + len(occurrence.entity)
+                ),
+                position=occurrence.start,
             )
-            break
+        )
 
     return sorted(matches, key=lambda match: match.position)
 
@@ -403,7 +470,10 @@ __all__ = [
     "find_code_blocks",
     "find_control_characters",
     "find_credentials",
+    "ClaimOccurrence",
+    "external_claim_occurrences",
     "find_external_claims",
+    "fold",
     "find_instruction_text",
     "find_tracebacks",
     "looks_like_json",

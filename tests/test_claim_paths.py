@@ -37,7 +37,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from goldpipeline.adapters.fake_writer import FakeWriterClient
 from goldpipeline.domain.errors import WriterResponseError
-from goldpipeline.prompts import DEFAULT_WRITER_PROMPT, GOLD_WRITER_V2, load_prompt
+from goldpipeline.prompts import DEFAULT_WRITER_PROMPT, GOLD_WRITER_V3, load_prompt
 from goldpipeline.schemas.context import AnalysisContext
 from goldpipeline.schemas.review import FindingCode
 from goldpipeline.schemas.writer import (
@@ -344,7 +344,7 @@ def test_the_system_prompt_forbids_inventing_a_path() -> None:
     """Requirements 19.21 and 19.22."""
     text = load_prompt(DEFAULT_WRITER_PROMPT)
 
-    assert DEFAULT_WRITER_PROMPT == GOLD_WRITER_V2
+    assert DEFAULT_WRITER_PROMPT == GOLD_WRITER_V3
     assert "Never invent a source path." in text
     assert "do not emit a `source_claim`" in text
     assert "closed vocabulary" in text

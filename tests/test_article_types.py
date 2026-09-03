@@ -99,9 +99,15 @@ class TestRouting:
         assert set(SPECS) == set(ArticleType)
 
     def test_analysis_uses_the_current_production_prompt(self) -> None:
-        """Routing moved; prose did not."""
+        """The table points at the shipped writer prompt, not at a copy of its name.
+
+        Pinned to ``DEFAULT_WRITER_PROMPT`` rather than to a literal: the prompt
+        gains revisions - v3 added the news-provenance contract - and a test that
+        froze the literal would fail on every revision while proving nothing
+        about the routing this class is here to check.
+        """
         assert writer_prompt_for(ArticleType.ANALYSIS) == DEFAULT_WRITER_PROMPT
-        assert DEFAULT_WRITER_PROMPT == "gold_writer_v2"
+        assert DEFAULT_WRITER_PROMPT.startswith("gold_writer_v")
 
     def test_analysis_is_the_only_ready_type(self) -> None:
         assert {ArticleType.ANALYSIS} == READY_TYPES

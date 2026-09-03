@@ -277,6 +277,7 @@ def make_drafted_run(
     *,
     article: str = CLEAN_ARTICLE,
     claims: list[Any] | None = None,
+    news_claims: list[Any] | None = None,
     warnings: list[Any] | None = None,
     analysis: dict[str, Any] | None = None,
     market: dict[str, Any] | None = None,
@@ -312,6 +313,7 @@ def make_drafted_run(
             title="Nhận định vàng",
             article=article,
             source_claims=default_claims if claims is None else claims,
+            news_claims=news_claims or [],
             warnings=warnings or [],
         )
 
@@ -369,6 +371,7 @@ def make_reviewed_run(
     *,
     article: str = CLEAN_ARTICLE,
     claims: list[Any] | None = None,
+    news_claims: list[Any] | None = None,
     analysis: dict[str, Any] | None = None,
     market: dict[str, Any] | None = None,
     review_client: Any = None,
@@ -385,7 +388,13 @@ def make_reviewed_run(
     from goldpipeline.storage.run_store import RunStore
 
     drafted = make_drafted_run(
-        runs_dir, tmp_path, article=article, claims=claims, analysis=analysis, market=market
+        runs_dir,
+        tmp_path,
+        article=article,
+        claims=claims,
+        news_claims=news_claims,
+        analysis=analysis,
+        market=market,
     )
     reviewed = review_draft(
         run_id=drafted.run_id,
@@ -448,6 +457,7 @@ def make_finalized_run(
     *,
     article: str = CLEAN_ARTICLE,
     claims: list[Any] | None = None,
+    news_claims: list[Any] | None = None,
     analysis: dict[str, Any] | None = None,
     market: dict[str, Any] | None = None,
     review_client: Any = None,
@@ -468,6 +478,7 @@ def make_finalized_run(
         tmp_path,
         article=article,
         claims=claims,
+        news_claims=news_claims,
         analysis=analysis,
         market=market,
         review_client=review_client,

@@ -116,6 +116,44 @@ class SourceClaim(StrictModel):
     note: str | None = Field(default=None, max_length=400, description="Optional clarification.")
 
 
+MAX_NEWS_CLAIMS = 20
+MAX_EXCERPT_CHARS = 400
+
+
+class NewsClaim(StrictModel):
+    """One external-news statement in the article, and the item that supports it.
+
+    **Deliberately not a** :class:`SourceClaim`. Those address a dotted path into
+    ``context.json`` - a value this pipeline computed from closed candles, which
+    :mod:`goldpipeline.services.claim_resolver` resolves and compares exactly.
+    A news claim addresses a message somebody else published, recovered from the
+    producer brief, and the strongest thing that can be said about it is that the
+    article did not invent it. Two different kinds of evidence with two different
+    strengths; merging them into one list would let the weaker sort borrow the
+    authority of the stronger.
+
+    All three fields are excerpts rather than summaries, because every check a
+    later stage makes is a substring check. A paraphrase would have to be judged,
+    and nothing deterministic can judge a paraphrase.
+    """
+
+    statement: str = Field(
+        min_length=1,
+        max_length=MAX_EXCERPT_CHARS,
+        description="The article's own words asserting the fact, copied exactly from it.",
+    )
+    evidence: str = Field(
+        min_length=1,
+        max_length=MAX_EXCERPT_CHARS,
+        description="The words from the cited news item that support it, copied exactly.",
+    )
+    news_item_ids: list[str] = Field(
+        min_length=1,
+        max_length=8,
+        description="Ids from the producer brief, '<channel>:<message_id>'. Never a URL.",
+    )
+
+
 class WriterWarning(StrictModel):
     """Something the writer noticed and chose not to paper over."""
 
@@ -139,6 +177,14 @@ class WriterModelOutput(StrictModel):
     title: str = Field(max_length=MAX_TITLE_CHARS)
     article: str = Field(max_length=MAX_ARTICLE_CHARS)
     source_claims: list[SourceClaim] = Field(default_factory=list, max_length=MAX_CLAIMS)
+    news_claims: list[NewsClaim] = Field(
+        default_factory=list,
+        max_length=MAX_NEWS_CLAIMS,
+        description=(
+            "External-news statements and the producer-brief items behind them. "
+            "Empty unless the Run was fed by the internal producer."
+        ),
+    )
     warnings: list[WriterWarning] = Field(default_factory=list, max_length=MAX_WARNINGS)
 
     @field_validator("title", "article")
@@ -192,15 +238,19 @@ class WriterResult(StrictModel):
     article_chars: int = Field(ge=1)
     created_at: UtcDatetime = Field(default_factory=utc_now)
     source_claims: list[SourceClaim] = Field(default_factory=list)
+    news_claims: list[NewsClaim] = Field(default_factory=list)
     warnings: list[WriterWarning] = Field(default_factory=list)
     usage: WriterUsage = Field(default_factory=WriterUsage)
 
 
 __all__ = [
     "MAX_ARTICLE_CHARS",
+    "MAX_EXCERPT_CHARS",
+    "MAX_NEWS_CLAIMS",
     "MAX_TITLE_CHARS",
     "WRITER_SCHEMA_VERSION",
     "ClaimType",
+    "NewsClaim",
     "SourceClaim",
     "WarningCode",
     "WriterModelOutput",

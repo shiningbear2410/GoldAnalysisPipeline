@@ -177,6 +177,7 @@ def _execute(
         article_chars=len(article),
         created_at=now or utc_now(),
         source_claims=list(output.source_claims),
+        news_claims=list(output.news_claims),
         warnings=warnings,
         usage=response.usage,
     )

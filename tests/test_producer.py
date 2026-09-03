@@ -588,7 +588,7 @@ def test_brief_orders_items_as_the_collection_ranked_them() -> None:
 
 def test_brief_item_ids_are_channel_and_message_id() -> None:
     text = brief_for(make_collection(items=[make_item(channel="ktnews24", message_id=77)]))
-    assert "id:          ktnews24/77" in text
+    assert "id:          ktnews24:77" in text
     assert "url:         https://t.me/ktnews24/77" in text
 
 
