@@ -272,27 +272,45 @@ class TestRoutingConsistency:
         that dependency: exactly one service composes the checks, and the
         writer reaches them only through it. A second call site appearing
         elsewhere is how a narrow rule quietly becomes a global gate.
+
+        Round 6.4f split the original set in two rather than adding modules to
+        an allowlist. The distinction is what the guard was always protecting:
+        a module that *decides whether an article is acceptable* must be
+        reachable from one place, while a vocabulary of section names or a
+        counter of observable symptoms decides nothing and may be read by
+        anyone who needs to name a thing. The reviewer reads the second group -
+        it labels where a style finding sits, and it receives symptoms as
+        hints - and must never touch the first, because a second enforcer is
+        exactly the failure this test exists to catch.
         """
-        checks = {
-            "goldpipeline.schemas.article_contract",
-            "goldpipeline.schemas.output_findings",
+        enforcing = {
             "goldpipeline.services.article_contract_checks",
-            "goldpipeline.services.style_symptoms",
             "goldpipeline.services.causality_language",
             "goldpipeline.services.numeric_mentions",
             "goldpipeline.services.prose",
         }
-        own = {name.rsplit(".", 1)[1] for name in checks}
+        vocabulary = {
+            "goldpipeline.schemas.article_contract",
+            "goldpipeline.schemas.output_findings",
+            "goldpipeline.services.style_symptoms",
+        }
+        own = {name.rsplit(".", 1)[1] for name in enforcing | vocabulary}
         composer = "analysis_contract"
+
         for path in SRC.rglob("*.py"):
             if path.stem in own or path.stem == composer:
                 continue
-            imported = _imports(path) & checks
-            assert not imported, f"{path.name} imports {imported} directly"
+            imported = _imports(path) & enforcing
+            assert not imported, f"{path.name} enforces directly: {imported}"
 
         writer = _imports(SRC / "services" / "writer.py")
         assert "goldpipeline.services.analysis_contract" in writer
-        assert not (writer & checks), "the writer must go through analysis_contract"
+        assert not (writer & enforcing), "the writer must go through analysis_contract"
+
+        # The reviewer reads vocabulary and hints, and enforces nothing.
+        for module in ("reviewer.py", "reviewer_prompt.py", "style_review.py"):
+            imports = _imports(SRC / "services" / module)
+            assert not (imports & enforcing), f"{module} must not import an enforcing check"
 
 
 def _imports(path: Path) -> set[str]:

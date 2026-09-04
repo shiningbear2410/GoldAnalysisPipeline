@@ -15,15 +15,18 @@ generous.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from goldpipeline.prompts import DEFAULT_REVIEWER_PROMPT, load_prompt
+from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.context import AnalysisContext
+from goldpipeline.schemas.output_findings import OutputFinding
 from goldpipeline.schemas.review import ReviewerPrompt
 from goldpipeline.schemas.writer import WriterResult
 from goldpipeline.services.fencing import fenced_block, make_nonce
 from goldpipeline.services.market_facts import build_market_facts, format_recent_bars
 from goldpipeline.services.precheck import PrecheckReport, render_findings
+from goldpipeline.services.style_review import requires_style_review
 
 ARTICLE_LABEL = "ARTICLE_UNDER_REVIEW"
 SOURCE_LABEL = "UNTRUSTED_SOURCE"
@@ -34,6 +37,8 @@ SOURCE_OF_TRUTH_HEADING = "# SOURCE OF TRUTH"
 WRITER_METADATA_HEADING = "# WRITER METADATA"
 ARTICLE_HEADING = "# ARTICLE UNDER REVIEW"
 PRECHECK_HEADING = "# DETERMINISTIC PRECHECK"
+STYLE_SCOPE_HEADING = "# HUMAN STYLE SCOPE"
+STYLE_SYMPTOM_HEADING = "# DETERMINISTIC STYLE SYMPTOMS"
 
 
 def build_reviewer_prompt(
@@ -43,6 +48,8 @@ def build_reviewer_prompt(
     article: str,
     report: PrecheckReport,
     prompt_version: str = DEFAULT_REVIEWER_PROMPT,
+    article_type: ArticleType = ArticleType.ANALYSIS,
+    style_symptoms: Sequence[OutputFinding] = (),
     recent_bar_limit: int = RECENT_BAR_LIMIT,
     nonce_factory: Callable[[], str] | None = None,
 ) -> ReviewerPrompt:
@@ -54,6 +61,13 @@ def build_reviewer_prompt(
         article: The draft under review.
         report: What the deterministic pass established.
         prompt_version: Which versioned template to load.
+        article_type: What the Run is writing. Decides whether the human-style
+            axis is in scope at all - a rendered document has no voice, and
+            asking for a judgement of one would invite the model to invent it.
+        style_symptoms: Deterministic style observations, passed as *hints*.
+            The user turn says so explicitly: a symptom is a place to look, not
+            a finding, and the reviewer is told in both turns that it may look
+            and disagree.
         recent_bar_limit: How many trailing candles to include.
         nonce_factory: Injectable token generator, for byte-stable tests.
 
@@ -143,6 +157,11 @@ def build_reviewer_prompt(
         "",
         render_findings(report),
         "",
+        *_style_scope_section(
+            prompt_version=prompt_version,
+            article_type=article_type,
+            symptoms=style_symptoms,
+        ),
         "# TASK",
         "",
         f"Audit the article for run {context.run_id} against the SYSTEM RULES and the",
@@ -157,6 +176,71 @@ def build_reviewer_prompt(
     )
 
 
+def _style_scope_section(
+    *,
+    prompt_version: str,
+    article_type: ArticleType,
+    symptoms: Sequence[OutputFinding],
+) -> list[str]:
+    """Say whether style is in scope, and hand over the hints if it is.
+
+    Two different silences, told apart on purpose. When style is out of scope
+    the user turn says so in one line, so a style-aware system prompt does not
+    leave the model guessing whether an absent object was an oversight. When it
+    is in scope but nothing deterministic was found, that is stated too - an
+    empty hint list is evidence, and letting the model read it as "the hints
+    were not run" would make a clean article look unexamined.
+    """
+    if not requires_style_review(prompt_version=prompt_version, article_type=article_type):
+        return [
+            STYLE_SCOPE_HEADING,
+            "",
+            f"Human style is **not** in scope for this review: {article_type} has no prose",
+            "voice to judge. Omit `style_review` entirely. Judge content integrity only.",
+            "",
+        ]
+
+    lines = [
+        STYLE_SCOPE_HEADING,
+        "",
+        f"Human style **is** in scope: this is an {article_type} article. Return a",
+        "`style_review` object alongside your content verdict, following the HUMAN STYLE",
+        "REVIEW section of the SYSTEM RULES.",
+        "",
+        "Remember that the two axes are independent. A content `PASS` with a style",
+        "problem is a normal and expected answer, and so is a clean style review of an",
+        "article whose numbers are wrong.",
+        "",
+        STYLE_SYMPTOM_HEADING,
+        "",
+        "Deterministic observations about the text, counted in code. They are **hints,",
+        "not findings**. Look where they point, then judge for yourself: a symptom listed",
+        "here may read perfectly naturally, and an article with none of them may still",
+        "sound like a research note. Do not raise a style finding merely because a",
+        "symptom appears below, and do not withhold one merely because none does.",
+        "",
+    ]
+
+    if not symptoms:
+        lines.extend(
+            [
+                "The deterministic pass ran and found no style symptoms. That is an",
+                "observation about countable patterns, not a verdict on the writing.",
+                "",
+            ]
+        )
+        return lines
+
+    for symptom in symptoms:
+        counted = "" if symptom.count is None else f" (count={symptom.count}"
+        if counted and symptom.threshold is not None:
+            counted += f", threshold={symptom.threshold}"
+        counted += ")" if counted else ""
+        lines.append(f"- `{symptom.code}`{counted}: {symptom.message}")
+    lines.append("")
+    return lines
+
+
 __all__ = [
     "ARTICLE_HEADING",
     "ARTICLE_LABEL",
@@ -164,6 +248,8 @@ __all__ = [
     "RECENT_BAR_LIMIT",
     "SOURCE_LABEL",
     "SOURCE_OF_TRUTH_HEADING",
+    "STYLE_SCOPE_HEADING",
+    "STYLE_SYMPTOM_HEADING",
     "WRITER_METADATA_HEADING",
     "ReviewerPrompt",
     "build_reviewer_prompt",

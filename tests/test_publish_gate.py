@@ -605,7 +605,10 @@ def test_a_normalized_critical_issue_left_unresolved_still_blocks(
 
 def test_a_reported_fix_that_is_not_in_the_text_blocks(runs_dir: Path, tmp_path: Path) -> None:
     """Requirement 31.56: metadata claiming APPLIED is a claim, not proof."""
-    from goldpipeline.adapters.fake_reviewer import FakeReviewerClient
+    from goldpipeline.adapters.fake_reviewer import (
+        FakeReviewerClient,
+        clean_style_assessment,
+    )
     from goldpipeline.schemas.review import (
         Evidence,
         IssueCategory,
@@ -633,6 +636,7 @@ def test_a_reported_fix_that_is_not_in_the_text_blocks(runs_dir: Path, tmp_path:
             summary="Sai giá.",
             issues=[issue],
             revision_instructions=["Sửa giá."],
+            style_review=clean_style_assessment(),
         )
     )
     finalized = make_finalized_run(

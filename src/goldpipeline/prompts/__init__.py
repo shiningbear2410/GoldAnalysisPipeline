@@ -73,13 +73,36 @@ document is rendered deterministically and has no voice to contract.
 """
 
 GOLD_REVIEWER_V1 = "gold_reviewer_v1"
-"""Current reviewer prompt id."""
+"""The original reviewer prompt. Retained so historical reviews keep their meaning.
+
+Its rubric asked for style as a content issue category at LOW or MEDIUM. Seven
+production reviews were written under it, and their verdicts mean what that
+rubric said they mean.
+"""
+
+GOLD_REVIEWER_V2 = "gold_reviewer_v2"
+"""Current reviewer prompt id. Two independent axes.
+
+Content integrity is unchanged in meaning - the same precedence of evidence, the
+same categories, the same thresholds. What is new is a second judgement, human
+style, carried in its own object with its own vocabulary and its own severities,
+and explicitly forbidden from touching `status`, `score`, `issues` or
+`revision_instructions`.
+
+Includes `gold_human_style_v1` as an editorial rubric rather than restating it,
+so the reviewer is judging against the same contract the writer was given. A
+second copy would drift, and then the two stages would disagree about the voice
+for a reason invisible in any diff.
+
+A new file rather than an edit to v1, because reviews record the prompt they
+were judged under.
+"""
 
 GOLD_FINALIZER_V1 = "gold_finalizer_v1"
 """Current finalizer prompt id."""
 
 DEFAULT_WRITER_PROMPT = GOLD_WRITER_V4
-DEFAULT_REVIEWER_PROMPT = GOLD_REVIEWER_V1
+DEFAULT_REVIEWER_PROMPT = GOLD_REVIEWER_V2
 DEFAULT_FINALIZER_PROMPT = GOLD_FINALIZER_V1
 
 INCLUDE_PATTERN = re.compile(r"^<!-- include: ([a-z0-9_]+) -->$", re.MULTILINE)
@@ -167,6 +190,7 @@ __all__ = [
     "GOLD_FINALIZER_V1",
     "GOLD_HUMAN_STYLE_V1",
     "GOLD_REVIEWER_V1",
+    "GOLD_REVIEWER_V2",
     "GOLD_WRITER_V1",
     "GOLD_WRITER_V2",
     "GOLD_WRITER_V3",

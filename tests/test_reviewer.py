@@ -21,6 +21,7 @@ from conftest import (
 
 from goldpipeline.adapters.fake_reviewer import (
     FakeReviewerClient,
+    clean_style_assessment,
     erroring_client,
     malformed_client,
     passing_client,
@@ -75,6 +76,10 @@ def client_returning(**overrides: Any) -> FakeReviewerClient:
             "summary": "Không phát hiện vấn đề.",
             "issues": [],
             "revision_instructions": [],
+            # Round 6.4f: the default prompt is style-aware, so an ANALYSIS
+            # review must carry a style judgement. Overridable, but supplied by
+            # default because none of these tests are about style.
+            "style_review": clean_style_assessment(),
         }
         fields.update(overrides)
         return ReviewModelOutput(**fields)
@@ -127,7 +132,7 @@ def test_the_artifact_records_what_it_reviewed(drafted_run: Any, runs_dir: Path)
     )
     assert review.reviewed_at == REVIEW_NOW
     assert review.provider == "fake"
-    assert review.prompt_version == "gold_reviewer_v1"
+    assert review.prompt_version == "gold_reviewer_v2"
 
 
 def test_the_manifest_is_updated(drafted_run: Any, runs_dir: Path) -> None:
@@ -227,6 +232,7 @@ def test_severity_reconciliation_round_trips_through_gpt_review_json(
                 )
             ],
             revision_instructions=["Sửa giá."],
+            style_review=clean_style_assessment(),
         )
 
     result = run_reviewer(runs_dir, drafted.run_id, client=FakeReviewerClient(output_factory=build))
@@ -727,7 +733,7 @@ def test_a_hostile_analyst_note_does_not_steer_the_review(runs_dir: Path, tmp_pa
     # Configuration is untouched; the note changed nothing about the stage.
     assert review.provider == "fake"
     assert review.model == "fake-reviewer-v1"
-    assert review.prompt_version == "gold_reviewer_v1"
+    assert review.prompt_version == "gold_reviewer_v2"
 
     # And the hostile text stayed on the data side of the prompt. Asserted as
     # invariance: the rules themselves quote "BTCUSD" as an example of what to

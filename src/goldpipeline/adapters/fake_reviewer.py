@@ -25,6 +25,7 @@ from goldpipeline.domain.errors import (
 )
 from goldpipeline.schemas.review import (
     Evidence,
+    HumanStyleAssessment,
     IssueCategory,
     ReviewIssue,
     ReviewModelOutput,
@@ -38,6 +39,35 @@ FAKE_MODEL = "fake-reviewer-v1"
 
 _FINDING_RE = re.compile(r"^\s*\d+\.\s*\[(?P<severity>[A-Z]+)\]\s*(?P<code>[A-Z_]+):", re.MULTILINE)
 _CLEAN_MARKER = "No deterministic problems were found"
+
+_STYLE_IN_SCOPE_MARKER = "Human style **is** in scope"
+"""How the fake tells whether it was asked for a style judgement.
+
+Read back from the rendered prompt, exactly like the precheck findings above and
+for the same reason: a fake that decided this from its own configuration would
+keep answering correctly after the plumbing that carries the question broke.
+"""
+
+
+def style_in_scope(request: ReviewRequest) -> bool:
+    """Whether the prompt asked this review for a human-style judgement."""
+    return _STYLE_IN_SCOPE_MARKER in request.prompt.user
+
+
+def clean_style_assessment(score: int = 92) -> HumanStyleAssessment:
+    """A style judgement with nothing to report.
+
+    The default on purpose. The fake could mirror the deterministic symptoms the
+    prompt carries into style findings, and it deliberately does not: a symptom
+    is a hint and a finding is a judgement, and a fake that collapsed the two
+    would quietly teach every test the exact confusion the round is guarding
+    against. Tests that want findings supply them.
+    """
+    return HumanStyleAssessment(
+        style_score=score,
+        summary="Bài viết đọc tự nhiên, có quan điểm rõ ràng, không thừa chữ.",
+        findings=[],
+    )
 
 
 @dataclass(frozen=True)
@@ -123,6 +153,7 @@ class FakeReviewerClient:
 
     def _build_default(self, request: ReviewRequest) -> ReviewModelOutput:
         findings = _read_findings(request)
+        style = clean_style_assessment() if style_in_scope(request) else None
 
         if not findings:
             return ReviewModelOutput(
@@ -135,6 +166,7 @@ class FakeReviewerClient:
                 ),
                 issues=[],
                 revision_instructions=[],
+                style_review=style,
             )
 
         severities = {finding.severity for finding in findings}
@@ -177,6 +209,7 @@ class FakeReviewerClient:
                 f"Xử lý vấn đề {issue.issue_id} theo đúng dữ liệu trong context."
                 for issue in issues
             ],
+            style_review=style,
         )
 
 
@@ -194,6 +227,7 @@ def passing_client(score: int = 95) -> FakeReviewerClient:
             summary="Không phát hiện vấn đề nào.",
             issues=[],
             revision_instructions=[],
+            style_review=clean_style_assessment() if style_in_scope(request) else None,
         )
     )
 
@@ -224,9 +258,11 @@ __all__ = [
     "FAKE_MODEL",
     "FAKE_PROVIDER",
     "FakeReviewerClient",
+    "clean_style_assessment",
     "erroring_client",
     "failing_client",
     "malformed_client",
     "passing_client",
+    "style_in_scope",
     "timing_out_client",
 ]

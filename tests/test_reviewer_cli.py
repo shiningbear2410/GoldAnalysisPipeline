@@ -73,7 +73,7 @@ def test_json_output_reports_the_essentials(
     assert payload["model_verdict"] == "PASS"
     assert payload["verdict_source"] == "MODEL"
     assert payload["provider"] == "fake"
-    assert payload["prompt_version"] == "gold_reviewer_v1"
+    assert payload["prompt_version"] == "gold_reviewer_v2"
     assert payload["deterministic_findings"] == []
 
 

@@ -41,6 +41,8 @@ from goldpipeline.domain.errors import (
     RunNotReviewableError,
 )
 from goldpipeline.prompts import DEFAULT_REVIEWER_PROMPT
+from goldpipeline.schemas.article import ArticleType
+from goldpipeline.schemas.article_contract import contract_for
 from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.context import AnalysisContext
 from goldpipeline.schemas.manifest import RunError, RunManifest, RunStatus
@@ -55,6 +57,8 @@ from goldpipeline.services.pipeline import CONTEXT_FILENAME
 from goldpipeline.services.precheck import run_prechecks
 from goldpipeline.services.review_policy import apply_policy, validate_response
 from goldpipeline.services.reviewer_prompt import build_reviewer_prompt
+from goldpipeline.services.style_review import resolve_style_review
+from goldpipeline.services.style_symptoms import find_style_symptoms
 from goldpipeline.services.writer import DRAFT_FILENAME, WRITER_FILENAME
 from goldpipeline.storage.run_store import PreparedArtifact, RunDirectory, RunStore
 
@@ -196,12 +200,19 @@ def _execute(
         len(report.blocking),
     )
 
+    # Provenance is absent on Runs created before it existed, and those Runs
+    # were all ANALYSIS - which is what the manifest field itself defaults to.
+    article_type = manifest.provenance.article_type if manifest.provenance else ArticleType.ANALYSIS
+    symptoms = find_style_symptoms(inputs.article, contract=contract_for(article_type))
+
     prompt = build_reviewer_prompt(
         context=inputs.context,
         writer_result=inputs.writer_result,
         article=inputs.article,
         report=report,
         prompt_version=prompt_version,
+        article_type=article_type,
+        style_symptoms=symptoms,
     )
 
     response = client.review(
@@ -210,6 +221,24 @@ def _execute(
 
     validate_response(response.output, run_id=run.run_id)
     outcome = apply_policy(response.output, report)
+
+    # Deliberately after `apply_policy`, and deliberately not passed to it. The
+    # verdict is already decided by the time the style judgement is built, so
+    # there is no line of code where style could reach the transition even by
+    # mistake - see `services/style_review` for why that is structural rather
+    # than a flag.
+    style_review = resolve_style_review(
+        response.output, prompt_version=prompt.prompt_version, article_type=article_type
+    )
+    if style_review is not None:
+        logger.info(
+            "run=%s stage=review.style verdict=%s score=%d findings=%d symptoms=%d",
+            run.run_id,
+            style_review.style_verdict,
+            style_review.style_score,
+            len(style_review.findings),
+            len(symptoms),
+        )
 
     result = ReviewResult(
         run_id=run.run_id,
@@ -222,6 +251,7 @@ def _execute(
         verdict_source=outcome.verdict_source,
         policy_notes=outcome.notes,
         deterministic_findings=list(report.findings),
+        style_review=style_review,
         model=response.model,
         provider=response.provider,
         prompt_version=prompt.prompt_version,

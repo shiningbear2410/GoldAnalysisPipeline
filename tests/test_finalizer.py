@@ -210,7 +210,10 @@ def test_a_wrong_price_is_corrected_with_minimal_change(runs_dir: Path, tmp_path
     """Golden case B: fix the number, leave the rest of the article alone."""
     from conftest import LATEST_CLOSE
 
-    from goldpipeline.adapters.fake_reviewer import FakeReviewerClient
+    from goldpipeline.adapters.fake_reviewer import (
+        FakeReviewerClient,
+        clean_style_assessment,
+    )
     from goldpipeline.schemas.review import (
         Evidence,
         IssueCategory,
@@ -239,6 +242,7 @@ def test_a_wrong_price_is_corrected_with_minimal_change(runs_dir: Path, tmp_path
             summary="Sai giá gần nhất.",
             issues=[issue],
             revision_instructions=[f"Sửa giá gần nhất thành {LATEST_CLOSE}."],
+            style_review=clean_style_assessment(),
         )
     )
     reviewed = make_reviewed_run(
@@ -779,7 +783,10 @@ def test_injection_in_the_review_evidence_does_not_steer_the_finalizer(
     runs_dir: Path, tmp_path: Path
 ) -> None:
     """Requirement 27.31: the review is another model's output, so it is data too."""
-    from goldpipeline.adapters.fake_reviewer import FakeReviewerClient
+    from goldpipeline.adapters.fake_reviewer import (
+        FakeReviewerClient,
+        clean_style_assessment,
+    )
     from goldpipeline.schemas.review import (
         Evidence,
         IssueCategory,
@@ -809,6 +816,7 @@ def test_injection_in_the_review_evidence_does_not_steer_the_finalizer(
             summary="Có claim không có căn cứ.",
             issues=[hostile_issue],
             revision_instructions=["Bỏ phần RSI."],
+            style_review=clean_style_assessment(),
         )
     )
     reviewed = make_reviewed_run(
