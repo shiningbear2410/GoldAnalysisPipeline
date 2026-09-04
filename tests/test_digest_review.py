@@ -20,12 +20,18 @@ separate, single request, and it is not run from the suite.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
-from goldpipeline.prompts import DEFAULT_REVIEWER_PROMPT, GOLD_REVIEWER_V2
+from goldpipeline.prompts import (
+    DEFAULT_DIGEST_WRITER_PROMPT,
+    DEFAULT_REVIEWER_PROMPT,
+    GOLD_REVIEWER_V2,
+)
 from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import Timeframe
 from goldpipeline.schemas.digest import (
@@ -374,3 +380,209 @@ def test_the_prompt_names_the_article_type_it_is_judging() -> None:
     rendered = prompt()
 
     assert str(ArticleType.NEWS_DIGEST) in rendered.user
+
+
+# --------------------------------------------------------------------------
+# Round 6.5c.1a: the shadow boundary, proven on the object that decides
+# --------------------------------------------------------------------------
+
+
+def style_review_needing_revision() -> Any:
+    """A style verdict that WOULD trigger a repair on an ANALYSIS Run."""
+    from goldpipeline.schemas.review import (
+        HumanStyleAssessment,
+        HumanStyleCategory,
+        HumanStyleFinding,
+        StyleSeverity,
+    )
+    from goldpipeline.services.style_review import build_style_review
+
+    return build_style_review(
+        HumanStyleAssessment(
+            style_score=54,
+            summary="Đọc như bản tin máy.",
+            findings=[
+                HumanStyleFinding(
+                    finding_id="style-high",
+                    category=HumanStyleCategory.REPETITIVE_RHYTHM,
+                    severity=StyleSeverity.HIGH,
+                    problem="Mỗi câu đều mở đầu bằng cùng một cấu trúc.",
+                    repair_instruction="Cắt câu mở đầu lặp lại ở mục thứ hai.",
+                )
+            ],
+        )
+    )
+
+
+def review_result(article_type: ArticleType, style: Any) -> Any:
+    from goldpipeline.schemas.review import ReviewResult, ReviewStatus
+
+    return ReviewResult(
+        run_id=RUN_ID,
+        status=ReviewStatus.PASS,
+        score=96,
+        summary="Nội dung sạch.",
+        model_status=ReviewStatus.PASS,
+        style_review=style,
+        model="fake",
+        provider="fake",
+        prompt_version=DEFAULT_REVIEWER_PROMPT,
+        context_sha256="a" * 64,
+        draft_sha256="b" * 64,
+        writer_metadata_sha256="c" * 64,
+    )
+
+
+def test_a_style_needs_revision_cannot_finalize_a_digest() -> None:
+    """The §5 boundary, asserted on `effective_action` rather than inferred.
+
+    Identical inputs, one field different. A HIGH style finding on an ANALYSIS
+    Run buys a finalizer call; the same finding on a NEWS_DIGEST buys nothing,
+    because `STYLE_ACTIVE_TYPES` is the only switch that turns a style verdict
+    into a rewrite and NEWS_DIGEST is not in it.
+    """
+    from goldpipeline.schemas.review import StyleVerdict
+    from goldpipeline.services.review_action import ReviewAction, effective_action
+
+    style = style_review_needing_revision()
+    assert style.style_verdict is StyleVerdict.NEEDS_REVISION
+
+    digest = effective_action(
+        review_result(ArticleType.NEWS_DIGEST, style),
+        article_type=ArticleType.NEWS_DIGEST,
+    )
+    analysis = effective_action(
+        review_result(ArticleType.ANALYSIS, style),
+        article_type=ArticleType.ANALYSIS,
+    )
+
+    assert digest.action is ReviewAction.PASS_THROUGH
+    assert digest.style_findings == ()
+    assert digest.style_verdict is StyleVerdict.NEEDS_REVISION, "judged, and recorded"
+
+    assert analysis.action is ReviewAction.FINALIZE
+    assert analysis.style_findings, "the same finding does buy a repair on ANALYSIS"
+
+
+def test_the_reviewer_is_told_the_entailment_gap_is_its_own() -> None:
+    """§3F: an undeclared causal bridge is unreachable by deterministic code.
+
+    The provenance suite asserts that code passes it. This asserts the failure
+    is *routed* rather than dropped - the prompt says, in words, that a motive
+    the item does not report is the reviewer's to catch.
+    """
+    rendered = prompt()
+
+    assert "the gap is yours" in rendered.user
+    assert "vì lo lạm phát" in rendered.user
+    assert "Deciding which clauses assert a" in rendered.user
+
+
+def test_declared_claims_reach_the_reviewer_with_their_verdicts() -> None:
+    """Passes included: a claim shown SUPPORTED is one it need not re-check."""
+    from goldpipeline.schemas.writer import NewsClaim
+
+    prepared = facts()
+    answer = DigestEditorial(
+        run_id=RUN_ID,
+        status=WriterStatus.COMPLETED,
+        items=(
+            DigestItem(
+                news_item_id="goldnewsvn:902",
+                headline="Chỉ số USD giảm 0.21% trong phiên.",
+                impact=ImpactMarker.SUPPORTS_GOLD,
+            ),
+        ),
+        balance="Tin nghiêng tích cực nhờ USD yếu.",
+        news_claims=(
+            NewsClaim(
+                statement="Chỉ số USD giảm 0.21% trong phiên.",
+                evidence="Chỉ số USD giảm 0.21% trong phiên.",
+                news_item_ids=["goldnewsvn:902"],
+            ),
+        ),
+    )
+    body = assemble_digest(answer, prepared)
+    rendered = build_digest_reviewer_prompt(
+        facts=prepared,
+        editorial=answer,
+        article=body,
+        run_id=RUN_ID,
+        precheck=digest_precheck(answer, prepared, article=body),
+    )
+
+    assert "declared news claims quotes evidence that is really in the item" in rendered.user
+    assert "1 declared news claims" in rendered.user
+
+
+# --------------------------------------------------------------------------
+# Round 6.5c.1a: registry-ready is not runtime-dispatched
+# --------------------------------------------------------------------------
+
+
+def test_the_orchestrator_refuses_a_digest_rather_than_writing_the_wrong_article(
+    tmp_path: Any,
+) -> None:
+    """The Round 6.5c.1 audit finding, pinned so it cannot regress silently.
+
+    NEWS_DIGEST is ready in the product registry and has its own prompt, and
+    Round 6.5b stopped there. `_run_write` would then have handed the digest
+    prompt - which instructs a model to return editorial content and no article
+    - to `write_draft`, a stage that parses an article. The result would have
+    been shaped like neither product.
+
+    So the Run stops at WRITE, loudly. This test is what keeps "registry ready"
+    from being mistaken for "runtime dispatched" by a later reader.
+    """
+    from conftest import (  # noqa: PLC0415
+        PIPELINE_NOW,
+        make_analysis_payload,
+        make_market_payload,
+        make_tracked_clients,
+        write_json,
+    )
+
+    from goldpipeline.domain.errors import RunNotReadyError
+    from goldpipeline.schemas.article import ArticleType as AT
+    from goldpipeline.services.article_routing import writer_prompt_for
+    from goldpipeline.services.orchestrator import run_pipeline
+    from goldpipeline.storage.run_store import RunStore
+
+    # The routing layer is willing; only the runtime guard is not.
+    assert writer_prompt_for(AT.NEWS_DIGEST) == DEFAULT_DIGEST_WRITER_PROMPT
+
+    from goldpipeline.adapters.file_source import (  # noqa: PLC0415
+        JsonFileAnalysisSource,
+        JsonFileMarketDataSource,
+    )
+
+    class DigestAnalysisSource:
+        """The real file adapter, declaring the article type an event would."""
+
+        def __init__(self, path: Any) -> None:
+            self._inner = JsonFileAnalysisSource(path)
+
+        def load(self) -> Any:
+            loaded = self._inner.load()
+            return replace(loaded, article_type=AT.NEWS_DIGEST)
+
+    sources = tmp_path / "sources"
+    sources.mkdir(parents=True, exist_ok=True)
+    analysis_path = write_json(sources / "telegram_input.json", make_analysis_payload())
+    market_path = write_json(sources / "ohlc.json", make_market_payload())
+
+    clients = make_tracked_clients()
+    outcome = run_pipeline(
+        analysis_source=DigestAnalysisSource(analysis_path),
+        market_source=JsonFileMarketDataSource(market_path),
+        store=RunStore(tmp_path / "runs"),
+        clients=clients.as_pipeline_clients(),
+        expected_symbol="XAUUSD",
+        now=PIPELINE_NOW,
+    )
+
+    assert not outcome.succeeded
+    assert isinstance(outcome.error, RunNotReadyError)
+    assert "does not yet dispatch" in str(outcome.error)
+    assert not clients.writer.calls, "no writer was called with a digest prompt"
+    assert "writer" not in clients.built, "no writer client was even constructed"

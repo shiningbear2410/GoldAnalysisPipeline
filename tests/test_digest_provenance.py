@@ -34,14 +34,15 @@ from goldpipeline.schemas.news_digest import (
     DigestSourceItem,
     ImpactMarker,
 )
-from goldpipeline.schemas.writer import WriterStatus
+from goldpipeline.schemas.provenance import ClaimVerdict
+from goldpipeline.schemas.writer import NewsClaim, WriterStatus
 from goldpipeline.services.digest_context import build_digest_facts
 from goldpipeline.services.digest_provenance import (
     EXEMPT_SEMANTICS,
     authorised_quantities,
     unsupported_balance_numbers,
 )
-from goldpipeline.services.digest_writer import validate_editorial
+from goldpipeline.services.digest_writer import digest_precheck, validate_editorial
 from goldpipeline.services.numeric_semantics import SemanticType
 
 RUN_ID = "20260904_060000_abcdef"
@@ -337,3 +338,185 @@ def test_the_check_does_not_read_the_clock_or_the_network() -> None:
     body = inspect.getsource(digest_provenance)
     for forbidden in ("datetime.now", "utcnow", "requests", "httpx", "time.time"):
         assert forbidden not in body, forbidden
+
+
+# --------------------------------------------------------------------------
+# Round 6.5c.1a: the 🧭 Cán cân contract, clause by clause
+#
+# Round 6.5c.1 answered only the numeric half. These cases fix the whole
+# contract in place, including the parts deterministic code deliberately does
+# not own - because an unowned case that nobody wrote down is the one that
+# quietly becomes owned by accident.
+# --------------------------------------------------------------------------
+
+
+def claimed(
+    balance: str,
+    *,
+    statement: str,
+    evidence: str,
+    item_ids: tuple[str, ...] = ("goldnewsvn:903",),
+    sources: tuple[DigestSourceItem, ...] = SOURCES,
+) -> DigestEditorial:
+    """An editorial whose balance carries one declared claim."""
+    return DigestEditorial(
+        run_id=RUN_ID,
+        status=WriterStatus.COMPLETED,
+        items=(
+            DigestItem(
+                news_item_id="goldnewsvn:903",
+                headline="SPDR Gold Trust mua ròng 9.98 tấn.",
+                impact=ImpactMarker.SUPPORTS_GOLD,
+            ),
+        ),
+        balance=balance,
+        news_claims=(
+            NewsClaim(statement=statement, evidence=evidence, news_item_ids=list(item_ids)),
+        ),
+    )
+
+
+def test_contract_a_a_pure_editorial_view_needs_no_source() -> None:
+    """ "Tin trong cửa sổ đang nghiêng tích cực" is a judgement, not a fact.
+
+    It appears verbatim in no item and must not have to. Requiring a citation
+    for the one sentence the section exists to produce would leave the balance
+    able to say nothing at all.
+    """
+    view = editorial("Tin trong cửa sổ đang nghiêng tích cực.")
+
+    validate_editorial(view, facts(), run_id=RUN_ID)
+    assert digest_precheck(view, facts()).ok
+
+
+def test_contract_b_a_declared_factual_clause_is_checked_against_its_item() -> None:
+    answer = claimed(
+        "USD giảm 0.21%, đủ để giữ hướng tích cực.",
+        statement="USD giảm 0.21%",
+        evidence="Chỉ số USD giảm 0.21% trong phiên.",
+        item_ids=("goldnewsvn:902",),
+    )
+
+    report = digest_precheck(answer, facts())
+
+    assert [c.verdict for c in report.claims] == [ClaimVerdict.SUPPORTED]
+    assert report.claims[0].supporting_item_id == "goldnewsvn:902"
+
+
+def test_contract_b_a_claim_citing_an_item_that_does_not_say_it_is_refused() -> None:
+    """The locality half of the contract, and the layer that owns it."""
+    answer = claimed(
+        "USD giảm 0.21%.",
+        statement="USD giảm 0.21%",
+        # Real quote, wrong item: this text is in 902, not in 903.
+        evidence="Chỉ số USD giảm 0.21% trong phiên.",
+        item_ids=("goldnewsvn:903",),
+    )
+
+    with pytest.raises(WriterResponseError) as excinfo:
+        validate_editorial(answer, facts(), run_id=RUN_ID)
+
+    assert "cited items do not support" in str(excinfo.value)
+    assert excinfo.value.details["unsupported_claims"][0]["verdict"] == str(
+        ClaimVerdict.EVIDENCE_NOT_IN_ITEM
+    )
+
+
+def test_contract_c_a_numeric_clause_needs_both_halves() -> None:
+    """Locality and typed equivalence are independent, and both must hold.
+
+    A claim can quote its item perfectly and still put a number in the balance
+    that the item never stated - which is precisely how the Round 6.5b defect
+    passed. Neither check subsumes the other.
+    """
+    rounded = claimed(
+        "SPDR mua ròng gần 10 tấn.",
+        statement="SPDR mua ròng gần 10 tấn",
+        evidence="SPDR Gold Trust mua ròng 9.98 tấn.",
+        item_ids=("goldnewsvn:903",),
+    )
+
+    report = digest_precheck(rounded, facts())
+
+    assert report.claims[0].supported, "locality is satisfied - the evidence is really there"
+    assert report.unsupported_numbers == ("10",), "and the number is still refused"
+    assert not report.ok
+
+
+def test_contract_d_re_quantification_has_no_tolerance() -> None:
+    """9.98 -> 10 is refused, and so is 9.98 -> 9.9. There is no near-enough."""
+    for approximation in ("gần 10 tấn", "khoảng 9.9 tấn", "xấp xỉ 10.0 tấn"):
+        assert check(f"SPDR mua ròng {approximation}."), approximation
+
+
+def test_contract_e_a_fact_may_be_carried_without_repeating_its_number() -> None:
+    """ "SPDR tiếp tục mua ròng" drops the figure rather than approximating it.
+
+    This is the escape the prompt actually wants a writer to take, so it must
+    be open: allowed by the numeric guard because it quantifies nothing, and
+    supported by locality because the claim quotes its item.
+    """
+    answer = claimed(
+        "SPDR tiếp tục mua ròng, USD yếu đi.",
+        statement="SPDR tiếp tục mua ròng",
+        evidence="SPDR Gold Trust mua ròng 9.98 tấn.",
+        item_ids=("goldnewsvn:903",),
+    )
+
+    validate_editorial(answer, facts(), run_id=RUN_ID)
+    assert digest_precheck(answer, facts()).ok
+
+
+def test_contract_f_an_undeclared_causal_bridge_is_not_caught_here() -> None:
+    """The boundary, asserted rather than hoped about.
+
+    "ETF mua vì lo lạm phát tăng" adds a motive the item does not report. It
+    contains no unsourced quantity and declares no claim, so every
+    deterministic check passes it - and that is the honest answer, not a bug.
+    Motive is entailment, and this layer judges no meaning.
+
+    What must be true is that the failure is *routed*: the reviewer is handed
+    the item and the sentence, and told this gap is its own. The test that the
+    prompt says so lives in test_digest_review.
+    """
+    bridge = editorial("ETF mua vì lo lạm phát tăng.")
+
+    validate_editorial(bridge, facts(), run_id=RUN_ID)
+    assert digest_precheck(bridge, facts()).ok, "deterministic code cannot see a motive"
+
+
+def test_the_price_reaction_is_not_a_news_source() -> None:
+    """A claim may not cite the market section as evidence for a news fact.
+
+    The two are different kinds of thing: the price block is arithmetic over
+    candles, and a claim is about what somebody published. Quoting one as the
+    other would let a computed number vouch for an event.
+    """
+    prepared = facts()
+    answer = claimed(
+        "Giá giảm trong cửa sổ.",
+        statement="Giá giảm trong cửa sổ",
+        evidence=prepared.price_reaction_block.splitlines()[-1],
+        item_ids=("goldnewsvn:903",),
+    )
+
+    report = digest_precheck(answer, prepared)
+
+    assert report.claims[0].verdict is ClaimVerdict.EVIDENCE_NOT_IN_ITEM
+
+
+def test_supportive_news_against_a_falling_price_is_not_a_contradiction() -> None:
+    """The window this pipeline was built for, and it must pass cleanly.
+
+    News leaning supportive while price fell is two true observations. A check
+    that treated the disagreement as an error would force the writer to
+    suppress one of them, which is the failure the causally-neutral price
+    section exists to prevent.
+    """
+    prepared = facts(net="-50.24")
+    assert prepared.price_reaction.net_change < 0
+
+    honest = editorial("Tin nghiêng tích cực, nhưng giá vẫn đi xuống trong cửa sổ.")
+
+    validate_editorial(honest, prepared, run_id=RUN_ID)
+    assert digest_precheck(honest, prepared).ok

@@ -34,7 +34,11 @@ from goldpipeline.schemas.article_contract import contract_for
 from goldpipeline.schemas.news_digest import DigestEditorial
 from goldpipeline.schemas.writer import WriterPrompt
 from goldpipeline.services.digest_context import DigestFacts
-from goldpipeline.services.digest_provenance import unsupported_balance_numbers
+from goldpipeline.services.digest_provenance import (
+    CheckedClaim,
+    unsupported_balance_numbers,
+    verify_claims,
+)
 from goldpipeline.services.digest_render import render_digest
 from goldpipeline.services.fencing import fenced_block, make_nonce
 
@@ -146,10 +150,28 @@ class DigestPrecheckReport:
     pipeline owns.
     """
 
+    claims: tuple[CheckedClaim, ...] = ()
+    """Every declared news claim, judged by locality. Supported ones included.
+
+    The reviewer needs the passes as much as the failures: a claim shown as
+    SUPPORTED is one it does not have to re-check, and the count of claims
+    against the count of factual sentences is a gap only a reader can see.
+    """
+
+    @property
+    def unsupported_claims(self) -> tuple[CheckedClaim, ...]:
+        """The declared claims that locality refused."""
+        return tuple(claim for claim in self.claims if not claim.supported)
+
     @property
     def ok(self) -> bool:
         """Whether nothing was found. Not a verdict - the reviewer still runs."""
-        return not (self.unknown_item_ids or self.unsupported_numbers or self.altered_lines)
+        return not (
+            self.unknown_item_ids
+            or self.unsupported_numbers
+            or self.altered_lines
+            or self.unsupported_claims
+        )
 
 
 def digest_precheck(
@@ -157,12 +179,20 @@ def digest_precheck(
 ) -> DigestPrecheckReport:
     """Run every deterministic check a digest editorial is subject to.
 
+    Four questions, and none of them is about meaning: are the cited ids real,
+    does the balance quantify only what the digest holds, did the deterministic
+    shell survive, and does each declared claim's evidence actually sit in the
+    item it names. Whether an *undeclared* sentence needed a claim is the
+    reviewer's question - see :mod:`goldpipeline.services.digest_provenance` for
+    where that boundary is drawn and why.
+
     Args:
         editorial: The model's answer.
         facts: The Run's deterministic facts.
         article: The assembled digest, when there is one. Omitted before
             assembly, and then the verbatim check has nothing to look at rather
-            than a missing article to complain about.
+            than a missing article to complain about, and claim statements are
+            not looked for in an article that does not exist yet.
     """
     offered = set(facts.news_item_ids)
     return DigestPrecheckReport(
@@ -180,25 +210,31 @@ def digest_precheck(
             if article is None
             else tuple(line for line in facts.deterministic_lines if line not in article)
         ),
+        claims=verify_claims(editorial.news_claims, facts.news_items, article),
     )
 
 
 def validate_editorial(editorial: DigestEditorial, facts: DigestFacts, *, run_id: str) -> None:
     """Refuse an answer that is not about this Run, or that outruns its evidence.
 
-    Three questions, in the order a failure is worth reporting: is this about the
-    right Run, does every bullet name an item that was offered, and does the
-    balance quantify anything nothing vouches for.
+    Four questions, in the order a failure is worth reporting: is this about the
+    right Run, does every bullet name an item that was offered, does the balance
+    quantify anything nothing vouches for, and does each declared claim's
+    evidence actually sit in the item it cites.
+
+    What this does **not** ask is whether an undeclared sentence should have
+    been claimed. That needs a judgement about which clauses are factual, and
+    the reviewer is given the items and the article to make it.
 
     Raises:
         WriterResponseError: Wrong Run; an item naming a source the prompt did
-            not supply; or a balance stating a magnitude no item and no computed
-            figure holds. The second is either a fabrication or a channel name
-            where an item id belongs, and both would publish a bullet whose
-            evidence cannot be found. The third is the Round 6.5c.1 finding: the
-            per-item provenance checks pass a rounded restatement, because they
-            match evidence and statement against their own sources and never
-            against each other.
+            not supply; a balance stating a magnitude no item and no computed
+            figure holds; or a claim citing an item that does not support it.
+            The second is either a fabrication or a channel name where an item
+            id belongs, and both would publish a bullet whose evidence cannot be
+            found. The third is the Round 6.5c.1 finding: the per-item checks
+            pass a rounded restatement, because they match evidence and
+            statement against their own sources and never against each other.
     """
     if editorial.run_id != run_id:
         raise WriterResponseError(
@@ -218,6 +254,21 @@ def validate_editorial(editorial: DigestEditorial, facts: DigestFacts, *, run_id
         raise WriterResponseError(
             "the balance states quantities that no collected item or computed figure supports",
             unsupported_numbers=list(report.unsupported_numbers),
+        )
+
+    unsupported = report.unsupported_claims
+    if unsupported:
+        raise WriterResponseError(
+            "the digest declares claims its cited items do not support",
+            unsupported_claims=[
+                {
+                    "statement": claim.statement,
+                    "news_item_ids": list(claim.news_item_ids),
+                    "verdict": str(claim.verdict),
+                    "detail": claim.detail,
+                }
+                for claim in unsupported
+            ],
         )
 
 
@@ -248,6 +299,7 @@ def assemble_digest(editorial: DigestEditorial, facts: DigestFacts) -> str:
 
 __all__ = [
     "MARKET_HEADING",
+    "CheckedClaim",
     "DigestPrecheckReport",
     "NEWS_HEADING",
     "NEWS_ITEMS_LABEL",

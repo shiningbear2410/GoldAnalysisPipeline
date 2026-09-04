@@ -256,10 +256,29 @@ def _precheck_lines(report: DigestPrecheckReport, *, offered: int) -> Sequence[s
         "- The title, window line and price block appear in the article exactly as code "
         "rendered them: "
         + ("PASS" if not report.altered_lines else f"FAIL - altered: {list(report.altered_lines)}"),
+        f"- Each of the {len(report.claims)} declared news claims quotes evidence that is "
+        "really in the item it cites, and a statement that is really in the article: "
+        + (
+            "PASS"
+            if not report.unsupported_claims
+            else "FAIL - "
+            + "; ".join(
+                f"{claim.verdict} ({claim.detail}) for {claim.statement[:60]!r}"
+                for claim in report.unsupported_claims
+            )
+        ),
         "",
         "The third check is why you will not find a price error in the market section:",
         "that block is copied, not written. Spend your attention on the bullets and the",
         "balance, which are.",
+        "",
+        "**The fourth check is narrower than it sounds, and the gap is yours.** It proves",
+        "that each claim the writer *declared* quotes its item honestly. It cannot know",
+        "that a sentence carrying no claim needed one. So a factual assertion with no",
+        "claim behind it, or a motive attached to an item that reports only an action -",
+        '"ETF mua **vì lo lạm phát**" where the item says only that the ETF bought - is',
+        "unsupported, and nothing before you can see it. Deciding which clauses assert a",
+        "fact is a judgement, which is why it is put to you and not to a substring test.",
     ]
 
 

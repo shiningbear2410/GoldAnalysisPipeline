@@ -184,12 +184,17 @@ def eligible_item_ids(context: AnalysisContext) -> tuple[str, ...]:
 # --------------------------------------------------------------------------
 
 
-def _squeeze(text: str) -> str:
+def squeeze(text: str) -> str:
     """Fold, then flatten whitespace, for comparisons that need no offsets.
 
     Used only where a span is not wanted. A writer quoting an item across a line
     break has quoted the item; insisting the newlines match too would reject a
     correct citation for a typographic reason.
+
+    Public because the digest verifies claim locality against its own collected
+    items rather than a producer brief, and must normalise citations *exactly*
+    as this module does. A second copy of these two lines would drift, and then
+    the same citation would be supported on one article type and not the other.
     """
     return _WHITESPACE.sub(" ", fold(text)).strip()
 
@@ -282,8 +287,8 @@ def _verify_one(
             f"no such item in this brief: {', '.join(unknown[:3])}",
         )
 
-    evidence = _squeeze(claim.evidence)
-    supporting = next((i for i in ids if evidence and evidence in _squeeze(by_id[i].text)), None)
+    evidence = squeeze(claim.evidence)
+    supporting = next((i for i in ids if evidence and evidence in squeeze(by_id[i].text)), None)
     if supporting is None:
         return refused(
             ClaimVerdict.EVIDENCE_NOT_IN_ITEM,
@@ -311,5 +316,6 @@ __all__ = [
     "VerifiedClaim",
     "authenticate",
     "eligible_item_ids",
+    "squeeze",
     "verify",
 ]
