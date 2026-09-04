@@ -48,6 +48,7 @@ from goldpipeline.domain.errors import (
     TradingViewProtocolError,
     TradingViewTimeoutError,
 )
+from goldpipeline.prompts import DEFAULT_DIGEST_WRITER_PROMPT
 from goldpipeline.schemas.common import Timeframe
 from goldpipeline.schemas.market import MarketDataInput
 from goldpipeline.services.normalizer import normalize_market_data
@@ -489,7 +490,8 @@ class TestArticleBehaviourUnchanged:
         assert {ArticleType.ANALYSIS, ArticleType.NEWS_DIGEST} == READY_TYPES
         # NEWS_DIGEST was activated by Round 6.5b, with its own writer.
         # What a market-data round must never do is activate anything.
-        assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == "gold_news_digest_writer_v1"
+        assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == DEFAULT_DIGEST_WRITER_PROMPT
+        assert DEFAULT_DIGEST_WRITER_PROMPT.startswith("gold_news_digest_writer_")
         assert SPECS[ArticleType.TRADE_PLAN].ready is False
 
     def test_the_analysis_writer_prompt_is_the_current_version(self) -> None:

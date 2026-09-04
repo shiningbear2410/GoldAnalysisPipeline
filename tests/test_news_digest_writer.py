@@ -28,7 +28,12 @@ from typing import Any
 import pytest
 
 from goldpipeline.domain.errors import WriterResponseError
-from goldpipeline.prompts import GOLD_NEWS_DIGEST_WRITER_V1, load_prompt
+from goldpipeline.prompts import (
+    DEFAULT_DIGEST_WRITER_PROMPT,
+    GOLD_NEWS_DIGEST_WRITER_V1,
+    GOLD_NEWS_DIGEST_WRITER_V2,
+    load_prompt,
+)
 from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.article_contract import contract_for
 from goldpipeline.schemas.common import Timeframe
@@ -288,7 +293,7 @@ def test_a_response_about_another_run_is_refused() -> None:
 
 
 def test_the_prompt_tells_the_model_not_to_pad() -> None:
-    system = " ".join(load_prompt(GOLD_NEWS_DIGEST_WRITER_V1).split())
+    system = " ".join(load_prompt(DEFAULT_DIGEST_WRITER_PROMPT).split())
 
     assert "Do not pad." in system
     assert "If only two items in the window are material, return two." in system
@@ -296,7 +301,7 @@ def test_the_prompt_tells_the_model_not_to_pad() -> None:
 
 
 def test_the_prompt_asks_for_one_item_per_story() -> None:
-    system = " ".join(load_prompt(GOLD_NEWS_DIGEST_WRITER_V1).split())
+    system = " ".join(load_prompt(DEFAULT_DIGEST_WRITER_PROMPT).split())
 
     assert "One story is one item" in system
     assert "Five messages about the same Fed speech are one story." in system
@@ -334,7 +339,7 @@ def test_an_invented_marker_is_refused() -> None:
 
 def test_the_prompt_separates_impact_from_causation() -> None:
     """`SUPPORTS_GOLD` says the news leans bullish, not that gold rose."""
-    system = " ".join(load_prompt(GOLD_NEWS_DIGEST_WRITER_V1).split())
+    system = " ".join(load_prompt(DEFAULT_DIGEST_WRITER_PROMPT).split())
 
     assert "Impact is not causation" in system
     assert "It does **not** say gold rose" in system
@@ -483,7 +488,7 @@ def test_the_price_block_never_explains_itself_in_a_digest() -> None:
 
 
 def test_the_prompt_forbids_resolving_the_disagreement() -> None:
-    system = " ".join(load_prompt(GOLD_NEWS_DIGEST_WRITER_V1).split())
+    system = " ".join(load_prompt(DEFAULT_DIGEST_WRITER_PROMPT).split())
 
     assert "they are allowed to disagree" in system
     assert "You may not resolve it by pretending one of them did not happen." in system
@@ -689,7 +694,7 @@ def test_source_text_stays_data_even_when_it_reads_as_a_command() -> None:
 
 
 def test_the_prompt_includes_the_one_voice_contract() -> None:
-    system = load_prompt(GOLD_NEWS_DIGEST_WRITER_V1)
+    system = load_prompt(DEFAULT_DIGEST_WRITER_PROMPT)
     fragment = load_prompt("gold_human_style_v1")
 
     assert "<!-- include:" not in system
@@ -697,21 +702,21 @@ def test_the_prompt_includes_the_one_voice_contract() -> None:
 
 
 def test_the_prompt_forbids_stating_a_price() -> None:
-    system = " ".join(load_prompt(GOLD_NEWS_DIGEST_WRITER_V1).split())
+    system = " ".join(load_prompt(DEFAULT_DIGEST_WRITER_PROMPT).split())
 
     assert "**Never state a price.**" in system
     assert "A figure about what XAUUSD traded at is never yours to write." in system
 
 
 def test_the_prompt_forbids_trade_plan_content() -> None:
-    system = " ".join(load_prompt(GOLD_NEWS_DIGEST_WRITER_V1).split())
+    system = " ".join(load_prompt(DEFAULT_DIGEST_WRITER_PROMPT).split())
 
     assert "no support levels, no entry zones, no targets" in system
     assert "not a trade plan" in system
 
 
 def test_the_balance_section_is_bounded_in_the_prompt_and_the_schema() -> None:
-    system = " ".join(load_prompt(GOLD_NEWS_DIGEST_WRITER_V1).split())
+    system = " ".join(load_prompt(DEFAULT_DIGEST_WRITER_PROMPT).split())
 
     assert "One to three sentences." in system
     assert "list the items again" in system
@@ -727,8 +732,43 @@ def test_news_digest_is_now_ready_with_its_own_prompt() -> None:
     spec = SPECS[ArticleType.NEWS_DIGEST]
 
     assert spec.ready is True
-    assert spec.prompt_id == GOLD_NEWS_DIGEST_WRITER_V1
-    assert writer_prompt_for(ArticleType.NEWS_DIGEST) == GOLD_NEWS_DIGEST_WRITER_V1
+    assert spec.prompt_id == GOLD_NEWS_DIGEST_WRITER_V2
+    assert writer_prompt_for(ArticleType.NEWS_DIGEST) == GOLD_NEWS_DIGEST_WRITER_V2
+    assert DEFAULT_DIGEST_WRITER_PROMPT == GOLD_NEWS_DIGEST_WRITER_V2
+
+
+def test_v1_still_loads_and_still_means_what_it_meant() -> None:
+    """One live Run was written under v1, and it keeps its rules.
+
+    Not a formality: the reason v2 is a new file rather than an edit is that a
+    published article's provenance names a prompt, and a prompt whose text moved
+    afterwards makes that name a lie.
+    """
+    v1 = load_prompt(GOLD_NEWS_DIGEST_WRITER_V1)
+
+    assert "**Never state a price.**" in v1
+    assert "Prefer no numbers at all here." not in v1
+
+
+def test_v2_adds_the_balance_rule_and_changes_nothing_else() -> None:
+    v1 = load_prompt(GOLD_NEWS_DIGEST_WRITER_V1)
+    v2 = load_prompt(GOLD_NEWS_DIGEST_WRITER_V2)
+
+    assert len(v2) > len(v1)
+    # Every section heading v1 carried survives, in the same order.
+    v1_headings = [line for line in v1.splitlines() if line.startswith("#")]
+    v2_headings = [line for line in v2.splitlines() if line.startswith("#")]
+    assert v1_headings == [h for h in v2_headings if h in v1_headings]
+    assert v2_headings[: len(v1_headings)] != [] and set(v1_headings) <= set(v2_headings)
+
+
+def test_v2_tells_the_writer_the_balance_rule_it_will_be_judged_by() -> None:
+    system = " ".join(load_prompt(GOLD_NEWS_DIGEST_WRITER_V2).split())
+
+    assert "Carry a figure exactly, or leave it out." in system
+    assert "Prefer no numbers at all here." in system
+    assert "one that already appears in the digest" in system
+    assert "including a rounded version of one that does" in system
 
 
 def test_analysis_still_routes_to_its_own_prompt() -> None:
@@ -841,7 +881,7 @@ def test_news_numbers_stay_in_the_item_that_vouches_for_them() -> None:
 
 
 def test_the_prompt_requires_a_claim_per_factual_statement() -> None:
-    system = " ".join(load_prompt(GOLD_NEWS_DIGEST_WRITER_V1).split())
+    system = " ".join(load_prompt(DEFAULT_DIGEST_WRITER_PROMPT).split())
 
     assert "must be supported by the item you cited" in system
     assert "cite an item for a claim it does not make" in system

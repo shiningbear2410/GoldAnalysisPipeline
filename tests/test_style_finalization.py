@@ -48,6 +48,7 @@ from goldpipeline.adapters.fake_finalizer import (
 from goldpipeline.adapters.fake_reviewer import FakeReviewerClient, clean_style_assessment
 from goldpipeline.domain.errors import FinalizePostcheckError, FinalizeResponseError
 from goldpipeline.prompts import (
+    DEFAULT_DIGEST_WRITER_PROMPT,
     DEFAULT_FINALIZER_PROMPT,
     GOLD_FINALIZER_V1,
     GOLD_FINALIZER_V2,
@@ -1142,7 +1143,8 @@ def test_the_voice_contract_is_unchanged() -> None:
 def test_readiness_is_unchanged() -> None:
     from goldpipeline.services.article_routing import SPECS
 
-    assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == "gold_news_digest_writer_v1"
+    assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == DEFAULT_DIGEST_WRITER_PROMPT
+    assert DEFAULT_DIGEST_WRITER_PROMPT.startswith("gold_news_digest_writer_")
     assert SPECS[ArticleType.TRADE_PLAN].ready is False
 
 

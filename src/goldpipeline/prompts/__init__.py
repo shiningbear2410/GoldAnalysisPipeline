@@ -83,6 +83,30 @@ rendered by code, and the schema behind this prompt has nowhere to put it.
 
 Includes `gold_human_style_v1` for the fourth time in the pipeline. The voice is
 the product's, not one article type's.
+
+Superseded by v2, and retained because one live Run was written under it.
+"""
+
+GOLD_NEWS_DIGEST_WRITER_V2 = "gold_news_digest_writer_v2"
+"""Current NEWS_DIGEST writer prompt id. Quantities in 🧭 Cán cân must be sourced.
+
+Identical to v1 in shape, selection rules, impact vocabulary and voice - the
+digest this writes is the digest v1 wrote. What it adds is a rule the v1 live
+smoke demonstrated the need for: a figure is carried exactly or left out, and a
+number in the balance must already appear in a collected item or in the market
+section the pipeline printed.
+
+The balance earned its own rule because it is the one section that cites
+nothing. Each bullet names the item behind it, so `news_claims` makes its
+figures traceable; the balance synthesises several items at once, and Round
+6.5c.1 found that a rounded restatement there satisfies every existing check -
+the evidence is in the item, the statement is in the article, and no check
+compares the two. `digest_provenance` now refuses it, and this prompt says so
+rather than letting the model discover it through a rejection.
+
+A new file rather than an edit to v1, because a Run was written under that name
+and quietly changing what it means would detach it from the rules it was
+actually written to.
 """
 
 GOLD_REVIEWER_V1 = "gold_reviewer_v1"
@@ -138,6 +162,7 @@ they were made under.
 """
 
 DEFAULT_WRITER_PROMPT = GOLD_WRITER_V4
+DEFAULT_DIGEST_WRITER_PROMPT = GOLD_NEWS_DIGEST_WRITER_V2
 DEFAULT_REVIEWER_PROMPT = GOLD_REVIEWER_V2
 DEFAULT_FINALIZER_PROMPT = GOLD_FINALIZER_V2
 
@@ -220,6 +245,7 @@ def _resolve_includes(text: str, prompt_id: str) -> str:
 
 
 __all__ = [
+    "DEFAULT_DIGEST_WRITER_PROMPT",
     "DEFAULT_FINALIZER_PROMPT",
     "DEFAULT_REVIEWER_PROMPT",
     "DEFAULT_WRITER_PROMPT",
@@ -227,6 +253,7 @@ __all__ = [
     "GOLD_FINALIZER_V2",
     "GOLD_HUMAN_STYLE_V1",
     "GOLD_NEWS_DIGEST_WRITER_V1",
+    "GOLD_NEWS_DIGEST_WRITER_V2",
     "GOLD_REVIEWER_V1",
     "GOLD_REVIEWER_V2",
     "GOLD_WRITER_V1",

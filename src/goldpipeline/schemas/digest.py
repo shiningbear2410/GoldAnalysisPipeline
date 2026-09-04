@@ -179,6 +179,28 @@ class DigestWindow(StrictModel):
         return self.start < moment <= self.end
 
 
+class DigestMarketProvenance(StrictModel):
+    """Which candles the digest was computed from, and when they were fetched.
+
+    Recorded so a Run can answer "where did this number come from?" months
+    later without anyone re-deriving it - and so a resumed Run can prove it is
+    reusing the same observation rather than a fresh one. A venue may revise a
+    candle after the fact; an article belongs to the data captured for it.
+    """
+
+    provider: str = Field(description="Which source answered, e.g. 'tradingview'.")
+    provider_symbol: str = Field(description="The venue's own symbol, e.g. 'OANDA:XAUUSD'.")
+    timeframe: Timeframe
+    bars_requested: int = Field(ge=1, description="The bounded count derived from the window.")
+    bars_received: int = Field(ge=0)
+    requested_at: UtcDatetime = Field(description="When the provider was asked.")
+    retrieved_at: UtcDatetime = Field(description="When the answer was captured.")
+    latest_closed_candle_at: UtcDatetime | None = Field(
+        default=None,
+        description="Open time of the newest closed candle in the answer, when there was one.",
+    )
+
+
 class PriceReference(StrictModel):
     """One boundary price, with the candle it came from.
 
@@ -286,6 +308,7 @@ __all__ = [
     "DIGEST_SCHEMA_VERSION",
     "DIGEST_TARGET_MAX_CHARS",
     "DIGEST_TARGET_MIN_CHARS",
+    "DigestMarketProvenance",
     "DigestWindow",
     "MarketActivity",
     "PriceReaction",

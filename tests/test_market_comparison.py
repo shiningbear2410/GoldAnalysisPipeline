@@ -586,10 +586,12 @@ class TestProductionUnchanged:
                     assert "market_comparison" not in node.module, path.name
 
     def test_article_readiness_is_unchanged(self) -> None:
+        from goldpipeline.prompts import DEFAULT_DIGEST_WRITER_PROMPT
         from goldpipeline.schemas.article import ArticleType
         from goldpipeline.services.article_routing import READY_TYPES, SPECS
 
         assert {ArticleType.ANALYSIS, ArticleType.NEWS_DIGEST} == READY_TYPES
         # NEWS_DIGEST was activated by Round 6.5b, with its own writer.
-        assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == "gold_news_digest_writer_v1"
+        assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == DEFAULT_DIGEST_WRITER_PROMPT
+        assert DEFAULT_DIGEST_WRITER_PROMPT.startswith("gold_news_digest_writer_")
         assert SPECS[ArticleType.TRADE_PLAN].ready is False

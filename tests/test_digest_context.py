@@ -26,6 +26,7 @@ from decimal import Decimal
 
 import pytest
 
+from goldpipeline.prompts import DEFAULT_DIGEST_WRITER_PROMPT
 from goldpipeline.schemas.common import Timeframe
 from goldpipeline.schemas.digest import (
     DIGEST_HARD_CAP_CHARS,
@@ -1000,7 +1001,8 @@ def test_news_digest_became_ready_with_its_own_prompt() -> None:
     from goldpipeline.services.article_routing import SPECS
 
     assert SPECS[ArticleType.NEWS_DIGEST].ready is True
-    assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == "gold_news_digest_writer_v1"
+    assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == DEFAULT_DIGEST_WRITER_PROMPT
+    assert DEFAULT_DIGEST_WRITER_PROMPT.startswith("gold_news_digest_writer_")
     assert SPECS[ArticleType.TRADE_PLAN].ready is False
     assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 

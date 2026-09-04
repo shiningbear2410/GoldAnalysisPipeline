@@ -28,7 +28,7 @@ from datetime import timedelta
 from pydantic import Field
 
 from goldpipeline.schemas.common import StrictModel, Timeframe
-from goldpipeline.schemas.digest import DigestWindow, PriceReaction
+from goldpipeline.schemas.digest import DigestMarketProvenance, DigestWindow, PriceReaction
 from goldpipeline.schemas.inbox import AnalysisEvent
 from goldpipeline.schemas.news import MAX_LOOKBACK, MIN_LOOKBACK
 from goldpipeline.schemas.news_digest import DigestSourceItem
@@ -67,6 +67,14 @@ class DigestFacts(StrictModel):
     price_reaction_block: str = Field(description="The 📈 section, exactly as published.")
     symbol: str
     timeframe: Timeframe
+    market: DigestMarketProvenance | None = Field(
+        default=None,
+        description=(
+            "Which candles these facts were computed from, and when they were "
+            "fetched. Optional so facts assembled in a test without a provider "
+            "stay valid; a persisted Run always carries it."
+        ),
+    )
 
     news_items: tuple[DigestSourceItem, ...] = Field(
         default=(),
@@ -146,6 +154,7 @@ def build_digest_facts(
     symbol: str,
     timeframe: Timeframe,
     news_items: Sequence[DigestSourceItem] = (),
+    market: DigestMarketProvenance | None = None,
 ) -> DigestFacts:
     """Assemble the deterministic half, rendering each line once.
 
@@ -165,6 +174,7 @@ def build_digest_facts(
         symbol=symbol,
         timeframe=timeframe,
         news_items=tuple(news_items),
+        market=market,
     )
     logger.info(
         "digest.facts symbol=%s timeframe=%s window=%s..%s activity=%s items=%d",

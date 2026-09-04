@@ -25,13 +25,14 @@ import logging
 from goldpipeline.adapters.base import MarketDataSource
 from goldpipeline.domain.errors import MarketDataError, PipelineError
 from goldpipeline.schemas.common import Timeframe
-from goldpipeline.schemas.digest import DigestWindow
+from goldpipeline.schemas.digest import DigestMarketProvenance, DigestWindow
 from goldpipeline.schemas.news_digest import DigestSourceItem
 from goldpipeline.services.digest_context import DigestFacts, build_digest_facts
 from goldpipeline.services.normalizer import normalize_market_data
 from goldpipeline.services.price_reaction import (
     PREFERRED_DIGEST_TIMEFRAME,
     calculate_price_reaction,
+    close_time,
     digest_bar_count,
 )
 
@@ -55,6 +56,7 @@ def build_digest_facts_for_window(
     symbol: str,
     news_items: tuple[DigestSourceItem, ...] = (),
     timeframe: Timeframe = PREFERRED_DIGEST_TIMEFRAME,
+    provider_symbol: str | None = None,
 ) -> DigestFacts:
     """Fetch the digest's own candles and turn them into deterministic facts.
 
@@ -129,12 +131,25 @@ def build_digest_facts_for_window(
         reaction.market_activity,
     )
 
+    closed = [bar.timestamp for bar in snapshot.bars if close_time(bar, timeframe) <= window.end]
+    provenance = DigestMarketProvenance(
+        provider=snapshot.provider,
+        provider_symbol=provider_symbol or snapshot.symbol,
+        timeframe=timeframe,
+        bars_requested=bars_wanted,
+        bars_received=snapshot.bar_count,
+        requested_at=snapshot.requested_at,
+        retrieved_at=window.end,
+        latest_closed_candle_at=max(closed) if closed else None,
+    )
+
     return build_digest_facts(
         window=window,
         price_reaction=reaction,
         symbol=snapshot.symbol,
         timeframe=timeframe,
         news_items=news_items,
+        market=provenance,
     )
 
 

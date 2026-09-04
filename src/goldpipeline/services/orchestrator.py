@@ -52,6 +52,7 @@ from goldpipeline.adapters.writer_client import WriterClient
 from goldpipeline.domain.errors import (
     ArticleTypeNotReadyError,
     PipelineError,
+    RunNotReadyError,
     RunNotResumableError,
 )
 from goldpipeline.schemas.article import ArticleType
@@ -451,11 +452,37 @@ def _run_write(
     # mode that is not ready costs nothing and produces nothing. It is never
     # substituted with ANALYSIS - writing a different article than the one asked
     # for is a silent wrong answer, and refusing is a visible one.
+    article_type = _article_type_of(store, execution.run_id)
     try:
-        prompt_id = writer_prompt_for(_article_type_of(store, execution.run_id))
+        prompt_id = writer_prompt_for(article_type)
     except ArticleTypeNotReadyError as exc:
         execution.record(PipelineStage.WRITE, started, StageOutcome.FAILED)
         return _fail(store, execution, PipelineStage.WRITE, exc)
+
+    if article_type is ArticleType.NEWS_DIGEST:
+        # Round 6.5b made NEWS_DIGEST writable and gave it a prompt; it did not
+        # teach *this* stage to write one. The digest writer asks for editorial
+        # content and assembles the article around deterministic facts, which
+        # `write_draft` below knows nothing about - handing it the digest prompt
+        # would send a "return no article" instruction to a stage that parses an
+        # article, and produce something shaped like neither product.
+        #
+        # So the Run stops here, visibly, until Round 6.5c.2 wires the digest
+        # stage in. Refusing is the same choice the routing check above makes
+        # for an unimplemented type, and for the same reason: a silent wrong
+        # answer is worse than a loud refusal.
+        execution.record(PipelineStage.WRITE, started, StageOutcome.FAILED)
+        return _fail(
+            store,
+            execution,
+            PipelineStage.WRITE,
+            RunNotReadyError(
+                f"run {execution.run_id} is {article_type}, which has its own writer "
+                "stage that this pipeline does not yet dispatch to",
+                run_id=execution.run_id,
+                article_type=str(article_type),
+            ),
+        )
 
     result = write_draft(
         run_id=execution.run_id,

@@ -25,14 +25,16 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from goldpipeline.domain.errors import WriterResponseError
-from goldpipeline.prompts import GOLD_NEWS_DIGEST_WRITER_V1, load_prompt
+from goldpipeline.prompts import DEFAULT_DIGEST_WRITER_PROMPT, load_prompt
 from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.article_contract import contract_for
 from goldpipeline.schemas.news_digest import DigestEditorial
 from goldpipeline.schemas.writer import WriterPrompt
 from goldpipeline.services.digest_context import DigestFacts
+from goldpipeline.services.digest_provenance import unsupported_balance_numbers
 from goldpipeline.services.digest_render import render_digest
 from goldpipeline.services.fencing import fenced_block, make_nonce
 
@@ -48,7 +50,7 @@ def build_digest_prompt(
     facts: DigestFacts,
     *,
     run_id: str,
-    prompt_version: str = GOLD_NEWS_DIGEST_WRITER_V1,
+    prompt_version: str = DEFAULT_DIGEST_WRITER_PROMPT,
     nonce_factory: Callable[[], str] | None = None,
 ) -> WriterPrompt:
     """Render the two turns for a digest.
@@ -116,14 +118,87 @@ def build_digest_prompt(
     )
 
 
+@dataclass(frozen=True)
+class DigestPrecheckReport:
+    """What code established about an editorial answer, before any reviewer.
+
+    Composed here and nowhere else. This module is to a digest what
+    `analysis_contract` is to an analysis: the single place the checks are run,
+    so that a second, subtly different verdict cannot appear somewhere else and
+    disagree.
+
+    Carried to the reviewer as *findings*, including the ones that passed - a
+    check reported as passing is what stops the model re-deriving it, and an
+    omitted check is indistinguishable from one that was never run.
+    """
+
+    unknown_item_ids: tuple[str, ...] = ()
+    """Cited ids that name none of the collected items."""
+
+    unsupported_numbers: tuple[str, ...] = ()
+    """Quantities in 🧭 Cán cân that no item and no computed figure holds."""
+
+    altered_lines: tuple[str, ...] = ()
+    """Deterministic lines that did not survive into the article verbatim.
+
+    Empty in every normal Run: the shell is assembled by code, not copied by a
+    model. A non-empty list means something downstream edited a line the
+    pipeline owns.
+    """
+
+    @property
+    def ok(self) -> bool:
+        """Whether nothing was found. Not a verdict - the reviewer still runs."""
+        return not (self.unknown_item_ids or self.unsupported_numbers or self.altered_lines)
+
+
+def digest_precheck(
+    editorial: DigestEditorial, facts: DigestFacts, *, article: str | None = None
+) -> DigestPrecheckReport:
+    """Run every deterministic check a digest editorial is subject to.
+
+    Args:
+        editorial: The model's answer.
+        facts: The Run's deterministic facts.
+        article: The assembled digest, when there is one. Omitted before
+            assembly, and then the verbatim check has nothing to look at rather
+            than a missing article to complain about.
+    """
+    offered = set(facts.news_item_ids)
+    return DigestPrecheckReport(
+        unknown_item_ids=tuple(sorted({item.news_item_id for item in editorial.items} - offered)),
+        unsupported_numbers=tuple(
+            unsupported_balance_numbers(
+                editorial.balance,
+                facts.news_items,
+                facts.window,
+                facts.deterministic_lines,
+            )
+        ),
+        altered_lines=(
+            ()
+            if article is None
+            else tuple(line for line in facts.deterministic_lines if line not in article)
+        ),
+    )
+
+
 def validate_editorial(editorial: DigestEditorial, facts: DigestFacts, *, run_id: str) -> None:
-    """Refuse an answer that is not about this Run, or cites what was never offered.
+    """Refuse an answer that is not about this Run, or that outruns its evidence.
+
+    Three questions, in the order a failure is worth reporting: is this about the
+    right Run, does every bullet name an item that was offered, and does the
+    balance quantify anything nothing vouches for.
 
     Raises:
-        WriterResponseError: Wrong Run, or an item naming a source the prompt did
-            not supply. The second is the one that matters: an unknown id is
-            either a fabrication or a channel name where an item id belongs, and
-            both would publish a bullet whose evidence cannot be found.
+        WriterResponseError: Wrong Run; an item naming a source the prompt did
+            not supply; or a balance stating a magnitude no item and no computed
+            figure holds. The second is either a fabrication or a channel name
+            where an item id belongs, and both would publish a bullet whose
+            evidence cannot be found. The third is the Round 6.5c.1 finding: the
+            per-item provenance checks pass a rounded restatement, because they
+            match evidence and statement against their own sources and never
+            against each other.
     """
     if editorial.run_id != run_id:
         raise WriterResponseError(
@@ -132,12 +207,17 @@ def validate_editorial(editorial: DigestEditorial, facts: DigestFacts, *, run_id
             actual=editorial.run_id,
         )
 
-    offered = set(facts.news_item_ids)
-    unknown = sorted({item.news_item_id for item in editorial.items} - offered)
-    if unknown:
+    report = digest_precheck(editorial, facts)
+    if report.unknown_item_ids:
         raise WriterResponseError(
             "the digest cites items that were never collected",
-            unknown_item_ids=unknown,
+            unknown_item_ids=list(report.unknown_item_ids),
+        )
+
+    if report.unsupported_numbers:
+        raise WriterResponseError(
+            "the balance states quantities that no collected item or computed figure supports",
+            unsupported_numbers=list(report.unsupported_numbers),
         )
 
 
@@ -168,10 +248,12 @@ def assemble_digest(editorial: DigestEditorial, facts: DigestFacts) -> str:
 
 __all__ = [
     "MARKET_HEADING",
+    "DigestPrecheckReport",
     "NEWS_HEADING",
     "NEWS_ITEMS_LABEL",
     "WINDOW_HEADING",
     "assemble_digest",
     "build_digest_prompt",
+    "digest_precheck",
     "validate_editorial",
 ]

@@ -293,6 +293,7 @@ class TestRoutingConsistency:
         enforcing = {
             "goldpipeline.services.article_contract_checks",
             "goldpipeline.services.causality_language",
+            "goldpipeline.services.digest_provenance",
             "goldpipeline.services.numeric_mentions",
             "goldpipeline.services.prose",
         }
@@ -309,7 +310,15 @@ class TestRoutingConsistency:
         # different stage, a different article, a different question. What the
         # guard still forbids is a *third* one appearing without a decision:
         # two named enforcers are an architecture, and an open list is not.
-        enforcers = {"analysis_contract", "final_postcheck"}
+        # Round 6.5c.1 added the third, and it is named here for the same
+        # reason. `digest_provenance` decides whether a 🧭 Cán cân paragraph
+        # outran its evidence, and `digest_writer` is the only module allowed
+        # to ask it - the digest's `analysis_contract`. The digest reviewer
+        # deliberately does not appear in this set: it is *handed* a
+        # `DigestPrecheckReport`, exactly as `build_reviewer_prompt` is handed
+        # a `PrecheckReport`, so that the answer shown to a model and the
+        # answer that rejects a response are the same answer.
+        enforcers = {"analysis_contract", "digest_writer", "final_postcheck"}
 
         # What is forbidden is *running a check*, not touching the module that
         # holds one. `detect_sections` and `detect_structures` are parsers: they

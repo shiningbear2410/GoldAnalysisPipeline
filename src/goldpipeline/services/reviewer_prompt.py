@@ -157,7 +157,7 @@ def build_reviewer_prompt(
         "",
         render_findings(report),
         "",
-        *_style_scope_section(
+        *style_scope_section(
             prompt_version=prompt_version,
             article_type=article_type,
             symptoms=style_symptoms,
@@ -176,13 +176,17 @@ def build_reviewer_prompt(
     )
 
 
-def _style_scope_section(
+def style_scope_section(
     *,
     prompt_version: str,
     article_type: ArticleType,
     symptoms: Sequence[OutputFinding],
 ) -> list[str]:
     """Say whether style is in scope, and hand over the hints if it is.
+
+    Public because the digest reviewer builds its own user turn and must answer
+    this question the same way. Two copies of the wording would let an article
+    type drift into being told nothing at all about style.
 
     Two different silences, told apart on purpose. When style is out of scope
     the user turn says so in one line, so a style-aware system prompt does not
@@ -253,4 +257,5 @@ __all__ = [
     "WRITER_METADATA_HEADING",
     "ReviewerPrompt",
     "build_reviewer_prompt",
+    "style_scope_section",
 ]
