@@ -16,6 +16,7 @@ does not reach for Claude and it does not change the selection's mode.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 from goldpipeline.adapters.deepseek_client import (
     DEEPSEEK_PROVIDER,
@@ -28,6 +29,7 @@ from goldpipeline.adapters.deepseek_client import (
     usage_fields,
 )
 from goldpipeline.adapters.finalizer_client import FinalizeRequest, FinalizeResponse
+from goldpipeline.adapters.secrets import SecretProvider
 from goldpipeline.config import DEEPSEEK_API_KEY_ENV, DeepSeekSettings
 from goldpipeline.domain.errors import (
     FinalizeConfigurationError,
@@ -110,17 +112,24 @@ def _usage(result: ChatResult) -> FinalizerUsage:
 def build_deepseek_finalizer(
     selection_id: str,
     *,
+    env: Mapping[str, str] | None = None,
+    secrets: SecretProvider | None = None,
     settings: DeepSeekSettings | None = None,
     transport: object | None = None,
 ) -> DeepSeekFinalizerClient:
     """Build a finalizer for one catalog selection, resolving the key lazily.
+
+    Takes *env* and *secrets* on the same terms as the DeepSeek writer builder,
+    and for the same reason: the caller owns them, this function does not.
 
     Raises:
         FinalizeConfigurationError: No key, or an unusable endpoint.
         ValueError: The catalog does not offer that selection.
     """
     model = resolve_model(Provider.DEEPSEEK, selection_id)
-    resolved = settings or DeepSeekSettings.from_env(error=FinalizeConfigurationError)
+    resolved = settings or DeepSeekSettings.from_env(
+        env, secrets=secrets, error=FinalizeConfigurationError
+    )
     return DeepSeekFinalizerClient(resolved, model, transport=transport)
 
 

@@ -16,6 +16,7 @@ artifact that Claude wrote.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 from goldpipeline.adapters.deepseek_client import (
     DEEPSEEK_PROVIDER,
@@ -27,6 +28,7 @@ from goldpipeline.adapters.deepseek_client import (
     schema_appendix,
     usage_fields,
 )
+from goldpipeline.adapters.secrets import SecretProvider
 from goldpipeline.adapters.writer_client import WriterRequest, WriterResponse
 from goldpipeline.config import DEEPSEEK_API_KEY_ENV, DeepSeekSettings
 from goldpipeline.domain.errors import (
@@ -124,6 +126,8 @@ def _usage(result: ChatResult) -> WriterUsage:
 def build_deepseek_writer(
     selection_id: str,
     *,
+    env: Mapping[str, str] | None = None,
+    secrets: SecretProvider | None = None,
     settings: DeepSeekSettings | None = None,
     transport: object | None = None,
 ) -> DeepSeekWriterClient:
@@ -133,12 +137,26 @@ def build_deepseek_writer(
     moment a DeepSeek call is actually about to be made. An operator who never
     selects DeepSeek never causes a DeepSeek key to be looked for.
 
+    Args:
+        selection_id: The catalog choice.
+        env: Mapping for non-secret settings. Defaults to the process
+            environment, exactly as before.
+        secrets: Where ``DEEPSEEK_API_KEY`` comes from. Defaults to the
+            environment alone, exactly as before. Threaded through so that a
+            caller supplying a provider is honoured whichever vendor the
+            selection names: a parameter obeyed for one provider and silently
+            dropped for another is a worse trap than not offering it.
+        settings: Pre-built settings, which skip resolution entirely.
+        transport: Injected HTTP client for tests.
+
     Raises:
         WriterConfigurationError: No key, or an unusable endpoint.
         ValueError: The catalog does not offer that selection.
     """
     model = resolve_model(Provider.DEEPSEEK, selection_id)
-    resolved = settings or DeepSeekSettings.from_env(error=WriterConfigurationError)
+    resolved = settings or DeepSeekSettings.from_env(
+        env, secrets=secrets, error=WriterConfigurationError
+    )
     return DeepSeekWriterClient(resolved, model, transport=transport)
 
 

@@ -904,7 +904,17 @@ def _writer_client(
     if fake:
         return FakeWriterClient()
     if selection is not None:
-        return build_writer_client(selection.provider, selection.selection_id)
+        # The same two things the branch below passes, and for the same reason:
+        # this function is where the layered configuration and the credential
+        # provider are known. Omitting them here is the defect Round 6.4e.1
+        # fixes - a Run carrying a selection resolved its key from the process
+        # environment alone, which a scheduled task does not have.
+        return build_writer_client(
+            selection.provider,
+            selection.selection_id,
+            env=_config_env(),
+            secrets=_secret_provider(),
+        )
 
     settings = WriterSettings.from_env(
         _config_env(), model_override=model, secrets=_secret_provider()
@@ -1089,7 +1099,12 @@ def _finalizer_client(
     if fake:
         return FakeFinalizerClient()
     if selection is not None:
-        return build_finalizer_client(selection.provider, selection.selection_id)
+        return build_finalizer_client(
+            selection.provider,
+            selection.selection_id,
+            env=_config_env(),
+            secrets=_secret_provider(),
+        )
 
     from goldpipeline.adapters.anthropic_finalizer import AnthropicFinalizerClient
 
