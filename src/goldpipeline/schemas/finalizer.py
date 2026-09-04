@@ -24,13 +24,21 @@ from goldpipeline.schemas.review import (
     Severity,
 )
 
-FINALIZER_SCHEMA_VERSION = "1.0.0"
-"""Version of the finalizer artifact contract."""
+FINALIZER_SCHEMA_VERSION = "1.1.0"
+"""Version of the finalizer artifact contract.
+
+1.1.0 adds style resolutions and minimum-change observability. Additive: every
+1.0.0 artifact still validates, and ``schema_version`` is a plain string so a
+historical file keeps recording the version it was written under.
+"""
 
 MAX_ARTICLE_CHARS = 20_000
 MAX_RESOLUTIONS = 40
 MAX_DESCRIPTION_CHARS = 500
 MIN_ARTICLE_CHARS = 40
+
+MAX_STYLE_NOTE_CHARS = 300
+"""A style resolution says what was done, not what the paragraph now says."""
 
 
 @dataclass(frozen=True)
@@ -117,6 +125,47 @@ class IssueResolution(StrictModel):
         return value.strip()
 
 
+class StyleResolutionStatus(StrEnum):
+    """What the finalizer did about one human-style finding.
+
+    Binary on purpose. ``IssueResolution`` has three values because a content
+    issue can genuinely turn out not to hold - the reviewer misread a number
+    that was right all along. A style finding is a request to change some words,
+    and "partly changed" is not a state an automatic decision can act on: either
+    the repair was made and the article moves on, or it was not and the Run
+    stops for a person. A third value would be a place for ambiguity to hide.
+    """
+
+    RESOLVED = "RESOLVED"
+    """The requested edit was made."""
+
+    UNRESOLVED = "UNRESOLVED"
+    """It was not. The Run stops here; no second model call is made."""
+
+
+class StyleResolution(StrictModel):
+    """The finalizer's account of one human-style finding."""
+
+    finding_id: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Must match a finding_id from the review's style_review exactly.",
+    )
+    status: StyleResolutionStatus
+    note: str = Field(
+        min_length=1,
+        max_length=MAX_STYLE_NOTE_CHARS,
+        description="What was changed, or why it was not. Never the replacement text.",
+    )
+
+    @field_validator("note")
+    @classmethod
+    def _reject_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("a style resolution must say what was done")
+        return value.strip()
+
+
 class FinalizerWarning(StrictModel):
     """Something the finalizer noticed while editing."""
 
@@ -140,7 +189,24 @@ class FinalizerModelOutput(StrictModel):
     issue_resolutions: list[IssueResolution] = Field(
         default_factory=list, max_length=MAX_RESOLUTIONS
     )
+    style_resolutions: list[StyleResolution] = Field(
+        default_factory=list,
+        max_length=MAX_RESOLUTIONS,
+        description=(
+            "One entry per human-style finding supplied. Empty when the "
+            "revision was content-only, and on every response before Round 6.4g."
+        ),
+    )
     warnings: list[FinalizerWarning] = Field(default_factory=list, max_length=MAX_RESOLUTIONS)
+
+    @field_validator("style_resolutions")
+    @classmethod
+    def _style_ids_are_unique(cls, value: list[StyleResolution]) -> list[StyleResolution]:
+        seen = [item.finding_id for item in value]
+        duplicates = sorted({item for item in seen if seen.count(item) > 1})
+        if duplicates:
+            raise ValueError(f"each style finding may be resolved once; repeated: {duplicates}")
+        return value
 
     @field_validator("article")
     @classmethod
@@ -194,10 +260,47 @@ class FinalizerResult(StrictModel):
     article_chars: int = Field(ge=1)
 
     issue_resolutions: list[IssueResolution] = Field(default_factory=list)
+    style_resolutions: list[StyleResolution] = Field(
+        default_factory=list,
+        description="One entry per human-style finding the revision was asked to repair.",
+    )
     warnings: list[FinalizerWarning] = Field(default_factory=list)
     postcheck_findings: list[PrecheckFinding] = Field(
         default_factory=list,
         description="Deterministic findings on the final article, after revision.",
+    )
+
+    chars_before: int | None = Field(
+        default=None,
+        ge=0,
+        description="Draft length. Null on artifacts written before Round 6.4g.",
+    )
+    chars_after: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Final length. Observability, never a rule: a repair may legitimately "
+            "grow, and a revision is not rejected for it."
+        ),
+    )
+    changed_sections: list[str] = Field(
+        default_factory=list,
+        description=(
+            "ANALYSIS sections whose text differs from the draft. Empty for a "
+            "passthrough, and on any article the section parser cannot segment."
+        ),
+    )
+    style_symptoms_before: int | None = Field(
+        default=None, ge=0, description="Deterministic style symptoms counted on the draft."
+    )
+    style_symptoms_after: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "The same count on the final article. Recorded so a revision that made "
+            "the countable symptoms worse is visible; never a pass/fail rule, "
+            "because a symptom is not a judgement."
+        ),
     )
 
     selection_id: str | None = Field(
@@ -235,6 +338,7 @@ __all__ = [
     "FINALIZER_SCHEMA_VERSION",
     "MANDATORY_SEVERITIES",
     "MAX_ARTICLE_CHARS",
+    "MAX_STYLE_NOTE_CHARS",
     "MIN_ARTICLE_CHARS",
     "FinalizationMode",
     "FinalizerModelOutput",
@@ -244,4 +348,6 @@ __all__ = [
     "FinalizerWarning",
     "IssueResolution",
     "ResolutionStatus",
+    "StyleResolution",
+    "StyleResolutionStatus",
 ]

@@ -31,6 +31,8 @@ from goldpipeline.schemas.finalizer import (
     FinalizerUsage,
     IssueResolution,
     ResolutionStatus,
+    StyleResolution,
+    StyleResolutionStatus,
 )
 from goldpipeline.services.fencing import extract_fenced
 from goldpipeline.services.finalizer_prompt import ARTICLE_LABEL, REVIEW_LABEL
@@ -149,6 +151,87 @@ def _fallback_edit(
     )
 
 
+def read_style_findings(request: FinalizeRequest) -> list[dict[str, Any]]:
+    """Recover the human-style findings from the rendered prompt.
+
+    Read back rather than configured, for the same reason as the review: a fake
+    that repaired findings it was never sent would keep answering correctly
+    after the plumbing carrying them broke.
+    """
+    payload = read_prompt_review(request)
+    findings = payload.get("style_findings", [])
+    return [item for item in findings if isinstance(item, dict)]
+
+
+def _section_span(article: str, section: str | None) -> tuple[int, int] | None:
+    """Where a named section's body starts and ends, if it can be found."""
+    if section is None:
+        return None
+    from goldpipeline.schemas.article_contract import SectionKey
+    from goldpipeline.services.article_contract_checks import detect_sections
+
+    try:
+        key = SectionKey(section.rsplit(".", 1)[-1])
+    except ValueError:
+        return None
+
+    found = detect_sections(article)
+    if key not in found:
+        return None
+    ordered = sorted(found.values())
+    start = found[key]
+    later = [offset for offset in ordered if offset > start]
+    return start, (later[0] if later else len(article))
+
+
+def apply_style_findings(
+    article: str, findings: list[dict[str, Any]]
+) -> tuple[str, list[StyleResolution]]:
+    """Make a minimal, scoped repair for each finding, as an editor would.
+
+    The edit is deliberately crude - the last sentence of the named section is
+    dropped - because what these tests need is a *scoped* change, not a good
+    one. What matters is that a finding naming ``PRICE_READ`` changes
+    ``PRICE_READ`` and leaves every other section byte-identical, so the
+    preservation rule is exercised by a fake that respects it and by the
+    deliberately careless fakes below that do not.
+    """
+    revised = article
+    resolutions: list[StyleResolution] = []
+
+    for finding in findings:
+        finding_id = str(finding.get("finding_id", ""))
+        span = _section_span(revised, finding.get("section"))
+        note = "Left the text as it stands; the section could not be located."
+
+        if span is not None:
+            start, end = span
+            body = revised[start:end]
+            trimmed = _drop_last_sentence(body)
+            if trimmed != body:
+                revised = revised[:start] + trimmed + revised[end:]
+                note = "Cut the redundant closing sentence from the section."
+            else:
+                note = "The section already carried nothing redundant to cut."
+
+        resolutions.append(
+            StyleResolution(finding_id=finding_id, status=StyleResolutionStatus.RESOLVED, note=note)
+        )
+
+    return revised, resolutions
+
+
+def _drop_last_sentence(section: str) -> str:
+    """Remove the final sentence of a section body, keeping its shape."""
+    stripped = section.rstrip()
+    pieces = re.split(r"(?<=[.!?])\s+", stripped)
+    if len(pieces) < 2:
+        return section
+    kept = " ".join(pieces[:-1]).rstrip()
+    trailing = section[len(stripped) :]
+    return kept + trailing
+
+
 @dataclass
 class FakeFinalizerClient:
     """Deterministic, offline implementation of :class:`FinalizerClient`.
@@ -202,11 +285,13 @@ class FakeFinalizerClient:
         article = read_prompt_article(request)
         review = read_prompt_review(request)
         revised, resolutions = apply_review(article, review)
+        revised, style = apply_style_findings(revised, read_style_findings(request))
 
         return FinalizerModelOutput(
             run_id=request.run_id,
             article=revised,
             issue_resolutions=resolutions,
+            style_resolutions=style,
             warnings=[],
         )
 
@@ -256,6 +341,64 @@ def careless_client(addition: str) -> FakeFinalizerClient:
     return FakeFinalizerClient(output_factory=build)
 
 
+def unresolved_style_client() -> FakeFinalizerClient:
+    """A finalizer that honestly reports it could not make a style repair.
+
+    The right behaviour from the model and a stopping condition for the Run:
+    Round 6.4g allows one call, so an unresolved finding ends the automatic path
+    rather than buying a second opinion.
+    """
+
+    def build(request: FinalizeRequest) -> FinalizerModelOutput:
+        article, resolutions = apply_review(
+            read_prompt_article(request), read_prompt_review(request)
+        )
+        return FinalizerModelOutput(
+            run_id=request.run_id,
+            article=article,
+            issue_resolutions=resolutions,
+            style_resolutions=[
+                StyleResolution(
+                    finding_id=str(finding.get("finding_id", "")),
+                    status=StyleResolutionStatus.UNRESOLVED,
+                    note="Repairing this would have removed a supported figure.",
+                )
+                for finding in read_style_findings(request)
+            ],
+        )
+
+    return FakeFinalizerClient(output_factory=build)
+
+
+def polishing_client(replacement: str, section: str = "VERDICT") -> FakeFinalizerClient:
+    """A finalizer that repairs what it was asked to and improves what it was not.
+
+    The failure this round is most likely to meet in the wild. A model given one
+    scoped finding fixes it, notices the verdict could be crisper, and rewrites
+    that too - fluently, plausibly, and outside anything anybody reviewed.
+    """
+
+    def build(request: FinalizeRequest) -> FinalizerModelOutput:
+        article, resolutions = apply_review(
+            read_prompt_article(request), read_prompt_review(request)
+        )
+        revised, style = apply_style_findings(article, read_style_findings(request))
+
+        span = _section_span(revised, section)
+        if span is not None:
+            start, end = span
+            revised = revised[:start] + replacement + revised[end:]
+
+        return FinalizerModelOutput(
+            run_id=request.run_id,
+            article=revised,
+            issue_resolutions=resolutions,
+            style_resolutions=style,
+        )
+
+    return FakeFinalizerClient(output_factory=build)
+
+
 def failing_client(error: FinalizeError) -> FakeFinalizerClient:
     """A client that always raises *error*."""
     return FakeFinalizerClient(raises=error)
@@ -285,12 +428,16 @@ __all__ = [
     "FAKE_PROVIDER",
     "FakeFinalizerClient",
     "apply_review",
+    "apply_style_findings",
     "careless_client",
     "erroring_client",
     "failing_client",
     "lazy_client",
     "malformed_client",
+    "polishing_client",
     "read_prompt_article",
     "read_prompt_review",
+    "read_style_findings",
     "timing_out_client",
+    "unresolved_style_client",
 ]

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from conftest import (
     CLEAN_ARTICLE,
+    GATE_BLOCKED_ARTICLE,
     PIPELINE_NOW,
     TEST_TARGET_CHAT,
     RecordingSleep,
@@ -193,7 +194,7 @@ def test_a_blocked_run_does_not_rerun_the_gate(runs_dir: Path, tmp_path: Path) -
         runs_dir,
         tmp_path,
         clients,
-        article="Vàng đang giằng co trong biên hẹp, chưa có tín hiệu rõ ràng.",
+        article=GATE_BLOCKED_ARTICLE,
         enforce_contract=False,
     )
     assert blocked.result.run_status is RunStatus.PUBLISH_BLOCKED

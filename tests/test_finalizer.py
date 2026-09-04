@@ -175,7 +175,7 @@ def test_a_revision_calls_the_finalizer(revisable_run: Any, runs_dir: Path) -> N
     assert result.result.finalization_mode is FinalizationMode.REVISED
     assert result.result.provider_called is True
     assert result.result.model == "fake-finalizer-v1"
-    assert result.result.prompt_version == "gold_finalizer_v1"
+    assert result.result.prompt_version == "gold_finalizer_v2"
 
 
 def test_every_issue_is_accounted_for(revisable_run: Any, runs_dir: Path) -> None:
@@ -776,7 +776,7 @@ def test_injection_in_the_original_article_does_not_steer_the_finalizer(
 
     final = load_finalization(result.run_dir)
     assert final.provider == "fake"
-    assert final.prompt_version == "gold_finalizer_v1"
+    assert final.prompt_version == "gold_finalizer_v2"
 
 
 def test_injection_in_the_review_evidence_does_not_steer_the_finalizer(

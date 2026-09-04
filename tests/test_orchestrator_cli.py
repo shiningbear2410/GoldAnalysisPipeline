@@ -260,14 +260,14 @@ def test_a_blocked_gate_exits_blocked(
     Driven through a real Run that the gate refuses, then resumed through the
     CLI so the exit code comes from the command rather than the service.
     """
-    from conftest import make_tracked_clients, run_orchestrated
+    from conftest import GATE_BLOCKED_ARTICLE, make_tracked_clients, run_orchestrated
 
     clients = make_tracked_clients()
     blocked = run_orchestrated(
         runs_dir,
         tmp_path,
         clients,
-        article="Vàng đang giằng co trong biên hẹp, chưa có tín hiệu rõ ràng.",
+        article=GATE_BLOCKED_ARTICLE,
         enforce_contract=False,
     )
     capsys.readouterr()

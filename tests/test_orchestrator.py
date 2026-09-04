@@ -15,6 +15,7 @@ import pytest
 from conftest import (
     BTCUSD_ARTICLE,
     CLEAN_ARTICLE,
+    GATE_BLOCKED_ARTICLE,
     PIPELINE_NOW,
     RSI_ARTICLE,
     VIETNAMESE_TEXT,
@@ -241,7 +242,7 @@ def blocked_outcome(runs_dir: Any, tmp_path: Any) -> tuple[Any, TrackedClients]:
     stops this Run, and the gate is unambiguously the stage that does.
     """
     clients = make_tracked_clients()
-    article = "Vàng đang giằng co trong biên hẹp, chưa có tín hiệu rõ ràng."
+    article = GATE_BLOCKED_ARTICLE
     outcome = run_orchestrated(
         runs_dir,
         tmp_path,

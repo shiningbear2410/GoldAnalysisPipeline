@@ -105,6 +105,34 @@ def style_verdict_for(findings: list[HumanStyleFinding]) -> StyleVerdict:
     return StyleVerdict.PASS
 
 
+REVISION_SEVERITIES = frozenset({StyleSeverity.HIGH, StyleSeverity.MEDIUM})
+"""Severities a revision must actually repair.
+
+Exactly the severities :func:`style_verdict_for` counts, and that is the point
+of stating it here rather than in the finalizer: the set of findings that *can*
+cause a revision and the set the revision *must* fix are the same set, and two
+modules deciding that separately would drift apart the first time either
+threshold moved.
+
+``LOW`` is excluded for the reason Round 6.4f gave for not accumulating it: a
+reviewer noticing six small things is a reviewer paying attention, and turning
+attention into mandatory edits is how a style gate becomes one nobody leaves on.
+A LOW finding is still sent to the finalizer and still answered - it may simply
+be answered with "left alone".
+"""
+
+
+def findings_requiring_repair(review: HumanStyleReview) -> list[HumanStyleFinding]:
+    """The findings a style-driven revision must resolve.
+
+    Empty when the verdict is PASS: a review nobody is acting on imposes no
+    obligations, even if it recorded observations.
+    """
+    if review.style_verdict is not StyleVerdict.NEEDS_REVISION:
+        return []
+    return [f for f in review.findings if f.severity in REVISION_SEVERITIES]
+
+
 def build_style_review(assessment: HumanStyleAssessment) -> HumanStyleReview:
     """Stamp the model's assessment with the verdict its findings imply."""
     return HumanStyleReview(
@@ -157,9 +185,11 @@ def resolve_style_review(
 
 __all__ = [
     "MEDIUM_FINDINGS_FOR_REVISION",
+    "REVISION_SEVERITIES",
     "STYLE_AWARE_PROMPTS",
     "applies_to",
     "build_style_review",
+    "findings_requiring_repair",
     "requires_style_review",
     "resolve_style_review",
     "style_verdict_for",

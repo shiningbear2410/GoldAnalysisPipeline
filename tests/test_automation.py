@@ -22,6 +22,7 @@ import pytest
 from conftest import (
     AUTOMATION_NOW,
     BTCUSD_ARTICLE,
+    GATE_BLOCKED_ARTICLE,
     SAMPLE_EVENT_ID,
     FrozenElapsed,
     event_aged,
@@ -817,7 +818,7 @@ def test_a_blocked_gate_is_not_retried(
         runs_dir,
         tmp_path,
         clients,
-        article="Vàng đang giằng co trong biên hẹp, chưa có tín hiệu rõ ràng.",
+        article=GATE_BLOCKED_ARTICLE,
         enforce_contract=False,
     )
     assert blocked.result.run_status is RunStatus.PUBLISH_BLOCKED

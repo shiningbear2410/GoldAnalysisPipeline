@@ -107,7 +107,7 @@ def test_revision_json_output(
     assert payload["provider_called"] is True
     assert payload["issues_applied"] == payload["issues_total"]
     assert payload["model"] == "fake-finalizer-v1"
-    assert payload["prompt_version"] == "gold_finalizer_v1"
+    assert payload["prompt_version"] == "gold_finalizer_v2"
 
 
 def test_a_revision_without_a_key_is_a_configuration_error(

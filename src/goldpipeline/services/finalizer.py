@@ -1,12 +1,16 @@
 """Finalizer stage orchestration.
 
-The verdict decides the path, and two of the three never reach a provider:
+The **action** decides the path, and two of the three never reach a provider.
+Since Round 6.4g the action is not the same thing as the review verdict:
+:func:`~goldpipeline.services.review_action.effective_action` reads the content
+verdict *and* the human-style verdict beside it and answers one question - does
+a model run? The verdict on the artifact is never rewritten to make that
+answer come out a particular way.
 
-* ``PASS`` - the article is already correct. It is copied byte for byte and the
-  stage records ``PASSTHROUGH``. Calling a model here would spend money to
+* ``PASS_THROUGH`` - nothing needs repair. The draft is copied byte for byte and
+  the stage records ``PASSTHROUGH``. Calling a model here would spend money to
   introduce drift into something that passed, which is the opposite of the job.
-* ``NEEDS_REVISION`` - Claude edits the article against the review, and the
-  result is checked before anything is written.
+* ``FINALIZE`` - one call. Content corrections, style repairs, or both together.
 * ``REJECT`` - blocked. A reviewer judged the piece unsalvageable, and
   "ask a model to rescue it" is not a recovery strategy. The Run waits for a
   human.
@@ -17,15 +21,20 @@ For the revision path the order is:
 2. verify all four artifacts against the manifest, and the review's own
    cross-references against them;
 3. re-run the deterministic checks on the draft, for a baseline;
-4. render the versioned prompt;
-5. call the provider;
-6. validate the resolutions - complete, honest, severe issues actually applied;
+4. render the versioned prompt, carrying the style findings to repair;
+5. call the provider - **once**;
+6. validate the resolutions - every content issue answered, severe ones
+   actually applied, every style finding answered and none left unresolved;
 7. re-run the checks on the revision and compare against the baseline;
-8. commit both artifacts atomically;
-9. update the manifest.
+8. run the final deterministic checks on the finished article: output contract,
+   authoritative date, numeric claims, and the sections the revision had no
+   licence to touch;
+9. commit both artifacts atomically;
+10. update the manifest.
 
-Nothing is written before step 8. A failure anywhere earlier leaves the Run
-exactly as Round 3 produced it, plus one failure event on the ledger.
+Nothing is written before step 9. A failure anywhere earlier leaves the Run
+exactly as Round 3 produced it, plus one failure event on the ledger - and it is
+the end of the automatic path. There is no step that calls the model again.
 """
 
 from __future__ import annotations
@@ -44,9 +53,11 @@ from goldpipeline.domain.errors import (
     FinalizationBlockedError,
     FinalizeArtifactExistsError,
     FinalizeError,
+    FinalizePostcheckError,
     RunNotFinalizableError,
 )
 from goldpipeline.prompts import DEFAULT_FINALIZER_PROMPT
+from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.context import AnalysisContext
 from goldpipeline.schemas.finalizer import (
@@ -55,14 +66,21 @@ from goldpipeline.schemas.finalizer import (
     FinalizerUsage,
     FinalizerWarning,
     IssueResolution,
+    StyleResolution,
 )
 from goldpipeline.schemas.manifest import RunError, RunManifest, RunStatus
-from goldpipeline.schemas.review import PrecheckFinding, ReviewResult, ReviewStatus
+from goldpipeline.schemas.review import HumanStyleFinding, PrecheckFinding, ReviewResult
 from goldpipeline.schemas.writer import WriterResult
+from goldpipeline.services.final_postcheck import (
+    FinalPostcheckReport,
+    check_final_article,
+    describe,
+)
 from goldpipeline.services.finalizer_policy import (
     compare_findings,
     require_clean_postcheck,
     validate_resolutions,
+    validate_style_resolutions,
 )
 from goldpipeline.services.finalizer_prompt import build_finalizer_prompt
 from goldpipeline.services.integrity import (
@@ -70,8 +88,10 @@ from goldpipeline.services.integrity import (
     require_digest_match,
     verify_artifact,
 )
+from goldpipeline.services.market_facts import article_date
 from goldpipeline.services.pipeline import CONTEXT_FILENAME
 from goldpipeline.services.precheck import run_prechecks
+from goldpipeline.services.review_action import ActionDecision, ReviewAction, effective_action
 from goldpipeline.services.reviewer import REVIEW_FILENAME
 from goldpipeline.services.writer import DRAFT_FILENAME, WRITER_FILENAME
 from goldpipeline.storage.run_store import PreparedArtifact, RunDirectory, RunStore
@@ -188,12 +208,31 @@ def _execute(
     """Do the work. Raises on any expected failure."""
     _require_finalizable(run, manifest)
     inputs = load_verified_inputs(run, manifest)
-    verdict = inputs.review.status
 
-    logger.info("run=%s stage=finalize.start status=OK review=%s", run.run_id, verdict)
-    manifest.record_event("finalize.start", str(verdict), f"review verdict {verdict}")
+    # Provenance is absent on Runs created before it existed, and those Runs
+    # were all ANALYSIS - which is what the manifest field itself defaults to.
+    article_type = manifest.provenance.article_type if manifest.provenance else ArticleType.ANALYSIS
 
-    if verdict is ReviewStatus.REJECT:
+    # The one place that decides. `review.status` is what was *judged* and is
+    # never rewritten; this is what the pipeline *does* about it. Round 6.4g
+    # separated the two so that a content PASS with a style problem can reach
+    # the finalizer without the artifact having to claim the content failed.
+    decision = effective_action(inputs.review, article_type=article_type)
+    verdict = decision.content_status
+
+    logger.info(
+        "run=%s stage=finalize.start status=OK action=%s content=%s style=%s findings=%d",
+        run.run_id,
+        decision.action,
+        verdict,
+        decision.style_verdict,
+        len(decision.style_findings),
+    )
+    manifest.record_event(
+        "finalize.start", str(decision.action), "; ".join(decision.reasons) or str(verdict)
+    )
+
+    if decision.action is ReviewAction.REJECT:
         raise FinalizationBlockedError(
             f"review verdict is {verdict}; finalization is blocked. "
             "A rejected article needs a human, not another model.",
@@ -202,13 +241,15 @@ def _execute(
             issue_count=len(inputs.review.issues),
         )
 
-    if verdict is ReviewStatus.PASS:
+    if decision.action is ReviewAction.PASS_THROUGH:
         return _finalize_passthrough(run=run, manifest=manifest, inputs=inputs, now=now)
 
     return _finalize_revision(
         run=run,
         manifest=manifest,
         inputs=inputs,
+        decision=decision,
+        article_type=article_type,
         client=client,
         prompt_version=prompt_version,
         max_tokens=max_tokens,
@@ -260,12 +301,26 @@ def _finalize_revision(
     run: RunDirectory,
     manifest: RunManifest,
     inputs: FinalizeInputs,
+    decision: ActionDecision,
+    article_type: ArticleType,
     client: FinalizerClient | None,
     prompt_version: str,
     max_tokens: int,
     now: datetime | None,
 ) -> FinalizeRunResult:
-    """Have the model apply the review, then check that it really did."""
+    """One model call, then every deterministic check that can be made.
+
+    **Exactly one call.** There is a single ``client.finalize`` below, no loop,
+    no retry, and no other path that reaches it. Everything after it either
+    accepts the article or stops the Run: a revision that fails a check is never
+    sent back for another attempt, because a model told "your last answer was
+    rejected" changes things nobody asked it to, and because there is no way for
+    deterministic code to adjudicate a second opinion about prose.
+
+    Content and style are repaired together, in this one call. Splitting them
+    into two would double the cost, double the drift, and leave the second pass
+    editing an article the first pass had already changed underneath it.
+    """
     if client is None:
         raise RunNotFinalizableError(
             f"run {run.run_id} needs revision, which requires a finalizer client",
@@ -284,6 +339,7 @@ def _finalize_revision(
         article=inputs.article,
         review=inputs.review,
         report=baseline,
+        style_findings=decision.style_findings,
         prompt_version=prompt_version,
     )
 
@@ -291,6 +347,7 @@ def _finalize_revision(
         FinalizeRequest(prompt=prompt, run_id=run.run_id, max_tokens=max_tokens)
     )
     validate_resolutions(response.output, inputs.review, run_id=run.run_id)
+    validate_style_resolutions(response.output, decision.style_findings, run_id=run.run_id)
 
     article = response.output.article.strip()
     revised = run_prechecks(
@@ -304,11 +361,34 @@ def _finalize_revision(
     )
     require_clean_postcheck(outcome)
 
+    final_report = _require_clean_final_article(
+        run_id=run.run_id,
+        article=article,
+        inputs=inputs,
+        article_type=article_type,
+        style_findings=decision.style_findings,
+    )
+
     logger.info(
-        "run=%s stage=finalize.postcheck status=OK findings=%d",
+        "run=%s stage=finalize.postcheck status=OK findings=%d chars=%d->%d "
+        "changed=%s symptoms=%d->%d",
         run.run_id,
         len(outcome.findings),
+        len(inputs.article),
+        len(article),
+        [str(key) for key in final_report.changed_sections],
+        final_report.symptoms_before,
+        final_report.symptoms_after,
     )
+    if final_report.symptoms_worse_by:
+        # Recorded, never fatal. A symptom is a countable pattern, not a
+        # judgement, and refusing a revision over one more of them would put
+        # deterministic code in charge of prose - which this round refuses.
+        logger.info(
+            "run=%s stage=finalize.symptoms note=worse_by=%d",
+            run.run_id,
+            final_report.symptoms_worse_by,
+        )
 
     final = PreparedArtifact.from_text(FINAL_FILENAME, article)
     result = _build_result(
@@ -319,6 +399,7 @@ def _finalize_revision(
         final=final,
         article=article,
         resolutions=list(response.output.issue_resolutions),
+        style_resolutions=list(response.output.style_resolutions),
         warnings=list(response.output.warnings),
         postcheck_findings=outcome.findings,
         model=response.model,
@@ -326,9 +407,47 @@ def _finalize_revision(
         selection_id=response.selection_id,
         prompt_version=prompt.prompt_version,
         usage=response.usage,
+        chars_before=len(inputs.article),
+        chars_after=len(article),
+        changed_sections=[str(key) for key in final_report.changed_sections],
+        symptoms_before=final_report.symptoms_before,
+        symptoms_after=final_report.symptoms_after,
         now=now,
     )
     return _commit(run=run, manifest=manifest, final=final, result=result)
+
+
+def _require_clean_final_article(
+    *,
+    run_id: str,
+    article: str,
+    inputs: FinalizeInputs,
+    article_type: ArticleType,
+    style_findings: tuple[HumanStyleFinding, ...],
+) -> FinalPostcheckReport:
+    """The last deterministic word on the finished article.
+
+    Terminal by design. Every failure here stops the Run for a person; none of
+    them is a reason to call the model again.
+    """
+    report = check_final_article(
+        article=article,
+        draft=inputs.article,
+        context=inputs.context,
+        writer_result=inputs.writer_result,
+        article_type=article_type,
+        expected_date=article_date(inputs.context.timing.latest_candle_at),
+        style_findings=style_findings,
+    )
+    if report.ok:
+        return report
+
+    raise FinalizePostcheckError(
+        "the finished article failed the final deterministic checks; the Run "
+        "stops here rather than spending a second model call",
+        run_id=run_id,
+        **describe(report),
+    )
 
 
 def _build_result(
@@ -347,9 +466,21 @@ def _build_result(
     prompt_version: str | None,
     selection_id: str | None = None,
     usage: FinalizerUsage,
+    style_resolutions: list[StyleResolution] | None = None,
+    chars_before: int | None = None,
+    chars_after: int | None = None,
+    changed_sections: list[str] | None = None,
+    symptoms_before: int | None = None,
+    symptoms_after: int | None = None,
     now: datetime | None,
 ) -> FinalizerResult:
-    """Stamp the metadata artifact. Every provenance field is set here."""
+    """Stamp the metadata artifact. Every provenance field is set here.
+
+    ``review_status`` still records the *content* verdict, unchanged. Round 6.4g
+    added a second reason a revision can happen; it did not change what that
+    field has always meant, and a reader of an old artifact and a new one is
+    looking at the same thing.
+    """
     return FinalizerResult(
         run_id=run_id,
         finalization_mode=mode,
@@ -359,8 +490,14 @@ def _build_result(
         final_article_sha256=final.sha256,
         article_chars=len(article),
         issue_resolutions=resolutions,
+        style_resolutions=list(style_resolutions or []),
         warnings=warnings,
         postcheck_findings=postcheck_findings,
+        chars_before=chars_before,
+        chars_after=chars_after,
+        changed_sections=list(changed_sections or []),
+        style_symptoms_before=symptoms_before,
+        style_symptoms_after=symptoms_after,
         model=model,
         provider=provider,
         selection_id=selection_id,

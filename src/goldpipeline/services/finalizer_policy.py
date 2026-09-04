@@ -22,6 +22,7 @@ undetectably to anything that only reads the resolutions.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from goldpipeline.domain.errors import FinalizePostcheckError, FinalizeResponseError
@@ -31,9 +32,11 @@ from goldpipeline.schemas.finalizer import (
     FinalizerModelOutput,
     IssueResolution,
     ResolutionStatus,
+    StyleResolutionStatus,
 )
 from goldpipeline.schemas.review import (
     BLOCKING_SEVERITIES,
+    HumanStyleFinding,
     PrecheckFinding,
     ReviewIssue,
     ReviewResult,
@@ -146,6 +149,72 @@ def _require_mandatory_fixes(
         )
 
 
+def validate_style_resolutions(
+    output: FinalizerModelOutput,
+    findings: Sequence[HumanStyleFinding],
+    *,
+    run_id: str,
+) -> None:
+    """Check the revision accounted for every style finding it was given.
+
+    Two failures, and the second is the important one.
+
+    A **missing or unknown** resolution is the same defect as its content
+    counterpart: an unanswered finding is indistinguishable from a repaired one,
+    and the account is the only evidence there is.
+
+    An **UNRESOLVED** finding stops the Run. That is deliberate and it is the
+    end of the line - Round 6.4g allows exactly one model call, so there is no
+    "try again with the failure attached". A finalizer that honestly reports it
+    could not make an edit has done the right thing, and the right response is
+    to hand the Run to a person rather than to spend a second call hoping for a
+    different answer.
+
+    Raises:
+        FinalizeResponseError: On an incomplete account, or an unresolved
+            finding the revision was required to repair.
+    """
+    if not findings:
+        return
+
+    expected = {finding.finding_id: finding for finding in findings}
+    answered = {item.finding_id: item for item in output.style_resolutions}
+
+    missing = sorted(expected.keys() - answered.keys())
+    if missing:
+        raise FinalizeResponseError(
+            "every human-style finding must be accounted for; these were not",
+            run_id=run_id,
+            missing_finding_ids=missing,
+        )
+
+    unknown = sorted(answered.keys() - expected.keys())
+    if unknown:
+        raise FinalizeResponseError(
+            "response resolves style findings the review never raised",
+            run_id=run_id,
+            unknown_finding_ids=unknown,
+        )
+
+    unresolved = [
+        {
+            "finding_id": item.finding_id,
+            "category": str(expected[item.finding_id].category),
+            "severity": str(expected[item.finding_id].severity),
+            "note": item.note,
+        }
+        for item in output.style_resolutions
+        if item.status is StyleResolutionStatus.UNRESOLVED
+    ]
+    if unresolved:
+        raise FinalizeResponseError(
+            "the revision left required style findings unresolved; the Run stops "
+            "here rather than spending a second model call",
+            run_id=run_id,
+            unresolved=unresolved,
+        )
+
+
 def compare_findings(
     *,
     original: PrecheckReport,
@@ -254,4 +323,5 @@ __all__ = [
     "compare_findings",
     "require_clean_postcheck",
     "validate_resolutions",
+    "validate_style_resolutions",
 ]

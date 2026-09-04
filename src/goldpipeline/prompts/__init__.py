@@ -99,11 +99,34 @@ were judged under.
 """
 
 GOLD_FINALIZER_V1 = "gold_finalizer_v1"
-"""Current finalizer prompt id."""
+"""The original finalizer prompt. Retained so historical revisions keep meaning.
+
+It knew one kind of repair: apply the content review's corrections. Runs
+finalized under it were edited to that rule and to no other.
+"""
+
+GOLD_FINALIZER_V2 = "gold_finalizer_v2"
+"""Current finalizer prompt id. Repairs both axes in one pass.
+
+Every content rule from v1 survives verbatim - minimum necessary revision, the
+preserve list, the never-introduce list, and the rule that HIGH and CRITICAL
+issues may not be declined. What is new is a human-style repair section that
+treats each finding's `repair_instruction` as the entire mandate, an explicit
+"a smoother article is not a better article" rule, and the ordering that content
+correctness beats every style preference.
+
+Includes `gold_human_style_v1` for the third time in the pipeline and for a
+third purpose: the writer writes to it, the reviewer judges against it, and the
+finalizer reads it only to understand what a repair is aiming at. One contract,
+three readers, no copies.
+
+A new file rather than an edit to v1, because finalizations record the prompt
+they were made under.
+"""
 
 DEFAULT_WRITER_PROMPT = GOLD_WRITER_V4
 DEFAULT_REVIEWER_PROMPT = GOLD_REVIEWER_V2
-DEFAULT_FINALIZER_PROMPT = GOLD_FINALIZER_V1
+DEFAULT_FINALIZER_PROMPT = GOLD_FINALIZER_V2
 
 INCLUDE_PATTERN = re.compile(r"^<!-- include: ([a-z0-9_]+) -->$", re.MULTILINE)
 """How a prompt pulls in a shared, separately versioned block.
@@ -188,6 +211,7 @@ __all__ = [
     "DEFAULT_REVIEWER_PROMPT",
     "DEFAULT_WRITER_PROMPT",
     "GOLD_FINALIZER_V1",
+    "GOLD_FINALIZER_V2",
     "GOLD_HUMAN_STYLE_V1",
     "GOLD_REVIEWER_V1",
     "GOLD_REVIEWER_V2",

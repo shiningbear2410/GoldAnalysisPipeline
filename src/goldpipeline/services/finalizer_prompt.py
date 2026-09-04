@@ -13,12 +13,12 @@ and the system turn remains the on-disk template byte for byte.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from goldpipeline.prompts import DEFAULT_FINALIZER_PROMPT, load_prompt
 from goldpipeline.schemas.context import AnalysisContext
 from goldpipeline.schemas.finalizer import FinalizerPrompt
-from goldpipeline.schemas.review import ReviewResult
+from goldpipeline.schemas.review import HumanStyleFinding, ReviewResult
 from goldpipeline.services.fencing import fenced_block, make_nonce
 from goldpipeline.services.market_facts import build_market_facts, format_recent_bars
 from goldpipeline.services.precheck import PrecheckReport, render_findings
@@ -41,6 +41,7 @@ def build_finalizer_prompt(
     article: str,
     review: ReviewResult,
     report: PrecheckReport,
+    style_findings: Sequence[HumanStyleFinding] = (),
     prompt_version: str = DEFAULT_FINALIZER_PROMPT,
     recent_bar_limit: int = RECENT_BAR_LIMIT,
     nonce_factory: Callable[[], str] | None = None,
@@ -52,6 +53,11 @@ def build_finalizer_prompt(
         article: The draft to revise.
         review: The verdict being acted on.
         report: Deterministic findings on the draft.
+        style_findings: The human-style findings this revision must repair.
+            Empty for a content-only revision, and for every article type
+            outside the style scope - in which case the user turn says so
+            rather than staying silent, so the model does not have to guess
+            whether an absent list means "none" or "not sent".
         prompt_version: Which versioned template to load.
         recent_bar_limit: How many trailing candles to include.
         nonce_factory: Injectable token generator, for byte-stable tests.
@@ -91,13 +97,27 @@ def build_finalizer_prompt(
         for issue in review.issues
     ]
 
-    review_payload = {
+    review_payload: dict[str, object] = {
         "review_status": str(review.status),
         "score": review.score,
         "summary": review.summary,
         "issues": issues,
         "revision_instructions": list(review.revision_instructions),
     }
+
+    if style_findings:
+        review_payload["style_findings"] = [
+            {
+                "finding_id": finding.finding_id,
+                "category": str(finding.category),
+                "severity": str(finding.severity),
+                "section": str(finding.section) if finding.section else None,
+                "problem": finding.problem,
+                "repair_instruction": finding.repair_instruction,
+                "article_excerpt": finding.article_excerpt,
+            }
+            for finding in style_findings
+        ]
 
     parts: list[str] = [
         MARKET_FACTS_HEADING,
@@ -134,6 +154,7 @@ def build_finalizer_prompt(
         "",
         "Issues marked `resolution_required` are HIGH or CRITICAL and must be APPLIED.",
         "",
+        *_style_task_lines(style_findings),
         fenced_block(nonce, REVIEW_LABEL, json.dumps(review_payload, ensure_ascii=False, indent=2)),
         "",
         FINDINGS_HEADING,
@@ -156,6 +177,42 @@ def build_finalizer_prompt(
         prompt_version=prompt_version,
         nonce=nonce,
     )
+
+
+def _style_task_lines(findings: Sequence[HumanStyleFinding]) -> list[str]:
+    """Say what the style half of this revision is, including when it is nothing.
+
+    Silence would be ambiguous under a style-aware prompt: a model that sees no
+    `style_findings` key cannot tell whether the reviewer found nothing or the
+    pipeline forgot to send them, and the two call for opposite behaviour. So
+    both cases are stated.
+    """
+    if not findings:
+        return [
+            "This revision has **no** human-style findings. Repair the content issues",
+            "above and change nothing for style reasons. Return an empty",
+            "`style_resolutions` list.",
+            "",
+        ]
+
+    scoped = sorted({str(f.section) for f in findings if f.section is not None})
+    lines = [
+        f"The review also supplied {len(findings)} human-style finding(s) in",
+        "`style_findings`. Each one's `repair_instruction` is the edit task, and the",
+        "whole of it. Return one `style_resolutions` entry per finding, using its",
+        "`finding_id`.",
+        "",
+    ]
+    if scoped:
+        lines.extend(
+            [
+                "Sections named by these findings: " + ", ".join(scoped) + ".",
+                "Sections not named there, and not touched by a content correction, must",
+                "come back unchanged - the same words, character for character.",
+                "",
+            ]
+        )
+    return lines
 
 
 __all__ = [

@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 from conftest import (
     AUTOMATION_NOW,
+    GATE_BLOCKED_ARTICLE,
     age_run,
     event_aged,
     make_published_ready_run,
@@ -305,7 +306,7 @@ def test_a_blocked_decision_is_never_published(
         runs_dir,
         tmp_path,
         make_tracked_clients(),
-        article="Vàng đang giằng co trong biên hẹp, chưa có tín hiệu rõ ràng.",
+        article=GATE_BLOCKED_ARTICLE,
         enforce_contract=False,
     )
     assert blocked.result.run_status is RunStatus.PUBLISH_BLOCKED

@@ -295,20 +295,63 @@ class TestRoutingConsistency:
             "goldpipeline.services.style_symptoms",
         }
         own = {name.rsplit(".", 1)[1] for name in enforcing | vocabulary}
-        composer = "analysis_contract"
+
+        # Round 6.4g added a second enforcement point, and says so here rather
+        # than smuggling it in. `final_postcheck` judges the article the
+        # *finalizer* produced, which the writer's composer never sees - a
+        # different stage, a different article, a different question. What the
+        # guard still forbids is a *third* one appearing without a decision:
+        # two named enforcers are an architecture, and an open list is not.
+        enforcers = {"analysis_contract", "final_postcheck"}
+
+        # What is forbidden is *running a check*, not touching the module that
+        # holds one. `detect_sections` and `detect_structures` are parsers: they
+        # answer "where is the price section", decide nothing, and both the
+        # postcheck and the offline finalizer need one to tell a rewritten
+        # section from an untouched one. Anything named `check_*` is the part
+        # that judges, and that stays behind a named enforcer.
+        parsers = {"detect_sections", "detect_structures", "length_report", "count_disclaimers"}
 
         for path in SRC.rglob("*.py"):
-            if path.stem in own or path.stem == composer:
+            if path.stem in own or path.stem in enforcers:
                 continue
-            imported = _imports(path) & enforcing
-            assert not imported, f"{path.name} enforces directly: {imported}"
+            imported = _imports(path)
+            judging = {
+                name
+                for name in imported
+                if name.rsplit(".", 1)[0] in enforcing
+                and name.rsplit(".", 1)[1] not in parsers
+                and name not in enforcing
+            }
+            assert not judging, f"{path.name} runs a check directly: {judging}"
+            modules = imported & enforcing
+            for module in modules:
+                used = {
+                    name.rsplit(".", 1)[1] for name in imported if name.startswith(f"{module}.")
+                }
+                assert used and used <= parsers, (
+                    f"{path.name} imports {module} for more than parsing: {used - parsers}"
+                )
 
         writer = _imports(SRC / "services" / "writer.py")
         assert "goldpipeline.services.analysis_contract" in writer
         assert not (writer & enforcing), "the writer must go through analysis_contract"
 
+        # The finalizer's postcheck goes through the same composer for the
+        # contract itself, and reaches past it for exactly two things: the
+        # section parser, which tells a rewritten section from an untouched one,
+        # and the numeric resolution seam, which is the one vocabulary for
+        # "does this number mean what the article says it means". Pinned as an
+        # exact set so a third dependency is a decision rather than a drift.
+        postcheck = _imports(SRC / "services" / "final_postcheck.py")
+        assert "goldpipeline.services.analysis_contract" in postcheck
+        assert postcheck & enforcing == {
+            "goldpipeline.services.article_contract_checks",
+            "goldpipeline.services.numeric_mentions",
+        }
+
         # The reviewer reads vocabulary and hints, and enforces nothing.
-        for module in ("reviewer.py", "reviewer_prompt.py", "style_review.py"):
+        for module in ("reviewer.py", "reviewer_prompt.py", "style_review.py", "review_action.py"):
             imports = _imports(SRC / "services" / module)
             assert not (imports & enforcing), f"{module} must not import an enforcing check"
 
