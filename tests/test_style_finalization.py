@@ -287,7 +287,12 @@ def test_a_trade_plan_never_activates_human_style() -> None:
 
 
 def test_the_news_digest_is_judged_but_not_yet_repaired() -> None:
-    """Activation is per type, and the digest is not producible yet."""
+    """Activation is per type, and the two activations are separate.
+
+    Round 6.5b made the digest producible; style-driven repair of one is a
+    different switch, and it stays off until 6.5c has real digest evidence to
+    tune against.
+    """
     from goldpipeline.services.style_review import applies_to
 
     assert applies_to(ArticleType.NEWS_DIGEST)
@@ -1137,7 +1142,7 @@ def test_the_voice_contract_is_unchanged() -> None:
 def test_readiness_is_unchanged() -> None:
     from goldpipeline.services.article_routing import SPECS
 
-    assert SPECS[ArticleType.NEWS_DIGEST].ready is False
+    assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == "gold_news_digest_writer_v1"
     assert SPECS[ArticleType.TRADE_PLAN].ready is False
 
 

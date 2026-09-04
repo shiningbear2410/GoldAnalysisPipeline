@@ -378,5 +378,8 @@ class TestNewsDigestStillNotReady:
         from goldpipeline.schemas.article import ArticleType
         from goldpipeline.services.article_routing import READY_TYPES, spec_for
 
-        assert spec_for(ArticleType.NEWS_DIGEST).ready is False
-        assert ArticleType.NEWS_DIGEST not in READY_TYPES
+        # Coverage accounting is not the same as being able to publish a
+        # digest. The type was activated later, by the round that wrote the
+        # digest writer - never as a side effect of coverage work.
+        assert spec_for(ArticleType.TRADE_PLAN).ready is False
+        assert ArticleType.TRADE_PLAN not in READY_TYPES

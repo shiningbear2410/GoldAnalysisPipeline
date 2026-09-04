@@ -72,6 +72,19 @@ Never included by a `TRADE_PLAN` prompt, because there will not be one: that
 document is rendered deterministically and has no voice to contract.
 """
 
+GOLD_NEWS_DIGEST_WRITER_V1 = "gold_news_digest_writer_v1"
+"""The NEWS_DIGEST writer prompt. Editorial content only.
+
+A separate prompt rather than a mode of `gold_writer_v4`, because it asks for a
+different *shape of answer*: the analysis writer returns an article, and this
+one returns the two things a model should decide about a digest - which items
+mattered and how the window balances. Everything else in a digest is arithmetic,
+rendered by code, and the schema behind this prompt has nowhere to put it.
+
+Includes `gold_human_style_v1` for the fourth time in the pipeline. The voice is
+the product's, not one article type's.
+"""
+
 GOLD_REVIEWER_V1 = "gold_reviewer_v1"
 """The original reviewer prompt. Retained so historical reviews keep their meaning.
 
@@ -213,6 +226,7 @@ __all__ = [
     "GOLD_FINALIZER_V1",
     "GOLD_FINALIZER_V2",
     "GOLD_HUMAN_STYLE_V1",
+    "GOLD_NEWS_DIGEST_WRITER_V1",
     "GOLD_REVIEWER_V1",
     "GOLD_REVIEWER_V2",
     "GOLD_WRITER_V1",

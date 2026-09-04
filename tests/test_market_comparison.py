@@ -589,6 +589,7 @@ class TestProductionUnchanged:
         from goldpipeline.schemas.article import ArticleType
         from goldpipeline.services.article_routing import READY_TYPES, SPECS
 
-        assert {ArticleType.ANALYSIS} == READY_TYPES
-        assert SPECS[ArticleType.NEWS_DIGEST].ready is False
+        assert {ArticleType.ANALYSIS, ArticleType.NEWS_DIGEST} == READY_TYPES
+        # NEWS_DIGEST was activated by Round 6.5b, with its own writer.
+        assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == "gold_news_digest_writer_v1"
         assert SPECS[ArticleType.TRADE_PLAN].ready is False

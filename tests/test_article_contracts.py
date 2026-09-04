@@ -259,10 +259,17 @@ class TestRoutingConsistency:
         assert PLAN.generation_mode is GenerationMode.DETERMINISTIC
         assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 
-    def test_readiness_unchanged(self) -> None:
-        assert {ArticleType.ANALYSIS} == READY_TYPES
-        assert SPECS[ArticleType.NEWS_DIGEST].ready is False
+    def test_readiness_matches_the_prompts_that_exist(self) -> None:
+        """A type is ready exactly when something can write it.
+
+        Round 6.5b gave NEWS_DIGEST its own prompt and turned it on. TRADE_PLAN
+        still has neither, and a readiness flag that ran ahead of a prompt is
+        the failure this assertion exists to catch.
+        """
+        assert {ArticleType.ANALYSIS, ArticleType.NEWS_DIGEST} == READY_TYPES
+        assert SPECS[ArticleType.NEWS_DIGEST].prompt_id is not None
         assert SPECS[ArticleType.TRADE_PLAN].ready is False
+        assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 
     def test_only_the_analysis_contract_wires_the_checks_into_production(self) -> None:
         """Round 6.4e connected these, and only through one seam.

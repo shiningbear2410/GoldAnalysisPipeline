@@ -25,11 +25,13 @@ explanation are owned by different stages on purpose.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 
 from goldpipeline.schemas.common import resolve_timezone
 from goldpipeline.schemas.digest import DigestWindow, MarketActivity, PriceReaction
+from goldpipeline.schemas.news_digest import IMPACT_LABELS, DigestItem, DigestSourceItem
 from goldpipeline.services.market_facts import ARTICLE_TIMEZONE
 
 DIGEST_TITLE_PREFIX = "📰 TIN VÀNG"
@@ -162,23 +164,110 @@ def _reaction_body(reaction: PriceReaction) -> str:
     return sentence
 
 
+# --------------------------------------------------------------------------
+# assembling the whole digest
+# --------------------------------------------------------------------------
+
+SEPARATOR = "━━━━━━━━━━━━━━━"
+NEWS_HEADING = "📌 Tin đáng chú ý"
+BALANCE_HEADING = "🧭 Cán cân"
+ITEM_BULLET = "🔹"
+IMPACT_ARROW = "→"
+
+
+def render_digest(
+    *,
+    title: str,
+    window_line: str,
+    items: Sequence[DigestItem],
+    sources: Mapping[str, DigestSourceItem],
+    price_reaction_block: str,
+    balance: str,
+    disclaimer: str,
+) -> str:
+    """Assemble the published digest. The one place this happens.
+
+    Every structural decision is made here rather than by the model: the order
+    of the sections, the separators, the bullet, the timestamp beside each
+    item, the exact impact wording, and the disclaimer. The model contributed
+    the headline, the optional note, the impact and the balance paragraph, and
+    could not have contributed anything else - :class:`DigestEditorial` has no
+    field for it.
+
+    The timestamp is looked up from *sources* by id, so a digest reports the
+    time the producer collected rather than the time the model remembered.
+
+    Raises:
+        KeyError: An item names a source the caller did not supply. That is a
+            plumbing bug or a fabricated id, and both should stop rather than
+            publish a bullet whose provenance nobody can find.
+    """
+    blocks: list[str] = [
+        title,
+        "",
+        window_line,
+        "",
+        SEPARATOR,
+        "",
+        NEWS_HEADING,
+        "",
+        *_render_items(items, sources),
+        SEPARATOR,
+        "",
+        price_reaction_block,
+        "",
+        f"{BALANCE_HEADING}\n{balance.strip()}",
+        "",
+        disclaimer,
+    ]
+    return "\n".join(blocks).strip()
+
+
+def _render_items(
+    items: Sequence[DigestItem], sources: Mapping[str, DigestSourceItem]
+) -> list[str]:
+    """One block per selected item, each followed by a blank line.
+
+    The note is omitted rather than replaced by an empty line when the writer
+    had nothing to add - an item that needs one line gets one line, which is
+    what stops every entry looking like a form someone filled in.
+    """
+    blocks: list[str] = []
+    for item in items:
+        source = sources[item.news_item_id]
+        when = _local(source.published_at).strftime("%H:%M")
+        lines = [f"{ITEM_BULLET} {when} — {item.headline}"]
+        if item.note:
+            lines.append(item.note)
+        lines.append(f"{IMPACT_ARROW} {IMPACT_LABELS[item.impact]}")
+        blocks.append("\n".join(lines))
+        blocks.append("")
+    return blocks
+
+
 def _local(moment: datetime) -> datetime:
     """The same instant, in the reader's timezone."""
     return moment.astimezone(resolve_timezone(ARTICLE_TIMEZONE))
 
 
 __all__ = [
+    "BALANCE_HEADING",
     "CURRENCY_LABEL",
     "DIGEST_TITLE_PREFIX",
+    "IMPACT_ARROW",
+    "ITEM_BULLET",
     "MOVE_DECIMALS",
+    "NEWS_HEADING",
     "PERCENT_DECIMALS",
     "PRICE_REACTION_HEADING",
     "RANGE_LABEL",
+    "SEPARATOR",
     "WINDOW_LINE_PREFIX",
     "WINDOW_LINE_SUFFIX",
     "digest_title",
     "digest_window_line",
     "format_move",
     "format_percent",
+    "render_digest",
     "render_price_reaction",
 ]

@@ -109,22 +109,35 @@ class TestRouting:
         assert writer_prompt_for(ArticleType.ANALYSIS) == DEFAULT_WRITER_PROMPT
         assert DEFAULT_WRITER_PROMPT.startswith("gold_writer_v")
 
-    def test_analysis_is_the_only_ready_type(self) -> None:
-        assert {ArticleType.ANALYSIS} == READY_TYPES
+    def test_the_prose_types_are_ready_and_the_rendered_one_is_not(self) -> None:
+        """Two writers exist; the deterministic document still has none."""
+        assert {ArticleType.ANALYSIS, ArticleType.NEWS_DIGEST} == READY_TYPES
 
-    @pytest.mark.parametrize("kind", [ArticleType.TRADE_PLAN, ArticleType.NEWS_DIGEST])
+    @pytest.mark.parametrize("kind", [ArticleType.TRADE_PLAN])
     def test_unimplemented_types_refuse(self, kind: ArticleType) -> None:
         with pytest.raises(ArticleTypeNotReadyError) as caught:
             require_ready(kind)
         assert caught.value.code == "ARTICLE_TYPE_NOT_READY"
         assert spec_for(kind).requires, "a refusal must say what is missing"
 
-    @pytest.mark.parametrize("kind", [ArticleType.TRADE_PLAN, ArticleType.NEWS_DIGEST])
+    @pytest.mark.parametrize("kind", [ArticleType.TRADE_PLAN])
     def test_unimplemented_types_never_borrow_the_analysis_prompt(self, kind: ArticleType) -> None:
         """The failure mode that matters: silent substitution."""
         assert spec_for(kind).prompt_id is None
         with pytest.raises(ArticleTypeNotReadyError):
             writer_prompt_for(kind)
+
+    def test_every_ready_type_has_a_prompt_of_its_own(self) -> None:
+        """Activation is per type, and no two types share a writer.
+
+        Round 6.5b turned NEWS_DIGEST on with its own prompt rather than by
+        pointing it at the analysis writer - which would have produced an
+        article-shaped digest and looked like it worked.
+        """
+        prompts = {kind: spec_for(kind).prompt_id for kind in READY_TYPES}
+
+        assert None not in prompts.values()
+        assert len(set(prompts.values())) == len(prompts)
 
     def test_no_placeholder_prompt_files_were_created(self) -> None:
         """Prefer no prompt over a fake usable one."""

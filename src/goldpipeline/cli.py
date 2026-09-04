@@ -1553,6 +1553,42 @@ any change to it.
 """
 
 
+def _digest_market_source(window: Any, *, fake: bool = False) -> Any:
+    """The market source a NEWS_DIGEST describes its own window with.
+
+    Parallel to :func:`_market_source` rather than a branch inside it, because
+    the two answer different questions. The analysis source is configured: an
+    operator chose its timeframe and its depth, and they are persisted. A digest
+    source is *derived*: the timeframe is the product's own choice for this
+    article type, and the depth follows from the window being described - a
+    six-hour digest and a seven-day one need very different amounts of history,
+    and neither number is an operator's to set.
+
+    Everything else is shared and deliberately not re-decided here: the same
+    venue symbol, the same provider, and the same staleness policy, so a digest
+    cannot quietly publish against older data than an analysis would accept.
+    """
+    from goldpipeline.adapters.tradingview_market import TradingViewMarketDataSource
+    from goldpipeline.services.price_reaction import (
+        PREFERRED_DIGEST_TIMEFRAME,
+        digest_bar_count,
+    )
+
+    settings = MarketDataSettings.from_env(_config_env())
+    timeframe = PREFERRED_DIGEST_TIMEFRAME
+    limit = digest_bar_count(window, timeframe)
+
+    connector, series_id = _fake_market_connector(timeframe, limit) if fake else (None, None)
+    return TradingViewMarketDataSource(
+        provider_symbol=TRADINGVIEW_PROVIDER_SYMBOL,
+        timeframe=timeframe,
+        limit=limit,
+        connector=connector,
+        series_id=series_id,
+        max_data_age_minutes=settings.max_data_age_minutes,
+    )
+
+
 def _market_source(args: argparse.Namespace) -> Any:
     """Build the market data source this invocation asked for.
 

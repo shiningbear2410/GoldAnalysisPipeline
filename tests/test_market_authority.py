@@ -486,8 +486,10 @@ class TestArticleBehaviourUnchanged:
         from goldpipeline.schemas.article import ArticleType
         from goldpipeline.services.article_routing import READY_TYPES, SPECS
 
-        assert {ArticleType.ANALYSIS} == READY_TYPES
-        assert SPECS[ArticleType.NEWS_DIGEST].ready is False
+        assert {ArticleType.ANALYSIS, ArticleType.NEWS_DIGEST} == READY_TYPES
+        # NEWS_DIGEST was activated by Round 6.5b, with its own writer.
+        # What a market-data round must never do is activate anything.
+        assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == "gold_news_digest_writer_v1"
         assert SPECS[ArticleType.TRADE_PLAN].ready is False
 
     def test_the_analysis_writer_prompt_is_the_current_version(self) -> None:

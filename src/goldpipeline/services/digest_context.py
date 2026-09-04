@@ -31,6 +31,7 @@ from goldpipeline.schemas.common import StrictModel, Timeframe
 from goldpipeline.schemas.digest import DigestWindow, PriceReaction
 from goldpipeline.schemas.inbox import AnalysisEvent
 from goldpipeline.schemas.news import MAX_LOOKBACK, MIN_LOOKBACK
+from goldpipeline.schemas.news_digest import DigestSourceItem
 from goldpipeline.services.digest_render import (
     digest_title,
     digest_window_line,
@@ -67,14 +68,26 @@ class DigestFacts(StrictModel):
     symbol: str
     timeframe: Timeframe
 
-    news_item_ids: tuple[str, ...] = Field(
+    news_items: tuple[DigestSourceItem, ...] = Field(
         default=(),
         description=(
-            "The curated items available to choose from, by id. Selection is "
-            "editorial and belongs to the writer; this is the closed list it may "
-            "choose within, and never a ranking."
+            "The curated items available to choose from. Selection is editorial "
+            "and belongs to the writer; this is the closed list it may choose "
+            "within, and never a ranking. Each carries its own timestamp, which "
+            "is what the renderer prints - so a digest reports the time the "
+            "producer collected rather than the time a model remembered."
         ),
     )
+
+    @property
+    def news_item_ids(self) -> tuple[str, ...]:
+        """Just the ids, for the closed-vocabulary check."""
+        return tuple(item.item_id for item in self.news_items)
+
+    @property
+    def sources_by_id(self) -> dict[str, DigestSourceItem]:
+        """The items the renderer looks timestamps up in."""
+        return {item.item_id: item for item in self.news_items}
 
     @property
     def deterministic_lines(self) -> tuple[str, ...]:
@@ -132,7 +145,7 @@ def build_digest_facts(
     price_reaction: PriceReaction,
     symbol: str,
     timeframe: Timeframe,
-    news_item_ids: Sequence[str] = (),
+    news_items: Sequence[DigestSourceItem] = (),
 ) -> DigestFacts:
     """Assemble the deterministic half, rendering each line once.
 
@@ -151,7 +164,7 @@ def build_digest_facts(
         price_reaction_block=render_price_reaction(price_reaction),
         symbol=symbol,
         timeframe=timeframe,
-        news_item_ids=tuple(news_item_ids),
+        news_items=tuple(news_items),
     )
     logger.info(
         "digest.facts symbol=%s timeframe=%s window=%s..%s activity=%s items=%d",

@@ -263,7 +263,7 @@ def test_any_article_type_may_be_stored(article_type: ArticleType, store: Prefer
     assert store.read().preferences.article_type is article_type  # type: ignore[union-attr]
 
 
-@pytest.mark.parametrize("article_type", [ArticleType.TRADE_PLAN, ArticleType.NEWS_DIGEST])
+@pytest.mark.parametrize("article_type", [ArticleType.TRADE_PLAN])
 def test_storing_an_unfinished_type_does_not_make_it_ready(
     article_type: ArticleType, store: PreferencesStore
 ) -> None:

@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from goldpipeline.domain.errors import ArticleTypeNotReadyError
-from goldpipeline.prompts import DEFAULT_WRITER_PROMPT
+from goldpipeline.prompts import DEFAULT_WRITER_PROMPT, GOLD_NEWS_DIGEST_WRITER_V1
 from goldpipeline.schemas.article import ArticleType
 
 
@@ -66,9 +66,12 @@ SPECS: dict[ArticleType, ArticleTypeSpec] = {
     ),
     ArticleType.NEWS_DIGEST: ArticleTypeSpec(
         article_type=ArticleType.NEWS_DIGEST,
-        ready=False,
-        prompt_id=None,
-        requires="a curated news collector and a news-digest context",
+        ready=True,
+        # Its own prompt, not the analysis writer's. The two ask for different
+        # shapes of answer: an article, versus the editorial judgements a digest
+        # needs around facts the pipeline computes itself.
+        prompt_id=GOLD_NEWS_DIGEST_WRITER_V1,
+        requires="",
     ),
 }
 """Every article type, including the ones that will not run.

@@ -39,6 +39,7 @@ from goldpipeline.schemas.digest import (
 from goldpipeline.schemas.inbox import AnalysisEvent
 from goldpipeline.schemas.market import OHLCBar
 from goldpipeline.schemas.news import DEFAULT_LOOKBACK, MAX_LOOKBACK, MIN_LOOKBACK
+from goldpipeline.schemas.news_digest import DigestSourceItem
 from goldpipeline.services.digest_context import (
     NEWS_WINDOW_METADATA_KEY,
     DigestFacts,
@@ -912,7 +913,15 @@ def facts(**overrides: object) -> DigestFacts:
         "price_reaction": normal_reaction("105"),
         "symbol": SYMBOL,
         "timeframe": TF,
-        "news_item_ids": ("goldnewsvn:901", "goldnewsvn:902"),
+        # Round 6.5b: the seam carries whole items, not just ids. The
+        # timestamp travels with the item so the renderer never asks a model
+        # what time something happened.
+        "news_items": (
+            DigestSourceItem(
+                item_id="goldnewsvn:901", published_at=BASE, text="Fed giữ nguyên lãi suất."
+            ),
+            DigestSourceItem(item_id="goldnewsvn:902", published_at=BASE, text="USD giảm 0.21%."),
+        ),
     }
     payload.update(overrides)
     return build_digest_facts(**payload)  # type: ignore[arg-type]
@@ -981,13 +990,19 @@ def test_the_length_contract_is_recorded_but_not_enforced() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_news_digest_is_still_not_ready() -> None:
+def test_news_digest_became_ready_with_its_own_prompt() -> None:
+    """Round 6.5b turned this on. TRADE_PLAN stayed off, which is the point.
+
+    Activating one article type is exactly the moment another can be switched
+    on by accident, so the assertion covers both.
+    """
     from goldpipeline.schemas.article import ArticleType
     from goldpipeline.services.article_routing import SPECS
 
-    assert SPECS[ArticleType.NEWS_DIGEST].ready is False
-    assert SPECS[ArticleType.NEWS_DIGEST].prompt_id is None
+    assert SPECS[ArticleType.NEWS_DIGEST].ready is True
+    assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == "gold_news_digest_writer_v1"
     assert SPECS[ArticleType.TRADE_PLAN].ready is False
+    assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 
 
 def test_style_activation_did_not_reach_the_digest() -> None:
@@ -1011,26 +1026,51 @@ def test_no_prompt_changed() -> None:
         assert "Giá phản ứng" not in text, prompt
 
 
-def test_the_digest_layer_is_not_wired_into_any_stage() -> None:
-    """No production path reaches this round's code yet."""
+def test_only_digest_modules_reach_the_digest_layer() -> None:
+    """The digest is wired now, and only to itself.
+
+    Round 6.5a asserted nothing reached this code, because nothing could. Now
+    something does, and the property worth keeping is narrower and more useful:
+    the ANALYSIS stages must not import any of it. A writer that could reach a
+    digest renderer, or a finalizer that knew about price reactions, is how one
+    article type starts quietly shaping another.
+    """
     import ast
     from pathlib import Path
 
-    digest_modules = {"digest_context", "digest_render", "price_reaction"}
-    importers = []
-    for path in Path("src/goldpipeline").rglob("*.py"):
-        if path.stem in digest_modules or path.stem == "digest":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.ImportFrom)
-                and node.module
-                and any(name in node.module for name in digest_modules)
-            ):
-                importers.append(path.name)
+    digest_modules = {
+        "digest",
+        "digest_context",
+        "digest_pipeline",
+        "digest_render",
+        "digest_writer",
+        "news_digest",
+        "price_reaction",
+    }
+    analysis_stages = (
+        "services/writer.py",
+        "services/writer_prompt.py",
+        "services/reviewer.py",
+        "services/reviewer_prompt.py",
+        "services/finalizer.py",
+        "services/finalizer_prompt.py",
+        "services/final_postcheck.py",
+        "services/orchestrator.py",
+        "services/publish_gate.py",
+        "services/analysis_contract.py",
+    )
 
-    assert importers == [], f"digest code reached production: {importers}"
+    root = Path("src/goldpipeline")
+    for relative in analysis_stages:
+        tree = ast.parse((root / relative).read_text(encoding="utf-8"))
+        reached = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module
+            and node.module.rsplit(".", 1)[-1] in digest_modules
+        }
+        assert not reached, f"{relative} reaches the digest layer: {reached}"
 
 
 def test_the_preferred_digest_timeframe_is_recorded_not_imposed() -> None:

@@ -77,7 +77,10 @@ class TestAnalysisIsUnchanged:
         assert "writer" in clients.built
 
 
-@pytest.mark.parametrize("kind", [ArticleType.TRADE_PLAN, ArticleType.NEWS_DIGEST])
+# NEWS_DIGEST became producible in Round 6.5b, so it is no longer one of
+# these. TRADE_PLAN still is, and the fail-closed behaviour it proves is
+# what stops a rendered document being handed to a prose writer.
+@pytest.mark.parametrize("kind", [ArticleType.TRADE_PLAN])
 class TestUnimplementedTypesFailClosed:
     def test_the_run_fails_with_an_explicit_reason(
         self, runs_dir: Path, tmp_path: Path, kind: ArticleType
@@ -161,7 +164,7 @@ class TestUnimplementedTypesFailClosed:
 
 
 class TestRetryClassification:
-    @pytest.mark.parametrize("kind", [ArticleType.TRADE_PLAN, ArticleType.NEWS_DIGEST])
+    @pytest.mark.parametrize("kind", [ArticleType.TRADE_PLAN])
     def test_not_ready_is_permanent_not_transient(self, kind: ArticleType) -> None:
         """A deploy fixes this, not a backoff. Retrying it every minute is waste."""
         from goldpipeline.domain.errors import ArticleTypeNotReadyError

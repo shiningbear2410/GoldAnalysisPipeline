@@ -53,6 +53,53 @@ with four bars. Nothing about ANALYSIS's timeframe is evidence about this one.
 """
 
 
+PROVIDER_BAR_CEILING = 5000
+"""The hard limit a request may never exceed, whatever the arithmetic says."""
+
+BOUNDARY_HISTORY_BARS = 2
+"""Extra bars before the window, so a start reference always exists.
+
+One would do when the window begins exactly on a close. Two covers the ordinary
+case where it begins mid-bar, and costs nothing.
+"""
+
+GAP_MARGIN_BARS = 12
+"""Slack for the forming bar and for holes in the series.
+
+An hour of M5. Not a guess about how long a market is shut - a weekend is far
+longer than this, and a digest spanning one correctly reports
+``NO_MARKET_ACTIVITY`` rather than being rescued by a bigger request. This
+covers the two ordinary cases: the bar still running at the window end, and a
+handful of bars a provider did not return.
+"""
+
+
+def digest_bar_count(window: DigestWindow, timeframe: Timeframe) -> int:
+    """How many bars to ask a provider for, to describe *window*.
+
+    ``ceil(window / bar) + boundary history + margin``, capped at the provider
+    ceiling. Bounded on both ends and derived from the window rather than fixed:
+    asking for 5000 bars to describe one hour wastes a request that a provider
+    may rate-limit, and asking for a fixed 300 silently truncates a seven-day
+    window into a digest describing the wrong period.
+
+    For the extremes: a one-hour M5 window asks for 26, and a seven-day one for
+    2030 - comfortably inside the ceiling, which is therefore a guard rather
+    than a routine clamp.
+
+    Raises:
+        ValueError: The timeframe has no fixed duration, so "how many bars is
+            this window" has no answer.
+    """
+    duration = timeframe.duration
+    if duration is None:
+        raise ValueError(f"{timeframe} has no fixed duration; a bar count cannot be derived")
+
+    span = window.end - window.start
+    bars = -(-int(span.total_seconds()) // int(duration.total_seconds()))  # ceil
+    return min(bars + BOUNDARY_HISTORY_BARS + GAP_MARGIN_BARS, PROVIDER_BAR_CEILING)
+
+
 class InsufficientHistoryError(ValueError):
     """Raised only by callers that require a measurable window.
 
@@ -235,8 +282,12 @@ def _extremes(bars: Sequence[OHLCBar]) -> tuple[Decimal | None, Decimal | None]:
 
 
 __all__ = [
+    "BOUNDARY_HISTORY_BARS",
+    "GAP_MARGIN_BARS",
     "PREFERRED_DIGEST_TIMEFRAME",
+    "PROVIDER_BAR_CEILING",
     "InsufficientHistoryError",
     "calculate_price_reaction",
     "close_time",
+    "digest_bar_count",
 ]
