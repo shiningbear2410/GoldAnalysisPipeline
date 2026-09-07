@@ -32,6 +32,7 @@ from goldpipeline.schemas.finalizer import (
     FinalizerModelOutput,
     IssueResolution,
     ResolutionStatus,
+    StyleResolution,
     StyleResolutionStatus,
 )
 from goldpipeline.schemas.review import (
@@ -107,8 +108,23 @@ def validate_resolutions(
             article_chars=len(article),
         )
 
+    account_for_issues(output.issue_resolutions, review)
+
+
+def account_for_issues(resolutions: Sequence[IssueResolution], review: ReviewResult) -> None:
+    """Every issue answered, no issue invented, no severe issue declined.
+
+    Split out of :func:`validate_resolutions` in Round 6.5c.3 so the digest
+    finalizer can apply the identical rule. It returns structured editorial
+    rather than an article, so it has no ``article`` to be checked - but the
+    accounting is not about the article, and a second copy of it would be a
+    second answer to what "answered" means.
+
+    Raises:
+        FinalizeResponseError: On an incomplete or dishonest account.
+    """
     expected = {issue.issue_id: issue for issue in review.issues}
-    resolved = {item.issue_id: item for item in output.issue_resolutions}
+    resolved = {item.issue_id: item for item in resolutions}
 
     missing = sorted(expected.keys() - resolved.keys())
     if missing:
@@ -124,7 +140,7 @@ def validate_resolutions(
             unknown_issue_ids=unknown,
         )
 
-    _require_mandatory_fixes(expected, output.issue_resolutions)
+    _require_mandatory_fixes(expected, list(resolutions))
 
 
 def _require_mandatory_fixes(
@@ -174,11 +190,26 @@ def validate_style_resolutions(
         FinalizeResponseError: On an incomplete account, or an unresolved
             finding the revision was required to repair.
     """
+    account_for_style_findings(output.style_resolutions, findings, run_id=run_id)
+
+
+def account_for_style_findings(
+    resolutions: Sequence[StyleResolution],
+    findings: Sequence[HumanStyleFinding],
+    *,
+    run_id: str,
+) -> None:
+    """The style half of the same accounting, for either finalizer.
+
+    Raises:
+        FinalizeResponseError: On an incomplete account, or an unresolved
+            finding the revision was required to repair.
+    """
     if not findings:
         return
 
     expected = {finding.finding_id: finding for finding in findings}
-    answered = {item.finding_id: item for item in output.style_resolutions}
+    answered = {item.finding_id: item for item in resolutions}
 
     missing = sorted(expected.keys() - answered.keys())
     if missing:
@@ -203,7 +234,7 @@ def validate_style_resolutions(
             "severity": str(expected[item.finding_id].severity),
             "note": item.note,
         }
-        for item in output.style_resolutions
+        for item in resolutions
         if item.status is StyleResolutionStatus.UNRESOLVED
     ]
     if unresolved:
@@ -317,6 +348,8 @@ def require_clean_postcheck(outcome: PostcheckOutcome) -> None:
 
 
 __all__ = [
+    "account_for_issues",
+    "account_for_style_findings",
     "MAX_EVIDENCE_PROBE_CHARS",
     "FindingKey",
     "PostcheckOutcome",

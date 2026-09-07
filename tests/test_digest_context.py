@@ -1007,11 +1007,20 @@ def test_news_digest_became_ready_with_its_own_prompt() -> None:
     assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 
 
-def test_style_activation_did_not_reach_the_digest() -> None:
+def test_style_activation_reached_the_digest_in_6_5c_3() -> None:
+    """Shadow from Round 6.4f, active from 6.5c.3, and the gap was the point.
+
+    A style verdict that can trigger a rewrite is only as safe as the thing it
+    triggers. The digest was judged for two rounds while the only available
+    rewriter was one built for a different product; activation waited for a
+    repair path of its own.
+    """
     from goldpipeline.schemas.article import ArticleType
+    from goldpipeline.services.article_runtime import RevisionRuntime, runtime_for
     from goldpipeline.services.review_action import style_is_active
 
-    assert not style_is_active(ArticleType.NEWS_DIGEST)
+    assert style_is_active(ArticleType.NEWS_DIGEST)
+    assert runtime_for(ArticleType.NEWS_DIGEST).revise is RevisionRuntime.NEWS_DIGEST
 
 
 def test_no_prompt_changed() -> None:

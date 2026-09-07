@@ -44,7 +44,6 @@ from test_human_style_review import reviewer_returning
 from goldpipeline.adapters.base import LoadedSource
 from goldpipeline.adapters.fake_digest_writer import FakeDigestWriterClient
 from goldpipeline.adapters.fake_reviewer import FakeReviewerClient
-from goldpipeline.domain.errors import PipelineError
 from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import Timeframe
 from goldpipeline.schemas.digest import DigestWindow
@@ -55,6 +54,7 @@ from goldpipeline.schemas.review import ReviewStatus
 from goldpipeline.services.digest_context import NEWS_WINDOW_METADATA_KEY
 from goldpipeline.services.digest_snapshot import DIGEST_CONTEXT_FILENAME
 from goldpipeline.services.digest_stage import DIGEST_EDITORIAL_FILENAME
+from goldpipeline.services.finalizer import DIGEST_FINAL_EDITORIAL_FILENAME
 from goldpipeline.services.news_collector import curate
 from goldpipeline.services.producer_brief import news_item_id, render_brief
 from goldpipeline.services.writer import DRAFT_FILENAME, WRITER_FILENAME
@@ -205,6 +205,30 @@ def _severity(name: str) -> Any:
     from goldpipeline.schemas.review import Severity
 
     return Severity(name)
+
+
+def style_needing_revision() -> Any:
+    """A style assessment whose derived verdict is NEEDS_REVISION."""
+    from goldpipeline.schemas.review import (
+        HumanStyleAssessment,
+        HumanStyleCategory,
+        HumanStyleFinding,
+        StyleSeverity,
+    )
+
+    return HumanStyleAssessment(
+        style_score=48,
+        summary="Doc nhu ban tin may.",
+        findings=[
+            HumanStyleFinding(
+                finding_id="style-high",
+                category=HumanStyleCategory.DATA_DUMP,
+                severity=StyleSeverity.HIGH,
+                problem="Phan can can lap lai moi so lieu da co o tren.",
+                repair_instruction="Rut gon can can thanh mot nhan dinh, bo cac so lieu.",
+            )
+        ],
+    )
 
 
 def content_issue(severity: Any) -> Any:
@@ -502,32 +526,18 @@ def test_g_a_run_already_ready_to_publish_repeats_nothing(
     assert run.read_artifact_bytes(FINAL_FILENAME) == before
 
 
-def test_24_style_needs_revision_still_passes_a_digest_through(
+def test_style_needs_revision_now_buys_exactly_one_digest_repair(
     tmp_path: Path, digest_sources: tuple[Path, Path, datetime]
 ) -> None:
-    """§24: style is shadow, so a HIGH style finding changes nothing at all."""
-    from goldpipeline.schemas.review import (
-        HumanStyleAssessment,
-        HumanStyleCategory,
-        HumanStyleFinding,
-        StyleSeverity,
-    )
+    """Round 6.5c.3 inverted this. The same review, a different outcome.
 
-    assessment = HumanStyleAssessment(
-        style_score=48,
-        summary="Doc nhu ban tin may.",
-        findings=[
-            HumanStyleFinding(
-                finding_id="style-high",
-                category=HumanStyleCategory.NEWS_DESK_VOICE,
-                severity=StyleSeverity.HIGH,
-                problem="Moi cau deu mo dau bang cung mot cau truc.",
-                repair_instruction="Cat cau mo dau lap lai o muc thu hai.",
-            )
-        ],
-    )
+    Until this round a HIGH style finding on a digest bought nothing, because
+    the only rewriter available was built for a different product. Now it buys
+    one repair, through a finalizer that returns editorial content and cannot
+    reach the deterministic shell.
+    """
     clients = make_tracked_clients(
-        reviewer=reviewer_returning(style=assessment),
+        reviewer=reviewer_returning(style=style_needing_revision()),
         digest_market_factory=None,
     )
     outcome, tracked, _ = run_digest(tmp_path, digest_sources, clients=clients)
@@ -535,79 +545,148 @@ def test_24_style_needs_revision_still_passes_a_digest_through(
     assert outcome.error is None, outcome.error
     run = RunStore(tmp_path / "runs").open(outcome.run_id)
     assert run.load_manifest().status is RunStatus.READY_TO_PUBLISH
-    assert not tracked.finalizer.calls, "a digest style finding buys no finalizer call"
-    assert run.read_artifact_bytes(FINAL_FILENAME) == run.read_artifact_bytes(DRAFT_FILENAME)
+
+    assert len(tracked.digest_finalizer.calls) == 1, "exactly one repair"
+    assert not tracked.finalizer.calls, "and never the analysis finalizer"
+    assert run.has_artifact(DIGEST_FINAL_EDITORIAL_FILENAME)
 
 
-# --------------------------------------------------------------------------
-# §25-26: the two ways a digest stops
-# --------------------------------------------------------------------------
-
-
-def test_25_content_needs_revision_stops_without_a_finalizer(
+def test_a_repaired_digest_keeps_its_deterministic_shell(
     tmp_path: Path, digest_sources: tuple[Path, Path, datetime]
 ) -> None:
-    """A digest has no repair path yet, and says so rather than improvising."""
+    """Not preserved by checking - preserved because the repair cannot reach it."""
+    from goldpipeline.schemas.article_contract import contract_for
+    from goldpipeline.services.digest_snapshot import load_digest_snapshot
+
     clients = make_tracked_clients(
-        reviewer=reviewer_returning(
-            status=ReviewStatus.NEEDS_REVISION,
-            score=61,
-            issues=[content_issue(_severity("HIGH"))],
-            instructions=["Xoa cau khong co nguon."],
-        ),
-        digest_market_factory=None,
-    )
-    outcome, tracked, _ = run_digest(tmp_path, digest_sources, clients=clients)
-
-    run = RunStore(tmp_path / "runs").open(outcome.run_id)
-    manifest = run.load_manifest()
-
-    assert manifest.status is RunStatus.REVIEWED, "it stops where the review left it"
-    assert not run.has_artifact(FINAL_FILENAME)
-    assert "finalizer" not in tracked.built, "no finalizer client was constructed"
-    assert not tracked.finalizer.calls
-
-    assert isinstance(outcome.error, PipelineError)
-    assert "no revision path" in str(outcome.error)
-
-
-def test_25_the_operator_can_see_why_from_the_ledger(
-    tmp_path: Path, digest_sources: tuple[Path, Path, datetime]
-) -> None:
-    clients = make_tracked_clients(
-        reviewer=reviewer_returning(
-            status=ReviewStatus.NEEDS_REVISION,
-            score=61,
-            issues=[content_issue(_severity("HIGH"))],
-            instructions=["Xoa cau khong co nguon."],
-        ),
+        reviewer=reviewer_returning(style=style_needing_revision()),
         digest_market_factory=None,
     )
     outcome, _, _ = run_digest(tmp_path, digest_sources, clients=clients)
-    manifest = manifest_of(tmp_path, outcome.run_id)
 
-    assert manifest.error is not None
-    assert "revision path" in manifest.error.message
+    run = RunStore(tmp_path / "runs").open(outcome.run_id)
+    facts = load_digest_snapshot(run, run.load_manifest())
+    draft = run.read_artifact_bytes(DRAFT_FILENAME).decode("utf-8")
+    final = run.read_artifact_bytes(FINAL_FILENAME).decode("utf-8")
+
+    assert final != draft, "the repair did change something"
+    for line in facts.deterministic_lines:
+        assert line in final, line
+    disclaimer = contract_for(ArticleType.NEWS_DIGEST).disclaimer.text
+    assert final.count(disclaimer) == 1
 
 
-def test_26_a_rejected_digest_reaches_neither_finalizer_nor_gate(
+def test_item_timestamps_survive_a_repair_because_they_are_source_owned(
     tmp_path: Path, digest_sources: tuple[Path, Path, datetime]
 ) -> None:
+    """The repair has no timestamp field, and the renderer reads the item."""
+    import re
+
+    clients = make_tracked_clients(
+        reviewer=reviewer_returning(style=style_needing_revision()),
+        digest_market_factory=None,
+    )
+    outcome, _, _ = run_digest(tmp_path, digest_sources, clients=clients)
+
+    run = RunStore(tmp_path / "runs").open(outcome.run_id)
+    draft = run.read_artifact_bytes(DRAFT_FILENAME).decode("utf-8")
+    final = run.read_artifact_bytes(FINAL_FILENAME).decode("utf-8")
+
+    stamps = re.compile(r"\d{2}:\d{2} \u2014")
+    assert stamps.findall(final) == stamps.findall(draft)
+
+
+def test_the_writers_own_editorial_survives_the_repair_byte_for_byte(
+    tmp_path: Path, digest_sources: tuple[Path, Path, datetime]
+) -> None:
+    """What the writer wrote and what the repair changed stay two artifacts."""
+    from goldpipeline.services.integrity import verify_artifact
+
+    clients = make_tracked_clients(
+        reviewer=reviewer_returning(style=style_needing_revision()),
+        digest_market_factory=None,
+    )
+    outcome, _, _ = run_digest(tmp_path, digest_sources, clients=clients)
+
+    run = RunStore(tmp_path / "runs").open(outcome.run_id)
+    manifest = run.load_manifest()
+    recorded = {ref.name: ref.sha256 for ref in manifest.artifact_files}
+
+    verify_artifact(run, manifest, DIGEST_EDITORIAL_FILENAME)
+    assert DIGEST_EDITORIAL_FILENAME in recorded
+    assert DIGEST_FINAL_EDITORIAL_FILENAME in recorded
+    assert recorded[DIGEST_EDITORIAL_FILENAME] != recorded[DIGEST_FINAL_EDITORIAL_FILENAME]
+
+
+def test_content_needs_revision_now_repairs_in_one_call(
+    tmp_path: Path, digest_sources: tuple[Path, Path, datetime]
+) -> None:
+    """Round 6.5c.2 stopped here with REVISION_UNAVAILABLE. It no longer does."""
     clients = make_tracked_clients(
         reviewer=reviewer_returning(
-            status=ReviewStatus.REJECT,
-            score=20,
-            issues=[content_issue(_severity("CRITICAL"))],
+            status=ReviewStatus.NEEDS_REVISION,
+            score=61,
+            issues=[content_issue(_severity("HIGH"))],
+            instructions=["Xoa cau khong co nguon."],
         ),
         digest_market_factory=None,
     )
     outcome, tracked, _ = run_digest(tmp_path, digest_sources, clients=clients)
 
+    assert outcome.error is None, outcome.error
     run = RunStore(tmp_path / "runs").open(outcome.run_id)
-    assert run.load_manifest().status is RunStatus.REVIEWED
-    assert not run.has_artifact(FINAL_FILENAME)
-    assert not run.has_artifact("publish_decision.json")
-    assert "finalizer" not in tracked.built
+    assert run.load_manifest().status is RunStatus.READY_TO_PUBLISH
+    assert len(tracked.digest_finalizer.calls) == 1
+    assert not tracked.finalizer.calls
+
+
+def test_content_and_style_are_repaired_in_the_same_single_call(
+    tmp_path: Path, digest_sources: tuple[Path, Path, datetime]
+) -> None:
+    """One prompt, one output, one render - never two sequential repairs."""
+    from goldpipeline.schemas.finalizer import FinalizerResult
+
+    clients = make_tracked_clients(
+        reviewer=reviewer_returning(
+            status=ReviewStatus.NEEDS_REVISION,
+            score=58,
+            issues=[content_issue(_severity("HIGH"))],
+            style=style_needing_revision(),
+            instructions=["Xoa cau khong co nguon."],
+        ),
+        digest_market_factory=None,
+    )
+    outcome, tracked, _ = run_digest(tmp_path, digest_sources, clients=clients)
+
+    assert outcome.error is None, outcome.error
+    assert len(tracked.digest_finalizer.calls) == 1, "both axes, one call"
+
+    run = RunStore(tmp_path / "runs").open(outcome.run_id)
+    result = FinalizerResult.model_validate_json(
+        run.read_artifact_bytes("claude_finalizer.json").decode("utf-8")
+    )
+    assert result.issue_resolutions, "the content issue was answered"
+    assert result.style_resolutions, "and so was the style finding"
+    assert result.review_status is ReviewStatus.NEEDS_REVISION, "the judgement is untouched"
+
+
+def test_a_review_status_is_never_rewritten_by_a_repair(
+    tmp_path: Path, digest_sources: tuple[Path, Path, datetime]
+) -> None:
+    """A style repair on a content PASS leaves the recorded verdict a PASS."""
+    from goldpipeline.schemas.review import ReviewResult
+
+    clients = make_tracked_clients(
+        reviewer=reviewer_returning(style=style_needing_revision()),
+        digest_market_factory=None,
+    )
+    outcome, _, _ = run_digest(tmp_path, digest_sources, clients=clients)
+
+    run = RunStore(tmp_path / "runs").open(outcome.run_id)
+    review = ReviewResult.model_validate_json(
+        run.read_artifact_bytes("gpt_review.json").decode("utf-8")
+    )
+    assert review.status is ReviewStatus.PASS
 
 
 # --------------------------------------------------------------------------
@@ -649,10 +728,12 @@ def test_29_trade_plan_is_still_refused_by_production_dispatch() -> None:
         runtime_for(ArticleType.TRADE_PLAN)
 
 
-def test_37_news_digest_style_activation_is_still_off() -> None:
+def test_news_digest_style_activation_is_on_and_trade_plan_is_not() -> None:
     from goldpipeline.services.review_action import STYLE_ACTIVE_TYPES
 
-    assert ArticleType.NEWS_DIGEST not in STYLE_ACTIVE_TYPES
+    assert ArticleType.ANALYSIS in STYLE_ACTIVE_TYPES
+    assert ArticleType.NEWS_DIGEST in STYLE_ACTIVE_TYPES
+    assert ArticleType.TRADE_PLAN not in STYLE_ACTIVE_TYPES
 
 
 def test_the_venue_symbol_is_recorded_from_the_adapter_not_invented(

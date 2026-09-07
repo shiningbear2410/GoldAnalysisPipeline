@@ -795,17 +795,22 @@ def test_the_analysis_prompt_is_unchanged() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_style_finalization_is_not_active_for_the_digest() -> None:
-    """6.5c activates this, after real digest evidence. Not before."""
+def test_style_finalization_is_active_for_the_digest_from_6_5c_3() -> None:
+    """Activated once the digest had a repair path of its own, not before."""
     from goldpipeline.services.review_action import STYLE_ACTIVE_TYPES, style_is_active
 
-    assert not style_is_active(ArticleType.NEWS_DIGEST)
-    assert ArticleType.NEWS_DIGEST not in STYLE_ACTIVE_TYPES
-    assert frozenset({ArticleType.ANALYSIS}) == STYLE_ACTIVE_TYPES
+    assert style_is_active(ArticleType.NEWS_DIGEST)
+    assert ArticleType.NEWS_DIGEST in STYLE_ACTIVE_TYPES
+    assert ArticleType.TRADE_PLAN not in STYLE_ACTIVE_TYPES
 
 
-def test_a_style_needs_revision_on_a_digest_calls_no_finalizer() -> None:
-    """The shadow-mode invariant, pinned for the newly producible type."""
+def test_a_style_needs_revision_on_a_digest_now_asks_for_one_repair() -> None:
+    """The inverse of the Round 6.5b shadow invariant, and deliberately so.
+
+    Same review, same finding, same object - and the action changed because
+    `STYLE_ACTIVE_TYPES` changed. Nothing else had to: that set is the whole of
+    the switch, which is why it is worth a test of its own.
+    """
     from goldpipeline.schemas.review import (
         HumanStyleAssessment,
         HumanStyleCategory,
@@ -853,15 +858,18 @@ def test_a_style_needs_revision_on_a_digest_calls_no_finalizer() -> None:
 
     decision = effective_action(review, article_type=ArticleType.NEWS_DIGEST)
 
-    assert decision.action is ReviewAction.PASS_THROUGH
-    assert decision.style_findings == ()
+    assert decision.action is ReviewAction.FINALIZE
+    assert len(decision.style_findings) == 1, "one finding, one repair to ask for"
+    assert decision.content_status is ReviewStatus.PASS, "the judgement is unchanged"
 
 
-def test_the_style_reviewer_may_still_judge_a_digest() -> None:
-    """Shadow computation is allowed; only the repair path stays closed."""
+def test_a_trade_plan_still_cannot_be_repaired_for_style() -> None:
+    """Activation is per type, and only two types have it."""
+    from goldpipeline.services.review_action import STYLE_ACTIVE_TYPES
     from goldpipeline.services.style_review import applies_to
 
     assert applies_to(ArticleType.NEWS_DIGEST)
+    assert ArticleType.TRADE_PLAN not in STYLE_ACTIVE_TYPES
 
 
 # --------------------------------------------------------------------------

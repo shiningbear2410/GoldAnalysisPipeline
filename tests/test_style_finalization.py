@@ -287,17 +287,21 @@ def test_a_trade_plan_never_activates_human_style() -> None:
     assert decision.style_findings == ()
 
 
-def test_the_news_digest_is_judged_but_not_yet_repaired() -> None:
-    """Activation is per type, and the two activations are separate.
+def test_the_news_digest_is_now_both_judged_and_repairable() -> None:
+    """Activation is per type, and the two switches stayed separate.
 
-    Round 6.5b made the digest producible; style-driven repair of one is a
-    different switch, and it stays off until 6.5c has real digest evidence to
-    tune against.
+    Round 6.5b made the digest producible and Round 6.4f made it judgeable;
+    style-driven *repair* is a third switch, and it stayed off for two rounds
+    until the digest had a finalizer that could repair one without rewriting a
+    deterministic shell.
     """
+    from goldpipeline.services.article_runtime import RevisionRuntime, runtime_for
     from goldpipeline.services.style_review import applies_to
 
     assert applies_to(ArticleType.NEWS_DIGEST)
-    assert not style_is_active(ArticleType.NEWS_DIGEST)
+    assert style_is_active(ArticleType.NEWS_DIGEST)
+    assert runtime_for(ArticleType.NEWS_DIGEST).revise is RevisionRuntime.NEWS_DIGEST
+    assert not style_is_active(ArticleType.TRADE_PLAN)
 
 
 def test_activation_is_a_frozen_set_not_a_flag() -> None:

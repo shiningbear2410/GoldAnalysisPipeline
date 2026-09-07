@@ -45,6 +45,10 @@ from datetime import datetime
 from pathlib import Path
 
 from goldpipeline.adapters.base import AnalysisSource, MarketDataSource
+from goldpipeline.adapters.digest_finalizer_client import (
+    DigestFinalizerClient,
+    LazyDigestFinalizerClient,
+)
 from goldpipeline.adapters.digest_writer_client import DigestWriterClient
 from goldpipeline.adapters.finalizer_client import FinalizerClient, LazyFinalizerClient
 from goldpipeline.adapters.publisher_client import PublisherClient
@@ -178,6 +182,15 @@ class PipelineClients:
     different protocols: one produces an article, the other editorial content.
     A single factory would have to decide which, from information it does not
     have.
+    """
+
+    digest_finalizer: Callable[[GenerationSelection | None], DigestFinalizerClient] | None = None
+    """The digest's own repair client. Takes the Run's selection, like the others.
+
+    Separate from ``finalizer`` because the two return different protocols: one
+    produces a revised article, the other revised editorial content. Round
+    6.5c.3 made a digest repairable, and a single factory would have had to
+    guess which product it was building for.
     """
 
     digest_market: DigestMarketSource | None = None
@@ -579,11 +592,17 @@ def _run_finalize(
     # remembered: a scheduler restart between the two stages must not be able to
     # change which model edits an article another model drafted.
     selection = _generation_of(store, execution.run_id)
+    digest_client = clients.digest_finalizer
     result = finalize_run(
         run_id=execution.run_id,
         store=store,
         # Wrapped, not built: a PASS is a byte copy and must not require a key.
         client=LazyFinalizerClient(lambda: client(selection)) if client is not None else None,
+        digest_client=(
+            LazyDigestFinalizerClient(lambda: digest_client(selection))
+            if digest_client is not None
+            else None
+        ),
         now=now,
     )
 

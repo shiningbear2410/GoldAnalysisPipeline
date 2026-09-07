@@ -28,6 +28,7 @@ from goldpipeline.adapters.config_store import (
     RuntimeConfigStore,
     parse_key,
 )
+from goldpipeline.adapters.digest_finalizer_client import DigestFinalizerClient
 from goldpipeline.adapters.digest_writer_client import DigestWriterClient
 from goldpipeline.adapters.event_transport import EventTransport, HttpOutboxTransport
 from goldpipeline.adapters.fake_finalizer import FakeFinalizerClient
@@ -1395,6 +1396,39 @@ def _digest_writer_client(
     )
 
 
+def _digest_finalizer_client(
+    *, fake: bool, selection: GenerationSelection | None = None
+) -> DigestFinalizerClient:
+    """Pick the digest repair client for this invocation.
+
+    Parallel to :func:`_finalizer_client`, and subject to the same rules:
+    ``fake`` short-circuits before any credential is read, and a Run's frozen
+    selection is the single authority when one is present. A digest that was
+    written by one model is repaired by the same one - a Run whose draft and
+    revision came from different models is one nobody can reason about.
+    """
+    if fake:
+        from goldpipeline.adapters.fake_digest_finalizer import FakeDigestFinalizerClient
+
+        return FakeDigestFinalizerClient()
+
+    if selection is not None:
+        from goldpipeline.services.generation import build_digest_finalizer_client
+
+        return build_digest_finalizer_client(
+            selection.provider,
+            selection.selection_id,
+            env=_config_env(),
+            secrets=_secret_provider(),
+        )
+
+    from goldpipeline.adapters.digest_finalizer_client import AnthropicDigestFinalizerClient
+
+    return AnthropicDigestFinalizerClient(
+        FinalizerSettings.from_env(_config_env(), secrets=_secret_provider())
+    )
+
+
 def _pipeline_clients(args: argparse.Namespace) -> PipelineClients:
     """Wire up client factories. Nothing is built here.
 
@@ -1432,6 +1466,10 @@ def _pipeline_clients(args: argparse.Namespace) -> PipelineClients:
         ),
         # Built only when a digest Run has no snapshot yet. A resumed digest
         # never calls this, which is why it can be present unconditionally.
+        digest_finalizer=lambda selection: _digest_finalizer_client(
+            fake=fake_ai or getattr(args, "fake_finalizer", False),
+            selection=selection,
+        ),
         digest_market=lambda window: _digest_market_source(
             window, fake=getattr(args, "fake_market", False)
         ),

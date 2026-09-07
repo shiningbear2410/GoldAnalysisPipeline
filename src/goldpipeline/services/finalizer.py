@@ -47,6 +47,7 @@ from pathlib import Path
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
+from goldpipeline.adapters.digest_finalizer_client import DigestFinalizerClient
 from goldpipeline.adapters.finalizer_client import FinalizerClient, FinalizeRequest
 from goldpipeline.domain.errors import (
     ArtifactIntegrityError,
@@ -56,7 +57,7 @@ from goldpipeline.domain.errors import (
     FinalizePostcheckError,
     RunNotFinalizableError,
 )
-from goldpipeline.prompts import DEFAULT_FINALIZER_PROMPT
+from goldpipeline.prompts import DEFAULT_DIGEST_FINALIZER_PROMPT, DEFAULT_FINALIZER_PROMPT
 from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.context import AnalysisContext
@@ -71,6 +72,10 @@ from goldpipeline.schemas.finalizer import (
 from goldpipeline.schemas.manifest import RunError, RunManifest, RunStatus
 from goldpipeline.schemas.review import HumanStyleFinding, PrecheckFinding, ReviewResult
 from goldpipeline.schemas.writer import WriterResult
+from goldpipeline.services.article_runtime import RevisionRuntime, runtime_for
+from goldpipeline.services.digest_finalizer import digest_changed_sections, revise_digest
+from goldpipeline.services.digest_snapshot import load_digest_snapshot
+from goldpipeline.services.digest_stage import load_digest_editorial
 from goldpipeline.services.final_postcheck import (
     FinalPostcheckReport,
     check_final_article,
@@ -100,6 +105,12 @@ logger = logging.getLogger(__name__)
 
 FINAL_FILENAME = "claude_final.md"
 FINALIZER_FILENAME = "claude_finalizer.json"
+DIGEST_FINAL_EDITORIAL_FILENAME = "digest_final_editorial.json"
+"""The digest editorial a repair produced. Never the writer's own file.
+
+Separate so that "what the writer wrote" and "what the finalizer changed" are
+two readable artifacts rather than one overwritten one.
+"""
 
 FINALIZER_ARTIFACTS = (FINAL_FILENAME, FINALIZER_FILENAME)
 
@@ -157,7 +168,9 @@ def finalize_run(
     run_id: str,
     store: RunStore,
     client: FinalizerClient | None = None,
+    digest_client: DigestFinalizerClient | None = None,
     prompt_version: str = DEFAULT_FINALIZER_PROMPT,
+    digest_prompt_version: str = DEFAULT_DIGEST_FINALIZER_PROMPT,
     max_tokens: int = 8000,
     now: datetime | None = None,
 ) -> FinalizeRunResult:
@@ -169,7 +182,12 @@ def finalize_run(
         client: Any :class:`FinalizerClient`. Only needed when the verdict is
             ``NEEDS_REVISION``; a passthrough or a block never touches it, so
             ``None`` is legitimate for those.
+        digest_client: The digest's own repair client. Selected by article type,
+            never by a flag - a digest revision returns editorial content and an
+            analysis revision returns an article, and one client cannot produce
+            both.
         prompt_version: Versioned prompt template id.
+        digest_prompt_version: Versioned digest repair prompt id.
         max_tokens: Output ceiling for the provider call.
         now: Injection point for tests.
 
@@ -185,7 +203,9 @@ def finalize_run(
             run=run,
             manifest=manifest,
             client=client,
+            digest_client=digest_client,
             prompt_version=prompt_version,
+            digest_prompt_version=digest_prompt_version,
             max_tokens=max_tokens,
             now=now,
         )
@@ -201,7 +221,9 @@ def _execute(
     run: RunDirectory,
     manifest: RunManifest,
     client: FinalizerClient | None,
+    digest_client: DigestFinalizerClient | None,
     prompt_version: str,
+    digest_prompt_version: str,
     max_tokens: int,
     now: datetime | None,
 ) -> FinalizeRunResult:
@@ -255,6 +277,18 @@ def _execute(
     if decision.action is ReviewAction.PASS_THROUGH:
         return _finalize_passthrough(run=run, manifest=manifest, inputs=inputs, now=now)
 
+    if runtime_for(article_type).revise is RevisionRuntime.NEWS_DIGEST:
+        return _finalize_digest_revision(
+            run=run,
+            manifest=manifest,
+            inputs=inputs,
+            decision=decision,
+            client=digest_client,
+            prompt_version=digest_prompt_version,
+            max_tokens=max_tokens,
+            now=now,
+        )
+
     return _finalize_revision(
         run=run,
         manifest=manifest,
@@ -305,6 +339,92 @@ def _finalize_passthrough(
         now=now,
     )
     return _commit(run=run, manifest=manifest, final=final, result=result)
+
+
+def _finalize_digest_revision(
+    *,
+    run: RunDirectory,
+    manifest: RunManifest,
+    inputs: FinalizeInputs,
+    decision: ActionDecision,
+    client: DigestFinalizerClient | None,
+    prompt_version: str,
+    max_tokens: int,
+    now: datetime | None,
+) -> FinalizeRunResult:
+    """One repair call over editorial content, then a deterministic re-render.
+
+    **Exactly one call**, on the same terms as its analysis counterpart: a
+    single ``revise_digest`` below, no loop, no retry, and no second attempt
+    after a failed validation.
+
+    What this path does *not* do is as important as what it does. There is no
+    postcheck comparing the finished article against the draft for a lost date
+    or a moved price, because the article was rendered by
+    :func:`~goldpipeline.services.digest_writer.assemble_digest` from the Run's
+    own snapshot - the same function that produced the draft, reading the same
+    immutable facts. The shell is identical because nothing else could have
+    produced it, and a check would be asserting a property of the renderer
+    rather than of the repair.
+    """
+    if client is None:
+        raise RunNotFinalizableError(
+            f"run {run.run_id} needs revision, which requires a digest finalizer client",
+            run_id=run.run_id,
+        )
+
+    facts = load_digest_snapshot(run, manifest)
+    original = load_digest_editorial(run)
+
+    repair = revise_digest(
+        facts=facts,
+        editorial=original,
+        article=inputs.article,
+        review=inputs.review,
+        style_findings=decision.style_findings,
+        run_id=run.run_id,
+        client=client,
+        prompt_version=prompt_version,
+        max_tokens=max_tokens,
+    )
+
+    changed = digest_changed_sections(original, repair.editorial)
+    logger.info(
+        "run=%s stage=digest_finalize.postcheck status=OK chars=%d->%d changed=%s",
+        run.run_id,
+        len(inputs.article),
+        len(repair.article),
+        changed,
+    )
+
+    final = PreparedArtifact.from_text(FINAL_FILENAME, repair.article)
+    result = _build_result(
+        inputs=inputs,
+        run_id=run.run_id,
+        mode=FinalizationMode.REVISED,
+        provider_called=True,
+        final=final,
+        article=repair.article,
+        resolutions=list(repair.output.issue_resolutions),
+        style_resolutions=list(repair.output.style_resolutions),
+        warnings=list(repair.output.warnings),
+        postcheck_findings=[],
+        model=repair.model,
+        provider=repair.provider,
+        selection_id=repair.selection_id,
+        prompt_version=repair.prompt_version,
+        usage=repair.usage,
+        chars_before=len(inputs.article),
+        chars_after=len(repair.article),
+        changed_sections=changed,
+        now=now,
+    )
+
+    # The writer's own editorial stays byte-intact. A reader comparing the two
+    # artifacts can see exactly what the repair moved, which is the whole reason
+    # the revision is not written over the original.
+    revised_artifact = PreparedArtifact.from_json(DIGEST_FINAL_EDITORIAL_FILENAME, repair.editorial)
+    return _commit(run=run, manifest=manifest, final=final, result=result, extra=[revised_artifact])
 
 
 def _finalize_revision(
@@ -528,10 +648,16 @@ def _commit(
     manifest: RunManifest,
     final: PreparedArtifact,
     result: FinalizerResult,
+    extra: list[PreparedArtifact] | None = None,
 ) -> FinalizeRunResult:
-    """Write both artifacts as one unit, then move the Run to FINALIZED."""
+    """Write every artifact as one unit, then move the Run to FINALIZED.
+
+    ``extra`` carries the digest's revised editorial. It joins the same
+    all-or-nothing commit rather than being written beside it, so a Run can
+    never end up with a final article whose editorial source is missing.
+    """
     metadata = PreparedArtifact.from_json(FINALIZER_FILENAME, result)
-    run.commit_artifacts([final, metadata], manifest)
+    run.commit_artifacts([final, metadata, *(extra or [])], manifest)
 
     manifest.status = RunStatus.FINALIZED
     manifest.record_event(

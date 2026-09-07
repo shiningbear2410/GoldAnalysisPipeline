@@ -39,16 +39,22 @@ from goldpipeline.schemas.review import (
 from goldpipeline.services.article_runtime import revision_available
 from goldpipeline.services.style_review import applies_to, findings_requiring_repair
 
-STYLE_ACTIVE_TYPES = frozenset({ArticleType.ANALYSIS})
+STYLE_ACTIVE_TYPES = frozenset({ArticleType.ANALYSIS, ArticleType.NEWS_DIGEST})
 """Article types whose style verdict may require a revision.
 
-Narrower than :data:`~goldpipeline.schemas.article_contract.HUMAN_STYLE_TYPES`,
-and the gap is intentional. ``NEWS_DIGEST`` has a voice worth *judging* the day
-it becomes producible, but activating a repair path for an article type that
-cannot yet be written would be a rule nobody could test against a real Run.
-``TRADE_PLAN`` is in neither: a rendered document has no prose to repair.
+``NEWS_DIGEST`` joined in Round 6.5c.3, once it had a repair path of its own to
+be activated *into*. It was judged in shadow from Round 6.4f and inert until
+now, deliberately: a style verdict that can trigger a rewrite is only as safe as
+the thing it triggers, and until the digest finalizer existed the only available
+rewriter was one built for a different product.
 
-Adding a type here is the whole of activating style revision for it.
+``TRADE_PLAN`` remains in neither, and for a different reason than a missing
+runtime: a rendered document has no prose to repair.
+
+Adding a type here is the whole of activating style revision for it - which is
+why it is a frozen set in source rather than an environment flag. A set cannot
+be flipped by a stale variable on one machine, and adding to it is a visible
+line in a diff.
 """
 
 

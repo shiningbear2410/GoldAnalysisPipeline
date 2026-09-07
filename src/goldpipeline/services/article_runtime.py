@@ -20,12 +20,12 @@ while nothing dispatched it, and the orchestrator had to fail closed to stop a
 digest prompt reaching the analysis writer. Keeping both facts in the same table
 is what stops that gap reopening.
 
-``revision_available`` is the third fact and the one this round deliberately
-leaves ``False`` for a digest. A content ``NEEDS_REVISION`` on a digest has
-nowhere to go - ``gold_finalizer_v2`` repairs an analysis, and pointing it at a
-digest would rewrite a deterministic shell that no model is allowed to touch. So
-the Run stops, visibly, until Round 6.5c.3 gives the digest a repair path of its
-own.
+The third fact is *which* repair path a type has, not whether it has one.
+Round 6.5c.2 left ``NEWS_DIGEST`` with none, because ``gold_finalizer_v2``
+repairs an analysis and pointing it at a digest would rewrite a deterministic
+shell no model may touch. Round 6.5c.3 gave the digest its own, so the answer is
+now a runtime rather than a boolean: ``revision_available=True`` must never come
+to mean "send it to the analysis finalizer".
 """
 
 from __future__ import annotations
@@ -48,6 +48,26 @@ class WriteRuntime(StrEnum):
     """`services.digest_stage`: snapshot, editorial call, deterministic render."""
 
 
+class RevisionRuntime(StrEnum):
+    """Which repair implementation a Run uses when a review asks for one."""
+
+    NONE = "NONE"
+    """No repair path. A non-PASS verdict stops the Run for a person."""
+
+    ANALYSIS = "ANALYSIS"
+    """`gold_finalizer_v2`: the model returns a revised article, then it is checked."""
+
+    NEWS_DIGEST = "NEWS_DIGEST"
+    """`services.digest_finalizer`: the model returns revised *editorial content*,
+    and the article is rendered around it from the snapshot.
+
+    A separate runtime rather than a second prompt, because the difference is
+    what the model is allowed to hand back. Pointing `gold_finalizer_v2` at a
+    digest would let a repair rewrite a deterministic shell that no model may
+    touch; here there is no field it could put a title in.
+    """
+
+
 @dataclass(frozen=True)
 class ArticleRuntime:
     """What the pipeline can do with one article type, end to end."""
@@ -61,29 +81,34 @@ class ArticleRuntime:
     state ``NEWS_DIGEST`` was in between Rounds 6.5b and 6.5c.2.
     """
 
-    revision_available: bool
-    """Whether a content ``NEEDS_REVISION`` has a repair path.
+    revise: RevisionRuntime
+    """Which repair implementation handles a review that asks for changes.
 
-    ``False`` means the Run stops rather than being handed to a finalizer built
+    ``NONE`` means the Run stops rather than being handed to a finalizer built
     for a different product.
     """
+
+    @property
+    def revision_available(self) -> bool:
+        """Whether a non-PASS verdict has anywhere to go."""
+        return self.revise is not RevisionRuntime.NONE
 
 
 RUNTIMES: Mapping[ArticleType, ArticleRuntime] = {
     ArticleType.ANALYSIS: ArticleRuntime(
         write=WriteRuntime.ANALYSIS,
         dispatchable=True,
-        revision_available=True,
+        revise=RevisionRuntime.ANALYSIS,
     ),
     ArticleType.NEWS_DIGEST: ArticleRuntime(
         write=WriteRuntime.NEWS_DIGEST,
         dispatchable=True,
-        revision_available=False,
+        revise=RevisionRuntime.NEWS_DIGEST,
     ),
     ArticleType.TRADE_PLAN: ArticleRuntime(
         write=WriteRuntime.ANALYSIS,
         dispatchable=False,
-        revision_available=False,
+        revise=RevisionRuntime.NONE,
     ),
 }
 """Every article type, and what the pipeline can do with it.
@@ -128,6 +153,7 @@ def revision_available(article_type: ArticleType) -> bool:
 __all__ = [
     "RUNTIMES",
     "ArticleRuntime",
+    "RevisionRuntime",
     "WriteRuntime",
     "is_dispatchable",
     "revision_available",

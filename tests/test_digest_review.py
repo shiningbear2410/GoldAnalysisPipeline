@@ -295,18 +295,16 @@ def test_the_reviewer_system_prompt_is_the_shipped_one_unchanged() -> None:
     assert "unless the user turn says otherwise" in rendered.system
 
 
-def test_style_is_judged_for_a_digest_but_cannot_trigger_a_repair() -> None:
-    """Shadow mode, exactly as Round 6.4f built it and 6.4g left it.
+def test_style_is_both_judged_and_repairable_for_a_digest() -> None:
+    """Two switches, set together at last, and still separate switches.
 
-    Two switches, and they are set differently on purpose.
-    `style_review.applies_to` says a digest has a voice worth judging, so the
-    reviewer is asked for one and its answer is recorded. `STYLE_ACTIVE_TYPES`
-    says only ANALYSIS may have that answer turned into a rewrite.
+    `style_review.applies_to` says a digest has a voice worth judging - true
+    since Round 6.4f. `STYLE_ACTIVE_TYPES` says its answer may be turned into a
+    rewrite - true since Round 6.5c.3, once the digest had a finalizer that
+    repairs editorial content instead of rewriting an article.
 
-    This round does not change either. The brief forbids activating digest
-    style repair, and what makes that true is the second switch - not silence
-    from the reviewer. Asking for the judgement and ignoring it is how the
-    activation round gets evidence to decide on.
+    The reviewer prompt is unchanged by the activation: it was always asked for
+    a style judgement, and what changed is what the pipeline does with one.
     """
     from goldpipeline.services.review_action import STYLE_ACTIVE_TYPES, style_is_active
     from goldpipeline.services.style_review import applies_to
@@ -317,9 +315,10 @@ def test_style_is_judged_for_a_digest_but_cannot_trigger_a_repair() -> None:
     assert STYLE_SCOPE_HEADING in rendered.user
     assert "Human style **is** in scope" in rendered.user
 
-    assert ArticleType.NEWS_DIGEST not in STYLE_ACTIVE_TYPES
-    assert style_is_active(ArticleType.NEWS_DIGEST) is False
+    assert ArticleType.NEWS_DIGEST in STYLE_ACTIVE_TYPES
+    assert style_is_active(ArticleType.NEWS_DIGEST) is True
     assert style_is_active(ArticleType.ANALYSIS) is True
+    assert style_is_active(ArticleType.TRADE_PLAN) is False
 
 
 def test_the_snapshot_and_its_hashes_are_never_shown_to_the_model() -> None:
@@ -431,15 +430,18 @@ def review_result(article_type: ArticleType, style: Any) -> Any:
     )
 
 
-def test_a_style_needs_revision_cannot_finalize_a_digest() -> None:
-    """The §5 boundary, asserted on `effective_action` rather than inferred.
+def test_a_style_needs_revision_asks_for_exactly_one_digest_repair() -> None:
+    """The same finding on both types now buys a repair, through different runtimes.
 
-    Identical inputs, one field different. A HIGH style finding on an ANALYSIS
-    Run buys a finalizer call; the same finding on a NEWS_DIGEST buys nothing,
-    because `STYLE_ACTIVE_TYPES` is the only switch that turns a style verdict
-    into a rewrite and NEWS_DIGEST is not in it.
+    That the actions match is not the point; that the *runtimes* differ is. An
+    analysis repair returns a revised article and is then checked for what it
+    kept; a digest repair returns editorial content and the article is rendered
+    around it. Routing a digest to the analysis finalizer would let a model
+    rewrite a deterministic shell, so the two must never converge on one
+    implementation just because they agree on one verdict.
     """
     from goldpipeline.schemas.review import StyleVerdict
+    from goldpipeline.services.article_runtime import RevisionRuntime, runtime_for
     from goldpipeline.services.review_action import ReviewAction, effective_action
 
     style = style_review_needing_revision()
@@ -454,12 +456,12 @@ def test_a_style_needs_revision_cannot_finalize_a_digest() -> None:
         article_type=ArticleType.ANALYSIS,
     )
 
-    assert digest.action is ReviewAction.PASS_THROUGH
-    assert digest.style_findings == ()
-    assert digest.style_verdict is StyleVerdict.NEEDS_REVISION, "judged, and recorded"
+    assert digest.action is ReviewAction.FINALIZE
+    assert len(digest.style_findings) == 1
+    assert digest.content_status is analysis.content_status, "the judgement is untouched"
 
-    assert analysis.action is ReviewAction.FINALIZE
-    assert analysis.style_findings, "the same finding does buy a repair on ANALYSIS"
+    assert runtime_for(ArticleType.NEWS_DIGEST).revise is RevisionRuntime.NEWS_DIGEST
+    assert runtime_for(ArticleType.ANALYSIS).revise is RevisionRuntime.ANALYSIS
 
 
 def test_the_reviewer_is_told_the_entailment_gap_is_its_own() -> None:

@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 
+from goldpipeline.adapters.digest_finalizer_client import DigestFinalizerClient
 from goldpipeline.adapters.digest_writer_client import DigestWriterClient
 from goldpipeline.adapters.finalizer_client import FinalizerClient
 from goldpipeline.adapters.secrets import SecretProvider
@@ -155,6 +156,42 @@ def build_finalizer_client(
         return build_deepseek_finalizer(selection_id, env=env, secrets=secrets, transport=transport)
 
     return _claude_finalizer(model, env=env, secrets=secrets)
+
+
+def build_digest_finalizer_client(
+    provider: Provider,
+    selection_id: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    secrets: SecretProvider | None = None,
+) -> DigestFinalizerClient:
+    """The digest repair client for one catalog selection.
+
+    Claude only, on the same terms and for the same reason as
+    :func:`build_digest_writer_client`: the repair is produced through
+    structured output, and adding a vendor here means proving that vendor can
+    honour the schema rather than routing a string to it.
+
+    Raises:
+        ValueError: The catalog does not offer that pairing, or the provider has
+            no digest finalizer.
+        FinalizeConfigurationError: No usable credential.
+    """
+    model = resolve_model(provider, selection_id)
+    logger.info("generation.digest_finalizer provider=%s selection=%s", provider, selection_id)
+
+    if provider is not Provider.CLAUDE:
+        raise ValueError(
+            f"{provider} has no news digest finalizer; the repair schema is produced "
+            "through Claude structured output and no other adapter implements it"
+        )
+
+    from goldpipeline.adapters.digest_finalizer_client import AnthropicDigestFinalizerClient
+    from goldpipeline.config import FinalizerSettings
+
+    return AnthropicDigestFinalizerClient(
+        FinalizerSettings.from_env(env, model_override=model.api_model_id, secrets=secrets)
+    )
 
 
 def _claude_writer(

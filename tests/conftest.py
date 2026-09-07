@@ -835,6 +835,7 @@ class TrackedClients:
     finalizer: Any
     publisher: Any
     digest_writer: Any = None
+    digest_finalizer: Any = None
     digest_market_factory: Any = None
     """Builds the offline M5 source for a window. ``None`` means "must not be asked"."""
 
@@ -866,6 +867,9 @@ class TrackedClients:
             digest_writer=lambda selection: self._hand_out(
                 "digest_writer", self.digest_writer, selection
             ),
+            digest_finalizer=lambda selection: self._hand_out(
+                "digest_finalizer", self.digest_finalizer, selection
+            ),
             digest_market=lambda window: self._hand_out(
                 "digest_market", self.digest_market(window)
             ),
@@ -893,6 +897,7 @@ def make_tracked_clients(
     finalizer: Any = None,
     publisher: Any = None,
     digest_writer: Any = None,
+    digest_finalizer: Any = None,
     digest_market_factory: Any = None,
     target_chat: str = "@fake_offline_channel",
 ) -> TrackedClients:
@@ -902,6 +907,7 @@ def make_tracked_clients(
     be faked harmlessly; a market source that quietly worked would let a test
     pass while production refetched candles a snapshot already held.
     """
+    from goldpipeline.adapters.fake_digest_finalizer import FakeDigestFinalizerClient
     from goldpipeline.adapters.fake_digest_writer import FakeDigestWriterClient
     from goldpipeline.adapters.fake_finalizer import FakeFinalizerClient
     from goldpipeline.adapters.fake_publisher import FakePublisherClient
@@ -914,6 +920,9 @@ def make_tracked_clients(
         finalizer=finalizer if finalizer is not None else FakeFinalizerClient(),
         publisher=publisher if publisher is not None else FakePublisherClient(),
         digest_writer=digest_writer if digest_writer is not None else FakeDigestWriterClient(),
+        digest_finalizer=(
+            digest_finalizer if digest_finalizer is not None else FakeDigestFinalizerClient()
+        ),
         digest_market_factory=digest_market_factory,
         target_chat=target_chat,
     )

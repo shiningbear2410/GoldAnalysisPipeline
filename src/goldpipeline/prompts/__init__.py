@@ -161,10 +161,28 @@ A new file rather than an edit to v1, because finalizations record the prompt
 they were made under.
 """
 
+GOLD_NEWS_DIGEST_FINALIZER_V1 = "gold_news_digest_finalizer_v1"
+"""The NEWS_DIGEST finalizer prompt. Repairs editorial content, not an article.
+
+A separate prompt rather than a mode of `gold_finalizer_v2`, because it asks for
+a different *shape of answer* and that difference is the safety property. The
+analysis finalizer returns a revised article and is then checked for having kept
+the date, the disclaimer and the prices intact; a digest revision returns items,
+a balance and claims, and the article is rendered around them from the Run's
+immutable snapshot. The questions the analysis finalizer has to ask are
+questions this one's response cannot raise.
+
+Includes `gold_human_style_v1` for the fifth time in the pipeline. The writer
+writes to it, the reviewer judges against it, the analysis finalizer repairs
+toward it, and this one does the same for a digest. One contract, four readers,
+no copies.
+"""
+
 DEFAULT_WRITER_PROMPT = GOLD_WRITER_V4
 DEFAULT_DIGEST_WRITER_PROMPT = GOLD_NEWS_DIGEST_WRITER_V2
 DEFAULT_REVIEWER_PROMPT = GOLD_REVIEWER_V2
 DEFAULT_FINALIZER_PROMPT = GOLD_FINALIZER_V2
+DEFAULT_DIGEST_FINALIZER_PROMPT = GOLD_NEWS_DIGEST_FINALIZER_V1
 
 INCLUDE_PATTERN = re.compile(r"^<!-- include: ([a-z0-9_]+) -->$", re.MULTILINE)
 """How a prompt pulls in a shared, separately versioned block.
@@ -245,6 +263,7 @@ def _resolve_includes(text: str, prompt_id: str) -> str:
 
 
 __all__ = [
+    "DEFAULT_DIGEST_FINALIZER_PROMPT",
     "DEFAULT_DIGEST_WRITER_PROMPT",
     "DEFAULT_FINALIZER_PROMPT",
     "DEFAULT_REVIEWER_PROMPT",
@@ -252,6 +271,7 @@ __all__ = [
     "GOLD_FINALIZER_V1",
     "GOLD_FINALIZER_V2",
     "GOLD_HUMAN_STYLE_V1",
+    "GOLD_NEWS_DIGEST_FINALIZER_V1",
     "GOLD_NEWS_DIGEST_WRITER_V1",
     "GOLD_NEWS_DIGEST_WRITER_V2",
     "GOLD_REVIEWER_V1",

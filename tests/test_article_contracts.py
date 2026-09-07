@@ -318,7 +318,20 @@ class TestRoutingConsistency:
         # `DigestPrecheckReport`, exactly as `build_reviewer_prompt` is handed
         # a `PrecheckReport`, so that the answer shown to a model and the
         # answer that rejects a response are the same answer.
-        enforcers = {"analysis_contract", "digest_writer", "final_postcheck"}
+        #
+        # Round 6.5c.3 added the fourth, and the pairing is exact:
+        # `final_postcheck` judges the article the analysis finalizer produced,
+        # and `digest_finalizer` judges the digest a repair rendered. Both are
+        # terminal, both run after the one permitted model call, and neither
+        # sends anything back for a second attempt. Four named enforcers is
+        # still an architecture; the guard exists to stop a fifth appearing
+        # without anyone deciding.
+        enforcers = {
+            "analysis_contract",
+            "digest_finalizer",
+            "digest_writer",
+            "final_postcheck",
+        }
 
         # What is forbidden is *running a check*, not touching the module that
         # holds one. `detect_sections` and `detect_structures` are parsers: they
