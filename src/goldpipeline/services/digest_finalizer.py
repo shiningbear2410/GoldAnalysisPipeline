@@ -55,6 +55,11 @@ from goldpipeline.services.finalizer_policy import (
     account_for_issues,
     account_for_style_findings,
 )
+from goldpipeline.services.text_integrity import (
+    TextIntegrityFinding,
+    check_edits,
+    check_new_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +308,14 @@ def revise_digest(
     # now. A failure here is terminal - see the module docstring.
     validate_editorial(revised, facts, run_id=run_id)
 
+    # Provenance first, then text integrity, then render. Provenance asks
+    # whether the repair is *true*; this asks whether it is still Vietnamese.
+    # The two are deliberately orthogonal - a correctly sourced sentence with
+    # its accents removed passes every provenance rule there is - and the check
+    # runs before the article exists so the gate is never the first thing to
+    # notice.
+    _require_intact_text(editorial, revised, run_id=run_id)
+
     repaired_article = assemble_digest(revised, facts)
     _require_clean_contract(repaired_article, run_id=run_id)
 
@@ -325,6 +338,55 @@ def revise_digest(
         selection_id=response.selection_id,
         prompt_version=prompt.prompt_version,
         usage=response.usage,
+    )
+
+
+def _require_intact_text(before: DigestEditorial, after: DigestEditorial, *, run_id: str) -> None:
+    """Refuse a repair that transliterated the Vietnamese instead of editing it.
+
+    Every prose field the model owns is compared against the version it was
+    given. Items are matched by ``news_item_id`` rather than by position, so a
+    reordered or trimmed selection is compared like with like; an item the
+    repair introduced has no "before" and is checked only for corruption.
+
+    Terminal, like every other failure on this path. A response whose text is no
+    longer Vietnamese is not one to ask again more firmly - the Run stops for a
+    person.
+
+    Raises:
+        FinalizeResponseError: One or more fields failed.
+    """
+    previous = {item.news_item_id: item for item in before.items}
+    pairs: list[tuple[str, str, str]] = [("balance", before.balance, after.balance)]
+    findings: list[TextIntegrityFinding] = []
+
+    for item in after.items:
+        original = previous.get(item.news_item_id)
+        label = f"items.{item.news_item_id}"
+        if original is None:
+            # Newly selected: nothing to compare it against, so only the
+            # decoder is questioned. Whether it *should* have been accented is
+            # not a question deterministic code can answer honestly.
+            for field, text in (("headline", item.headline), ("note", item.note)):
+                if text and (found := check_new_text(f"{label}.{field}", text)):
+                    findings.append(found)
+            continue
+
+        pairs.append((f"{label}.headline", original.headline, item.headline))
+        if original.note and item.note:
+            pairs.append((f"{label}.note", original.note, item.note))
+        elif item.note and (found := check_new_text(f"{label}.note", item.note)):
+            findings.append(found)
+
+    findings.extend(check_edits(pairs))
+    if not findings:
+        return
+
+    raise FinalizeResponseError(
+        "the repair returned text that is no longer written as Vietnamese; the Run "
+        "stops here rather than spending a second model call",
+        run_id=run_id,
+        text_integrity=[finding.describe() for finding in findings],
     )
 
 

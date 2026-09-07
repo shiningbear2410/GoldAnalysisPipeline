@@ -655,3 +655,113 @@ def test_a_request_carries_the_run_it_is_about() -> None:
 
     assert isinstance(client.calls[0], DigestFinalizeRequest)
     assert client.calls[0].run_id == RUN_ID
+
+
+# --------------------------------------------------------------------------
+# Round 6.5c.3a: the repair must still be written as Vietnamese
+# --------------------------------------------------------------------------
+
+
+def test_a_repair_that_strips_the_diacritics_is_refused_once() -> None:
+    """The Round 6.5c.3a fixture, arriving through the repair path.
+
+    Provenance passes this text - the balance quantifies nothing and cites
+    nothing - which is exactly why text integrity is a separate check rather
+    than something the provenance rules could have noticed.
+    """
+    accented = (
+        "Cả ba tin trong cửa sổ đều nghiêng về phía hỗ trợ vàng. "
+        "Giá thì không đi theo. "
+        "Nên tin thuận chiều mà phe mua vẫn chưa tận dụng được — "
+        "đó mới là phần đáng lưu ý."
+    )
+    stripped = (
+        "Ca ba tin trong cua so deu nghieng ve phia ho tro vang. "
+        "Gia thi khong di theo. "
+        "Nen tin thuan chieu ma phe mua van chua tan dung duoc — "
+        "do moi la phan dang luu y."
+    )
+    current = editorial(balance=accented)
+    client = FakeDigestFinalizerClient(output=output(balance=stripped))
+
+    with pytest.raises(FinalizeResponseError) as excinfo:
+        repair_with(client, current=current)
+
+    assert "no longer written as Vietnamese" in str(excinfo.value)
+    assert len(client.calls) == 1, "no second attempt"
+
+
+def test_a_repair_that_keeps_the_diacritics_is_accepted() -> None:
+    accented = "Cả ba tin trong cửa sổ đều nghiêng về phía hỗ trợ vàng. Giá thì không đi theo."
+    current = editorial(balance=accented)
+    client = FakeDigestFinalizerClient(
+        output=output(balance="Tin nghiêng tích cực, nhưng giá chưa xác nhận điều đó.")
+    )
+
+    repair = repair_with(client, current=current)
+
+    assert "nghiêng" in repair.article
+    assert len(client.calls) == 1
+
+
+def test_an_item_headline_stripped_of_its_accents_is_refused_once() -> None:
+    """Items are checked too, matched by id rather than by position."""
+    accented_items = tuple(
+        DigestItem(
+            news_item_id=item.news_item_id,
+            headline=item.headline,
+            note="Đây là một diễn biến đáng chú ý trong phiên giao dịch hôm nay.",
+            impact=item.impact,
+        )
+        for item in ORIGINAL.items
+    )
+    current = ORIGINAL.model_copy(update={"items": accented_items})
+
+    stripped_items = tuple(
+        DigestItem(
+            news_item_id=item.news_item_id,
+            headline=item.headline,
+            note="Day la mot dien bien dang chu y trong phien giao dich hom nay.",
+            impact=item.impact,
+        )
+        for item in accented_items
+    )
+    client = FakeDigestFinalizerClient(output=output(items=stripped_items))
+
+    with pytest.raises(FinalizeResponseError) as excinfo:
+        repair_with(client, current=current)
+
+    assert "no longer written as Vietnamese" in str(excinfo.value)
+    assert len(client.calls) == 1
+
+
+def test_deleting_a_note_entirely_is_a_legitimate_repair() -> None:
+    """The live 6.5c.3 repair did exactly this. Deletion is not stripping."""
+    accented_items = tuple(
+        DigestItem(
+            news_item_id=item.news_item_id,
+            headline=item.headline,
+            note="Đây là một diễn biến đáng chú ý trong phiên giao dịch hôm nay.",
+            impact=item.impact,
+        )
+        for item in ORIGINAL.items
+    )
+    current = ORIGINAL.model_copy(update={"items": accented_items})
+    client = FakeDigestFinalizerClient(output=output(items=ORIGINAL.items))
+
+    repair = repair_with(client, current=current)
+
+    assert all(item.note is None for item in repair.editorial.items)
+    assert len(client.calls) == 1
+
+
+def test_text_integrity_runs_after_provenance_not_instead_of_it() -> None:
+    """A rounded figure is still a provenance failure, whatever its accents."""
+    current = editorial(balance="Cả ba tin đều nghiêng về phía hỗ trợ vàng hôm nay.")
+    client = FakeDigestFinalizerClient(output=output(balance="SPDR mua ròng gần 10 tấn."))
+
+    with pytest.raises(WriterResponseError) as excinfo:
+        repair_with(client, current=current)
+
+    assert "no collected item or computed figure supports" in str(excinfo.value)
+    assert len(client.calls) == 1
