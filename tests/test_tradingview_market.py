@@ -882,22 +882,48 @@ class TestProtocolBoundary:
                     )
 
     def test_no_ict_or_clipboard_behaviour_was_ported(self) -> None:
+        """The old exporter's ICT helpers stayed out of the adapter layer.
+
+        Round 6.2 banned this vocabulary across the whole package, which was
+        the right shape while the project had no ICT code: the danger was the
+        reference script's crude helpers - "nearest green candle is an order
+        block" - arriving as a free extra alongside its genuinely useful
+        fetch and normalize ideas.
+
+        Round 6.6a writes fair value gaps and swings for real, from explicit
+        definitions, in modules that import no provider whatsoever (see
+        `test_ict_fixture.test_the_ict_modules_import_no_provider`). So the ban
+        narrows to the layer this port actually touched. What stays banned
+        everywhere is the prototype's own fingerprints: its clipboard
+        dependency and its session helper, neither of which has a legitimate
+        home anywhere in this package.
+        """
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[1] / "src" / "goldpipeline"
-        banned = (
-            "pyperclip",
+
+        everywhere = ("pyperclip", "get_session")
+        for path in root.rglob("*.py"):
+            text = path.read_text(encoding="utf-8").lower()
+            for word in everywhere:
+                assert word not in text, f"{path.name} contains {word!r}"
+
+        # The adapter layer fetches and normalizes candles. It interprets none
+        # of them, and an ICT term appearing here would mean the two concerns
+        # had merged again.
+        interpretation = (
             "order_block",
             "market_structure",
             "fair_value_gap",
             "def fvg",
             "liquidity_pool",
-            "get_session",
+            "swing_high",
+            "swing_low",
         )
-        for path in root.rglob("*.py"):
+        for path in (root / "adapters").rglob("*.py"):
             text = path.read_text(encoding="utf-8").lower()
-            for word in banned:
-                assert word not in text, f"{path.name} contains {word!r}"
+            for word in interpretation:
+                assert word not in text, f"adapters/{path.name} contains {word!r}"
 
     def test_the_websocket_library_is_not_imported_at_module_scope(self) -> None:
         """The suite, and the MT5 path, run without the optional extra installed."""
