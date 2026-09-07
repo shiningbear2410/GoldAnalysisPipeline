@@ -30,15 +30,18 @@ from pathlib import Path
 
 from pydantic import ValidationError as PydanticValidationError
 
+from goldpipeline.adapters.digest_writer_client import DigestWriterClient
 from goldpipeline.adapters.writer_client import WriterClient, WriterRequest
 from goldpipeline.domain.errors import (
     ContextIntegrityError,
+    MarketDataError,
+    PipelineError,
     RunNotReadyError,
     WriterArtifactExistsError,
     WriterError,
     WriterResponseError,
 )
-from goldpipeline.prompts import DEFAULT_WRITER_PROMPT
+from goldpipeline.prompts import DEFAULT_DIGEST_WRITER_PROMPT, DEFAULT_WRITER_PROMPT
 from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.context import AnalysisContext
@@ -58,6 +61,11 @@ from goldpipeline.services.analysis_contract import (
     missing_article_date,
 )
 from goldpipeline.services.claim_resolver import ClaimPathError, resolve_path
+from goldpipeline.services.digest_stage import (
+    DIGEST_EDITORIAL_FILENAME,
+    DigestMarketSource,
+    build_digest_draft,
+)
 from goldpipeline.services.market_facts import article_date
 from goldpipeline.services.pipeline import CONTEXT_FILENAME
 from goldpipeline.services.source_guard import (
@@ -90,7 +98,15 @@ class WriterRunResult:
     result: WriterResult | None = None
     draft_path: Path | None = None
     metadata_path: Path | None = None
-    error: WriterError | None = None
+    error: PipelineError | None = None
+    """Why the stage failed.
+
+    Widened from ``WriterError`` in Round 6.5c.2, when the digest write became
+    the one write that fetches candles: a provider failure there is a
+    ``MarketDataError``, it is not a writer fault, and it still stops this
+    stage. An analysis write puts nothing but a ``WriterError`` here, as it
+    always has.
+    """
 
     @property
     def succeeded(self) -> bool:
@@ -135,6 +151,126 @@ def write_draft(
             now=now,
         )
     except WriterError as exc:
+        _record_failure(run, manifest, exc)
+        return WriterRunResult(
+            run_id=run.run_id,
+            run_dir=run.path,
+            status=manifest.status,
+            error=exc,
+        )
+
+
+def write_digest_draft(
+    *,
+    run_id: str,
+    store: RunStore,
+    client: DigestWriterClient,
+    market_source: DigestMarketSource | None = None,
+    prompt_version: str = DEFAULT_DIGEST_WRITER_PROMPT,
+    max_tokens: int = 8000,
+    now: datetime | None = None,
+) -> WriterRunResult:
+    """Generate and persist a digest draft for an existing normalized Run.
+
+    A sibling of :func:`write_draft` rather than a branch inside it, and it
+    lives in this module rather than beside the digest services because the two
+    share what actually matters here: the preconditions, the failure
+    translation, and the single commit that turns a Run ``DRAFTED``. What
+    differs - a snapshot, an editorial call, a deterministic render - is
+    :mod:`~goldpipeline.services.digest_stage`'s business, and this function
+    does not know how any of it works.
+
+    Args:
+        run_id: The Run to write for. Must already be ``NORMALIZED``.
+        store: Where Runs live.
+        client: Any :class:`DigestWriterClient` - real or fake.
+        market_source: Used **only** to capture a snapshot the Run does not yet
+            have. A resumed Run whose ``digest_context.json`` exists never
+            touches it, which is why ``None`` is a legitimate value and a source
+            that raises on contact is a legitimate test.
+        prompt_version: Versioned digest prompt id, recorded on the artifact.
+        max_tokens: Output ceiling for the provider call.
+        now: Injection point for tests.
+
+    Returns:
+        A :class:`WriterRunResult`, exactly as the analysis writer returns.
+    """
+    run = store.open(run_id)
+    manifest = run.load_manifest()
+
+    try:
+        _require_ready(run, manifest)
+        context, context_digest = load_verified_context(run, manifest)
+
+        logger.info("run=%s stage=digest_writer.start status=OK model=%s", run.run_id, client.model)
+        manifest.record_event(
+            "digest_writer.start", "OK", f"provider={client.provider} model={client.model}"
+        )
+
+        written = build_digest_draft(
+            run=run,
+            manifest=manifest,
+            context=context,
+            client=client,
+            market_source=market_source,
+            prompt_version=prompt_version,
+            max_tokens=max_tokens,
+        )
+
+        draft = PreparedArtifact.from_text(DRAFT_FILENAME, written.article)
+        result = WriterResult(
+            run_id=run.run_id,
+            status=written.editorial.status,
+            title=written.title,
+            model=written.model,
+            provider=written.provider,
+            selection_id=written.selection_id,
+            prompt_version=written.prompt_version,
+            context_sha256=context_digest,
+            draft_file=DRAFT_FILENAME,
+            article_sha256=draft.sha256,
+            article_chars=len(written.article),
+            created_at=now or utc_now(),
+            # A digest makes no claim against `context.json`: its figures come
+            # from its own snapshot, and the deterministic block carrying them
+            # was written by code. `source_claims` has nothing true to hold.
+            source_claims=[],
+            news_claims=list(written.editorial.news_claims),
+            warnings=list(written.editorial.warnings),
+            usage=written.usage,
+        )
+        artifacts = [
+            draft,
+            PreparedArtifact.from_json(WRITER_FILENAME, result),
+            PreparedArtifact.from_json(DIGEST_EDITORIAL_FILENAME, written.editorial),
+        ]
+
+        run.commit_artifacts(artifacts, manifest)
+        manifest.status = RunStatus.DRAFTED
+        manifest.record_event(
+            "digest_writer.complete",
+            "OK",
+            f"{result.article_chars} chars, {len(result.news_claims)} news claims",
+        )
+        run.save_manifest(manifest)
+        logger.info(
+            "run=%s stage=digest_writer.complete status=OK chars=%d",
+            run.run_id,
+            result.article_chars,
+        )
+
+        return WriterRunResult(
+            run_id=run.run_id,
+            run_dir=run.path,
+            status=RunStatus.DRAFTED,
+            result=result,
+            draft_path=run.artifact_path(DRAFT_FILENAME),
+            metadata_path=run.artifact_path(WRITER_FILENAME),
+        )
+    except (WriterError, MarketDataError) as exc:
+        # `MarketDataError` joins the writer errors here because a digest is the
+        # one article type whose *write* fetches candles. It is not a writer
+        # fault, but it stops the same stage and must be reported at it.
         _record_failure(run, manifest, exc)
         return WriterRunResult(
             run_id=run.run_id,
@@ -464,12 +600,17 @@ def _merge_warnings(
     return warnings
 
 
-def _record_failure(run: RunDirectory, manifest: RunManifest, exc: WriterError) -> None:
+def _record_failure(run: RunDirectory, manifest: RunManifest, exc: PipelineError) -> None:
     """Append a failure event to the ledger.
 
     The Run's *status* is left alone. A writer failure does not invalidate the
     Run's inputs, and marking it ``FAILED`` would wrongly imply it cannot be
     retried - which is exactly what this stage supports.
+
+    Takes a ``PipelineError`` rather than a ``WriterError`` because the digest
+    write is the one write that fetches candles, and a provider failure there
+    stops this stage while not being a writer fault. Everything recorded - the
+    code, the message, the details - is on the base class.
     """
     manifest.error = RunError(code=exc.code, message=exc.message, details=exc.details)
     manifest.record_event("writer.failed", exc.code, exc.message)

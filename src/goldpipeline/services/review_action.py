@@ -36,6 +36,7 @@ from goldpipeline.schemas.review import (
     ReviewStatus,
     StyleVerdict,
 )
+from goldpipeline.services.article_runtime import revision_available
 from goldpipeline.services.style_review import applies_to, findings_requiring_repair
 
 STYLE_ACTIVE_TYPES = frozenset({ArticleType.ANALYSIS})
@@ -67,6 +68,17 @@ class ReviewAction(StrEnum):
 
     REJECT = "REJECT"
     """Stop. A human decides. Never a model."""
+
+    REVISION_UNAVAILABLE = "REVISION_UNAVAILABLE"
+    """The content needs work and this article type has no way to do it.
+
+    Round 6.5c.2. A ``NEWS_DIGEST`` whose content did not pass has nowhere to
+    go: ``gold_finalizer_v2`` repairs an analysis against an analysis contract,
+    and pointing it at a digest would have it rewrite a deterministic shell no
+    model is allowed to touch. Distinct from ``REJECT`` on purpose - the article
+    is not condemned, the pipeline simply cannot yet repair it, and an operator
+    reading the ledger should be able to tell those apart.
+    """
 
 
 @dataclass(frozen=True)
@@ -149,6 +161,20 @@ def effective_action(review: ReviewResult, *, article_type: ArticleType) -> Acti
         repairs = tuple(findings_requiring_repair(style))
         reasons.append(
             f"human style verdict is {style.style_verdict} ({len(repairs)} finding(s) to repair)"
+        )
+
+    if content is not ReviewStatus.PASS and not revision_available(article_type):
+        # The article type has no repair path. Stopping here is what keeps a
+        # digest out of the analysis finalizer; treating it as a PASS would
+        # publish text a reviewer said was wrong.
+        return ActionDecision(
+            action=ReviewAction.REVISION_UNAVAILABLE,
+            content_status=content,
+            style_verdict=_verdict_of(review),
+            reasons=(
+                f"content integrity verdict is {content}",
+                f"{article_type} has no revision path in this pipeline yet",
+            ),
         )
 
     if content is not ReviewStatus.PASS or repairs:

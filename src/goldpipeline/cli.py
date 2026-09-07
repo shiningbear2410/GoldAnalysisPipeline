@@ -28,6 +28,7 @@ from goldpipeline.adapters.config_store import (
     RuntimeConfigStore,
     parse_key,
 )
+from goldpipeline.adapters.digest_writer_client import DigestWriterClient
 from goldpipeline.adapters.event_transport import EventTransport, HttpOutboxTransport
 from goldpipeline.adapters.fake_finalizer import FakeFinalizerClient
 from goldpipeline.adapters.fake_publisher import FakePublisherClient
@@ -1354,6 +1355,46 @@ def _resolve_mode(args: argparse.Namespace) -> PipelineMode:
     return mode
 
 
+def _digest_writer_client(
+    *, fake: bool, selection: GenerationSelection | None = None
+) -> DigestWriterClient:
+    """Pick the digest writer client for this invocation.
+
+    Parallel to :func:`_writer_client` and subject to the same two rules:
+    ``fake`` short-circuits before any credential is read, and a Run's frozen
+    selection is the single authority when one is present.
+
+    There is no ``--digest-writer-model`` flag and there will not be one. The
+    analysis writer has a model override because an operator sometimes drives a
+    Run by hand; a digest is produced by the scheduler, from configuration, and
+    a flag nobody re-reads is how a Run ends up written by a model its own
+    provenance does not name.
+    """
+    if fake:
+        from goldpipeline.adapters.fake_digest_writer import FakeDigestWriterClient
+
+        return FakeDigestWriterClient()
+
+    if selection is not None:
+        from goldpipeline.services.generation import build_digest_writer_client
+
+        return build_digest_writer_client(
+            selection.provider,
+            selection.selection_id,
+            env=_config_env(),
+            secrets=_secret_provider(),
+        )
+
+    # No selection: resolve exactly as the analysis writer does without one, so
+    # a Run created before preferences existed writes its digest with the model
+    # configuration names rather than one this function chose.
+    from goldpipeline.adapters.digest_writer_client import AnthropicDigestWriterClient
+
+    return AnthropicDigestWriterClient(
+        WriterSettings.from_env(_config_env(), secrets=_secret_provider())
+    )
+
+
 def _pipeline_clients(args: argparse.Namespace) -> PipelineClients:
     """Wire up client factories. Nothing is built here.
 
@@ -1385,6 +1426,15 @@ def _pipeline_clients(args: argparse.Namespace) -> PipelineClients:
             model=getattr(args, "reviewer_model", None),
         ),
         publisher=lambda: _publisher_client(fake=args.fake_publisher),
+        digest_writer=lambda selection: _digest_writer_client(
+            fake=fake_ai or getattr(args, "fake_writer", False),
+            selection=selection,
+        ),
+        # Built only when a digest Run has no snapshot yet. A resumed digest
+        # never calls this, which is why it can be present unconditionally.
+        digest_market=lambda window: _digest_market_source(
+            window, fake=getattr(args, "fake_market", False)
+        ),
     )
 
 

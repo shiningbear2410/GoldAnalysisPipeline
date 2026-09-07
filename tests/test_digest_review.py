@@ -20,7 +20,6 @@ separate, single request, and it is not run from the suite.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -28,7 +27,6 @@ from typing import Any
 import pytest
 
 from goldpipeline.prompts import (
-    DEFAULT_DIGEST_WRITER_PROMPT,
     DEFAULT_REVIEWER_PROMPT,
     GOLD_REVIEWER_V2,
 )
@@ -513,76 +511,3 @@ def test_declared_claims_reach_the_reviewer_with_their_verdicts() -> None:
 
     assert "declared news claims quotes evidence that is really in the item" in rendered.user
     assert "1 declared news claims" in rendered.user
-
-
-# --------------------------------------------------------------------------
-# Round 6.5c.1a: registry-ready is not runtime-dispatched
-# --------------------------------------------------------------------------
-
-
-def test_the_orchestrator_refuses_a_digest_rather_than_writing_the_wrong_article(
-    tmp_path: Any,
-) -> None:
-    """The Round 6.5c.1 audit finding, pinned so it cannot regress silently.
-
-    NEWS_DIGEST is ready in the product registry and has its own prompt, and
-    Round 6.5b stopped there. `_run_write` would then have handed the digest
-    prompt - which instructs a model to return editorial content and no article
-    - to `write_draft`, a stage that parses an article. The result would have
-    been shaped like neither product.
-
-    So the Run stops at WRITE, loudly. This test is what keeps "registry ready"
-    from being mistaken for "runtime dispatched" by a later reader.
-    """
-    from conftest import (  # noqa: PLC0415
-        PIPELINE_NOW,
-        make_analysis_payload,
-        make_market_payload,
-        make_tracked_clients,
-        write_json,
-    )
-
-    from goldpipeline.domain.errors import RunNotReadyError
-    from goldpipeline.schemas.article import ArticleType as AT
-    from goldpipeline.services.article_routing import writer_prompt_for
-    from goldpipeline.services.orchestrator import run_pipeline
-    from goldpipeline.storage.run_store import RunStore
-
-    # The routing layer is willing; only the runtime guard is not.
-    assert writer_prompt_for(AT.NEWS_DIGEST) == DEFAULT_DIGEST_WRITER_PROMPT
-
-    from goldpipeline.adapters.file_source import (  # noqa: PLC0415
-        JsonFileAnalysisSource,
-        JsonFileMarketDataSource,
-    )
-
-    class DigestAnalysisSource:
-        """The real file adapter, declaring the article type an event would."""
-
-        def __init__(self, path: Any) -> None:
-            self._inner = JsonFileAnalysisSource(path)
-
-        def load(self) -> Any:
-            loaded = self._inner.load()
-            return replace(loaded, article_type=AT.NEWS_DIGEST)
-
-    sources = tmp_path / "sources"
-    sources.mkdir(parents=True, exist_ok=True)
-    analysis_path = write_json(sources / "telegram_input.json", make_analysis_payload())
-    market_path = write_json(sources / "ohlc.json", make_market_payload())
-
-    clients = make_tracked_clients()
-    outcome = run_pipeline(
-        analysis_source=DigestAnalysisSource(analysis_path),
-        market_source=JsonFileMarketDataSource(market_path),
-        store=RunStore(tmp_path / "runs"),
-        clients=clients.as_pipeline_clients(),
-        expected_symbol="XAUUSD",
-        now=PIPELINE_NOW,
-    )
-
-    assert not outcome.succeeded
-    assert isinstance(outcome.error, RunNotReadyError)
-    assert "does not yet dispatch" in str(outcome.error)
-    assert not clients.writer.calls, "no writer was called with a digest prompt"
-    assert "writer" not in clients.built, "no writer client was even constructed"

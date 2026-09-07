@@ -67,6 +67,9 @@ def build_digest_facts_for_window(
             cannot tell the difference.
         symbol: Canonical instrument symbol.
         news_items: The curated items the writer may choose from.
+        provider_symbol: Override for the venue's own symbol. Normally left
+            unset - the adapter already recorded it, and a caller supplying
+            one is claiming to know better than the source that fetched it.
         timeframe: Which series to describe the window with. Defaults to the
             digest's own preferred timeframe, never the analysis one.
 
@@ -132,9 +135,15 @@ def build_digest_facts_for_window(
     )
 
     closed = [bar.timestamp for bar in snapshot.bars if close_time(bar, timeframe) <= window.end]
+    # The venue's own name for the instrument, as the adapter recorded it.
+    # Read from the loaded source's provenance rather than passed in, so the
+    # answer stays provider-neutral: every adapter that has a venue symbol
+    # records one there, and one that has none falls back to the canonical
+    # symbol rather than to a string this layer invented.
+    venue_symbol = provider_symbol or loaded.provenance.get("provider_symbol")
     provenance = DigestMarketProvenance(
         provider=snapshot.provider,
-        provider_symbol=provider_symbol or snapshot.symbol,
+        provider_symbol=venue_symbol if isinstance(venue_symbol, str) else snapshot.symbol,
         timeframe=timeframe,
         bars_requested=bars_wanted,
         bars_received=snapshot.bar_count,

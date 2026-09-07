@@ -834,6 +834,10 @@ class TrackedClients:
     reviewer: Any
     finalizer: Any
     publisher: Any
+    digest_writer: Any = None
+    digest_market_factory: Any = None
+    """Builds the offline M5 source for a window. ``None`` means "must not be asked"."""
+
     target_chat: str = "@fake_offline_channel"
     built: list[str] = field(default_factory=list)
     selections: list[tuple[str, Any]] = field(default_factory=list)
@@ -859,7 +863,27 @@ class TrackedClients:
                 self._hand_out("publisher", self.publisher),
                 self.target_chat,
             ),
+            digest_writer=lambda selection: self._hand_out(
+                "digest_writer", self.digest_writer, selection
+            ),
+            digest_market=lambda window: self._hand_out(
+                "digest_market", self.digest_market(window)
+            ),
         )
+
+    def digest_market(self, window: Any) -> Any:
+        """The digest's market source for *window*.
+
+        Raises when none was configured, which is the point: a resumed digest
+        Run must reach its snapshot without a provider, and a test proves that
+        by making contact an error rather than a different answer.
+        """
+        if self.digest_market_factory is None:
+            raise AssertionError(
+                "a digest Run asked for market data; this test supplied none because "
+                "it must not need any"
+            )
+        return self.digest_market_factory(window)
 
 
 def make_tracked_clients(
@@ -868,9 +892,17 @@ def make_tracked_clients(
     reviewer: Any = None,
     finalizer: Any = None,
     publisher: Any = None,
+    digest_writer: Any = None,
+    digest_market_factory: Any = None,
     target_chat: str = "@fake_offline_channel",
 ) -> TrackedClients:
-    """Build the four fakes, overriding any of them."""
+    """Build the offline fakes, overriding any of them.
+
+    ``digest_market_factory`` has no default on purpose. Every other stage can
+    be faked harmlessly; a market source that quietly worked would let a test
+    pass while production refetched candles a snapshot already held.
+    """
+    from goldpipeline.adapters.fake_digest_writer import FakeDigestWriterClient
     from goldpipeline.adapters.fake_finalizer import FakeFinalizerClient
     from goldpipeline.adapters.fake_publisher import FakePublisherClient
     from goldpipeline.adapters.fake_reviewer import FakeReviewerClient
@@ -881,6 +913,8 @@ def make_tracked_clients(
         reviewer=reviewer if reviewer is not None else FakeReviewerClient(),
         finalizer=finalizer if finalizer is not None else FakeFinalizerClient(),
         publisher=publisher if publisher is not None else FakePublisherClient(),
+        digest_writer=digest_writer if digest_writer is not None else FakeDigestWriterClient(),
+        digest_market_factory=digest_market_factory,
         target_chat=target_chat,
     )
 

@@ -241,6 +241,17 @@ def _execute(
             issue_count=len(inputs.review.issues),
         )
 
+    if decision.action is ReviewAction.REVISION_UNAVAILABLE:
+        raise FinalizationBlockedError(
+            f"review verdict is {verdict} and {article_type} has no revision path in "
+            "this pipeline yet; the Run stops here rather than being repaired by a "
+            "finalizer built for a different product",
+            run_id=run.run_id,
+            review_status=str(verdict),
+            article_type=str(article_type),
+            issue_count=len(inputs.review.issues),
+        )
+
     if decision.action is ReviewAction.PASS_THROUGH:
         return _finalize_passthrough(run=run, manifest=manifest, inputs=inputs, now=now)
 

@@ -45,6 +45,7 @@ from datetime import datetime
 from pathlib import Path
 
 from goldpipeline.adapters.base import AnalysisSource, MarketDataSource
+from goldpipeline.adapters.digest_writer_client import DigestWriterClient
 from goldpipeline.adapters.finalizer_client import FinalizerClient, LazyFinalizerClient
 from goldpipeline.adapters.publisher_client import PublisherClient
 from goldpipeline.adapters.reviewer_client import ReviewerClient
@@ -52,7 +53,6 @@ from goldpipeline.adapters.writer_client import WriterClient
 from goldpipeline.domain.errors import (
     ArticleTypeNotReadyError,
     PipelineError,
-    RunNotReadyError,
     RunNotResumableError,
 )
 from goldpipeline.schemas.article import ArticleType
@@ -72,13 +72,15 @@ from goldpipeline.schemas.publish import Decision
 from goldpipeline.schemas.publisher import PublishStatus
 from goldpipeline.schemas.review import ReviewStatus
 from goldpipeline.services.article_routing import writer_prompt_for
+from goldpipeline.services.article_runtime import WriteRuntime, runtime_for
+from goldpipeline.services.digest_stage import DigestMarketSource
 from goldpipeline.services.finalizer import finalize_run, load_verified_inputs
 from goldpipeline.services.pipeline import create_run
 from goldpipeline.services.publish_gate import gate_publish
 from goldpipeline.services.publisher import publish_run
 from goldpipeline.services.reviewer import review_draft
 from goldpipeline.services.run_lock import RunLock
-from goldpipeline.services.writer import write_draft
+from goldpipeline.services.writer import write_digest_draft, write_draft
 from goldpipeline.storage.run_store import RunStore
 
 logger = logging.getLogger(__name__)
@@ -168,6 +170,26 @@ class PipelineClients:
     finalizer: Callable[[GenerationSelection | None], FinalizerClient] | None = None
     reviewer: Callable[[], ReviewerClient] | None = None
     publisher: Callable[[], tuple[PublisherClient, str]] | None = None
+
+    digest_writer: Callable[[GenerationSelection | None], DigestWriterClient] | None = None
+    """The digest's own writer. Takes the Run's selection, like the analysis one.
+
+    A separate factory rather than a mode of ``writer`` because the two return
+    different protocols: one produces an article, the other editorial content.
+    A single factory would have to decide which, from information it does not
+    have.
+    """
+
+    digest_market: DigestMarketSource | None = None
+    """The M5 source, built only to capture a snapshot that does not exist yet.
+
+    Deliberately *not* the market source a Run is created from. That one supplies
+    the M15 candles `context.json` is normalized from and is consumed before any
+    stage runs; this one is consulted once, inside the digest write, and never
+    again for the life of the Run. A resumed digest leaves it unbuilt, which is
+    the whole guarantee: no key, no socket, no second opinion about a window
+    that was fixed when the event was accepted.
+    """
 
 
 @dataclass
@@ -454,43 +476,35 @@ def _run_write(
     # for is a silent wrong answer, and refusing is a visible one.
     article_type = _article_type_of(store, execution.run_id)
     try:
+        runtime = runtime_for(article_type)
         prompt_id = writer_prompt_for(article_type)
     except ArticleTypeNotReadyError as exc:
         execution.record(PipelineStage.WRITE, started, StageOutcome.FAILED)
         return _fail(store, execution, PipelineStage.WRITE, exc)
 
-    if article_type is ArticleType.NEWS_DIGEST:
-        # Round 6.5b made NEWS_DIGEST writable and gave it a prompt; it did not
-        # teach *this* stage to write one. The digest writer asks for editorial
-        # content and assembles the article around deterministic facts, which
-        # `write_draft` below knows nothing about - handing it the digest prompt
-        # would send a "return no article" instruction to a stage that parses an
-        # article, and produce something shaped like neither product.
-        #
-        # So the Run stops here, visibly, until Round 6.5c.2 wires the digest
-        # stage in. Refusing is the same choice the routing check above makes
-        # for an unimplemented type, and for the same reason: a silent wrong
-        # answer is worse than a loud refusal.
-        execution.record(PipelineStage.WRITE, started, StageOutcome.FAILED)
-        return _fail(
-            store,
-            execution,
-            PipelineStage.WRITE,
-            RunNotReadyError(
-                f"run {execution.run_id} is {article_type}, which has its own writer "
-                "stage that this pipeline does not yet dispatch to",
-                run_id=execution.run_id,
-                article_type=str(article_type),
+    if runtime.write is WriteRuntime.NEWS_DIGEST:
+        # Round 6.5c.2 replaced a fail-closed guard here with the real thing.
+        # The guard existed because `write_draft` parses an article and the
+        # digest prompt asks for none; the answer was never to relax it, but to
+        # dispatch to a stage that knows what a digest is.
+        result = write_digest_draft(
+            run_id=execution.run_id,
+            store=store,
+            client=_require(clients.digest_writer, "digest writer")(
+                _generation_of(store, execution.run_id)
             ),
+            market_source=clients.digest_market,
+            prompt_version=prompt_id,
+            now=now,
         )
-
-    result = write_draft(
-        run_id=execution.run_id,
-        store=store,
-        client=_require(clients.writer, "writer")(_generation_of(store, execution.run_id)),
-        prompt_version=prompt_id,
-        now=now,
-    )
+    else:
+        result = write_draft(
+            run_id=execution.run_id,
+            store=store,
+            client=_require(clients.writer, "writer")(_generation_of(store, execution.run_id)),
+            prompt_version=prompt_id,
+            now=now,
+        )
 
     if not result.succeeded:
         assert result.error is not None

@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 
+from goldpipeline.adapters.digest_writer_client import DigestWriterClient
 from goldpipeline.adapters.finalizer_client import FinalizerClient
 from goldpipeline.adapters.secrets import SecretProvider
 from goldpipeline.adapters.writer_client import WriterClient
@@ -84,6 +85,46 @@ def build_writer_client(
         return build_deepseek_writer(selection_id, env=env, secrets=secrets, transport=transport)
 
     return _claude_writer(model, env=env, secrets=secrets)
+
+
+def build_digest_writer_client(
+    provider: Provider,
+    selection_id: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    secrets: SecretProvider | None = None,
+) -> DigestWriterClient:
+    """The digest writer client for one catalog selection.
+
+    Takes *env* and *secrets* on the same terms as :func:`build_writer_client`,
+    and for the same Round 6.4e.1 reason: a scheduled task inherits no session,
+    so a client that read its key from the process environment alone would work
+    by hand and fail under the scheduler.
+
+    Claude only, and deliberately. The digest writer returns a structured
+    editorial object through ``messages.parse``; adding a vendor here means
+    proving that vendor can honour the schema, not routing a string to it.
+
+    Raises:
+        ValueError: The catalog does not offer that pairing, or the provider has
+            no digest writer.
+        WriterConfigurationError: No usable credential.
+    """
+    model = resolve_model(provider, selection_id)
+    logger.info("generation.digest_writer provider=%s selection=%s", provider, selection_id)
+
+    if provider is not Provider.CLAUDE:
+        raise ValueError(
+            f"{provider} has no news digest writer; the digest schema is produced "
+            "through Claude structured output and no other adapter implements it"
+        )
+
+    from goldpipeline.adapters.digest_writer_client import AnthropicDigestWriterClient
+    from goldpipeline.config import WriterSettings
+
+    return AnthropicDigestWriterClient(
+        WriterSettings.from_env(env, model_override=model.api_model_id, secrets=secrets)
+    )
 
 
 def build_finalizer_client(

@@ -26,6 +26,7 @@ raises rather than being recorded as a REJECT.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -46,15 +47,18 @@ from goldpipeline.schemas.article_contract import contract_for
 from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.context import AnalysisContext
 from goldpipeline.schemas.manifest import RunError, RunManifest, RunStatus
-from goldpipeline.schemas.review import ReviewResult
+from goldpipeline.schemas.output_findings import OutputFinding
+from goldpipeline.schemas.review import ReviewerPrompt, ReviewResult
 from goldpipeline.schemas.writer import WriterResult
+from goldpipeline.services.article_runtime import WriteRuntime, runtime_for
+from goldpipeline.services.digest_stage import prepare_digest_review
 from goldpipeline.services.integrity import (
     VerifiedArtifact,
     require_digest_match,
     verify_artifact,
 )
 from goldpipeline.services.pipeline import CONTEXT_FILENAME
-from goldpipeline.services.precheck import run_prechecks
+from goldpipeline.services.precheck import PrecheckReport, run_prechecks
 from goldpipeline.services.review_policy import apply_policy, validate_response
 from goldpipeline.services.reviewer_prompt import build_reviewer_prompt
 from goldpipeline.services.style_review import resolve_style_review
@@ -173,6 +177,37 @@ def _execute(
     logger.info("run=%s stage=review.start status=OK model=%s", run.run_id, client.model)
     manifest.record_event("review.start", "OK", f"provider={client.provider} model={client.model}")
 
+    # Provenance is absent on Runs created before it existed, and those Runs
+    # were all ANALYSIS - which is what the manifest field itself defaults to.
+    article_type = manifest.provenance.article_type if manifest.provenance else ArticleType.ANALYSIS
+
+    if runtime_for(article_type).write is WriteRuntime.NEWS_DIGEST:
+        # A digest is prepared entirely differently, and not as an option. The
+        # analysis prechecks resolve claims against `context.json` and treat a
+        # price the M15 context cannot vouch for as invented - and every figure
+        # in a digest's price block comes from its own M5 snapshot, so all of
+        # them would be reported as fabrications. Its user turn is wrong for the
+        # same reason, telling the model the pipeline collected no news.
+        prompt, report = prepare_digest_review(
+            run=run,
+            manifest=manifest,
+            article=inputs.article,
+            prompt_version=prompt_version,
+        )
+        symptoms: Sequence[OutputFinding] = ()
+        return _review_with(
+            run=run,
+            manifest=manifest,
+            inputs=inputs,
+            client=client,
+            prompt=prompt,
+            report=report,
+            article_type=article_type,
+            symptoms=symptoms,
+            max_output_tokens=max_output_tokens,
+            now=now,
+        )
+
     try:
         report = run_prechecks(
             context=inputs.context, writer_result=inputs.writer_result, article=inputs.article
@@ -200,9 +235,6 @@ def _execute(
         len(report.blocking),
     )
 
-    # Provenance is absent on Runs created before it existed, and those Runs
-    # were all ANALYSIS - which is what the manifest field itself defaults to.
-    article_type = manifest.provenance.article_type if manifest.provenance else ArticleType.ANALYSIS
     symptoms = find_style_symptoms(inputs.article, contract=contract_for(article_type))
 
     prompt = build_reviewer_prompt(
@@ -215,6 +247,39 @@ def _execute(
         style_symptoms=symptoms,
     )
 
+    return _review_with(
+        run=run,
+        manifest=manifest,
+        inputs=inputs,
+        client=client,
+        prompt=prompt,
+        report=report,
+        article_type=article_type,
+        symptoms=symptoms,
+        max_output_tokens=max_output_tokens,
+        now=now,
+    )
+
+
+def _review_with(
+    *,
+    run: RunDirectory,
+    manifest: RunManifest,
+    inputs: ReviewInputs,
+    client: ReviewerClient,
+    prompt: ReviewerPrompt,
+    report: PrecheckReport,
+    article_type: ArticleType,
+    symptoms: Sequence[OutputFinding],
+    max_output_tokens: int,
+    now: datetime | None,
+) -> ReviewRunResult:
+    """Send the prompt and persist the verdict.
+
+    Everything after "which prompt, and which deterministic report" is identical
+    for both article types, and is shared rather than copied so a digest review
+    cannot drift into recording its verdict differently from an analysis one.
+    """
     response = client.review(
         ReviewRequest(prompt=prompt, run_id=run.run_id, max_output_tokens=max_output_tokens)
     )
