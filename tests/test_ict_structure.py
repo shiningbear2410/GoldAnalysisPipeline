@@ -29,6 +29,7 @@ from goldpipeline.services.ict_structure import (
     BreakDirection,
     StructureBias,
     SwingRelation,
+    _resolve_candidates,
     analyse_structure,
     annotate_swings,
     bootstrap_bias,
@@ -860,3 +861,56 @@ def test_the_eight_way_label_is_derived_from_the_pair() -> None:
 
     assert high.label == "HIGHER_HIGH"
     assert low.label == "HIGHER_LOW"
+
+
+# --------------------------------------------------------------------------
+# §19: one bar, one event - including the case no candle series reaches
+# --------------------------------------------------------------------------
+
+
+def annotated(swing_type: SwingType, price: str, hour: int) -> AnnotatedSwing:
+    return AnnotatedSwing(
+        swing=fake_swing(swing_type, price, hour),
+        relation=SwingRelation.FIRST,
+        previous_pivot_time=None,
+    )
+
+
+def test_a_bar_with_nothing_to_break_emits_nothing() -> None:
+    assert _resolve_candidates([]) is None
+
+
+def test_a_single_candidate_is_returned_as_is() -> None:
+    only = (BreakDirection.BULLISH, annotated(HIGH, "4030", 2))
+
+    assert _resolve_candidates([only]) is only
+
+
+def test_two_qualifying_sides_resolve_to_the_more_recent_level() -> None:
+    """Defined so that an impossible-looking case is never merely accidental.
+
+    Both sides can qualify only when an unconsumed swing high sits *below* the
+    active swing low, and no valid candle series producing that was found while
+    writing this round - a bar printing a low above a known high would have
+    closed above that high and consumed it first. The rule is still stated and
+    tested, because that argument rests on the current pivot definition and a
+    later round may change it. Leaving it undefined would turn a rare shape
+    into a silent dependency on argument order.
+    """
+    older = (BreakDirection.BULLISH, annotated(HIGH, "4030", 2))
+    newer = (BreakDirection.BEARISH, annotated(LOW, "4050", 9))
+
+    assert _resolve_candidates([older, newer]) is newer
+    assert _resolve_candidates([newer, older]) is newer, "order of arrival is not an input"
+
+
+def test_a_tie_on_confirmation_falls_to_the_later_pivot() -> None:
+    early = annotated(HIGH, "4030", 2)
+    late = annotated(LOW, "4050", 5)
+    assert early.swing.confirmed_at < late.swing.confirmed_at
+
+    pair = [(BreakDirection.BULLISH, early), (BreakDirection.BEARISH, late)]
+    chosen = _resolve_candidates(pair)
+
+    assert chosen is not None
+    assert chosen[1] is late
