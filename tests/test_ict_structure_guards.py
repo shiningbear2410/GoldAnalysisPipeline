@@ -281,6 +281,7 @@ ICT_BRANCH = {
     "ict_structure.py",
     "ict_liquidity.py",
     "ict_fvg.py",
+    "ict_protected.py",
 }
 """Modules of the TRADE_PLAN branch, which are allowed to know about each other.
 
@@ -320,7 +321,13 @@ def test_nothing_outside_the_ict_branch_mentions_any_of_it() -> None:
         if path.name in ICT_BRANCH:
             continue
         text = path.read_text(encoding="utf-8")
-        for module in ("ict_primitives", "ict_structure", "ict_liquidity", "ict_fvg"):
+        for module in (
+            "ict_primitives",
+            "ict_structure",
+            "ict_liquidity",
+            "ict_fvg",
+            "ict_protected",
+        ):
             if module in text:
                 offenders.append(f"{path.name} -> {module}")
 

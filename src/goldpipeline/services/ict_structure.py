@@ -376,6 +376,33 @@ class StructureBreak:
     prior_bias: StructureBias
     resulting_bias: StructureBias
 
+    opposite_active_swing_id: str | None = None
+    """The active swing on the *other* side at the moment this break closed.
+
+    Added in Round 6.6c.3a, which needs to know what a directional break left
+    behind it: a bullish break's opposite is the swing low the move originated
+    above, and that low is what a protected-swing anchor is built from.
+
+    Recorded here rather than recomputed elsewhere because it is genuinely
+    event-time state. The replay loop already resolves both sides immediately
+    before testing the close - unconsumed, and confirmed strictly before this
+    bar - and any module deriving it afterwards from the final analysis would be
+    guessing at history rather than reading it. ``None`` when no eligible
+    opposite swing existed, which is an honest answer and not a failure.
+
+    Purely additive: it takes no part in :attr:`event_id`, in classification, or
+    in any state transition, so every Round 6.6b replay result is unchanged.
+    """
+
+    opposite_active_price: Decimal | None = None
+    opposite_active_pivot_time: datetime | None = None
+    opposite_active_confirmed_at: datetime | None = None
+    """Enough of the opposite swing to use it without another lookup.
+
+    Same reasoning as the broken swing's own four fields: a later reader should
+    not have to re-run the analysis to learn what a recorded identity refers to.
+    """
+
     also_consumed_swing_ids: tuple[str, ...] = ()
     """Older levels on the same side that this close also cleared.
 
@@ -600,6 +627,13 @@ def analyse_structure(
             initial_bias = bias
         classification, resulting = classify_break(bias, direction)
 
+        # The other side, as it stood at this close. `active_high` and
+        # `active_low` were resolved above from the swings confirmed strictly
+        # before this bar and unconsumed at that moment, which is exactly the
+        # event-time context Round 6.6c.3a needs; a bullish break's opposite is
+        # the low, and a bearish break's is the high.
+        opposite = active_low if direction is BreakDirection.BULLISH else active_high
+
         swept = _also_cleared(known, direction, broken, bar.close, frozen_consumed)
         events.append(
             StructureBreak(
@@ -625,6 +659,14 @@ def analyse_structure(
                 break_close=bar.close,
                 prior_bias=bias,
                 resulting_bias=resulting,
+                opposite_active_swing_id=None if opposite is None else opposite.swing_id,
+                opposite_active_price=None if opposite is None else opposite.swing.price,
+                opposite_active_pivot_time=(
+                    None if opposite is None else opposite.swing.pivot_time
+                ),
+                opposite_active_confirmed_at=(
+                    None if opposite is None else opposite.swing.confirmed_at
+                ),
                 also_consumed_swing_ids=swept,
             )
         )
