@@ -194,7 +194,14 @@ def test_the_primitives_are_stable_across_repeated_calls() -> None:
 ICT_MODULES = (
     Path("src/goldpipeline/schemas/ict.py"),
     Path("src/goldpipeline/services/ict_primitives.py"),
+    Path("src/goldpipeline/services/ict_structure.py"),
 )
+"""Every module in the branch, so a new one inherits the guards below by being added.
+
+``ict_structure`` joined in Round 6.6b. It has its own guards in
+``test_ict_structure_guards.py`` covering what *that* module specifically must
+not know; these three are the properties the whole branch shares.
+"""
 
 FORBIDDEN_IMPORTS = (
     "tradingview",
