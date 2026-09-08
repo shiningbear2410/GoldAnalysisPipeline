@@ -275,16 +275,46 @@ def test_trade_plan_is_still_not_a_product() -> None:
         runtime_for(ArticleType.TRADE_PLAN)
 
 
+ICT_BRANCH = {"ict.py", "ict_primitives.py", "ict_structure.py", "ict_liquidity.py"}
+"""Modules of the TRADE_PLAN branch, which are allowed to know about each other."""
+
+
 def test_no_structure_code_is_reachable_from_the_shipped_products() -> None:
-    """A structure engine nothing calls cannot change what anything publishes."""
+    """A structure engine no *product* calls cannot change what anything publishes.
+
+    Round 6.6b wrote this as "no other file mentions it at all", which was an
+    accurate way to say it while the structure engine was the branch's only
+    consumer. Round 6.6c.1 made that too strong: the liquidity engine imports
+    ``swing_id`` from here on purpose, so that there is exactly one swing
+    identity in the project rather than two that can drift apart.
+
+    So the guard now says what it always meant. The ICT branch may reference
+    itself; nothing outside it may reference the branch at all, which is what
+    keeps ANALYSIS and NEWS_DIGEST provably untouched by any of this.
+    """
     root = Path("src/goldpipeline")
     callers = [
         path
         for path in root.rglob("*.py")
-        if "ict_structure" in path.read_text(encoding="utf-8") and path.name != "ict_structure.py"
+        if "ict_structure" in path.read_text(encoding="utf-8") and path.name not in ICT_BRANCH
     ]
 
     assert callers == []
+
+
+def test_nothing_outside_the_ict_branch_mentions_any_of_it() -> None:
+    """The stronger statement, and the one that actually protects the products."""
+    root = Path("src/goldpipeline")
+    offenders: list[str] = []
+    for path in root.rglob("*.py"):
+        if path.name in ICT_BRANCH:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for module in ("ict_primitives", "ict_structure", "ict_liquidity"):
+            if module in text:
+                offenders.append(f"{path.name} -> {module}")
+
+    assert offenders == []
 
 
 def test_the_two_shipped_products_are_untouched() -> None:
