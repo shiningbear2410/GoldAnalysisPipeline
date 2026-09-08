@@ -275,8 +275,18 @@ def test_trade_plan_is_still_not_a_product() -> None:
         runtime_for(ArticleType.TRADE_PLAN)
 
 
-ICT_BRANCH = {"ict.py", "ict_primitives.py", "ict_structure.py", "ict_liquidity.py"}
-"""Modules of the TRADE_PLAN branch, which are allowed to know about each other."""
+ICT_BRANCH = {
+    "ict.py",
+    "ict_primitives.py",
+    "ict_structure.py",
+    "ict_liquidity.py",
+    "ict_fvg.py",
+}
+"""Modules of the TRADE_PLAN branch, which are allowed to know about each other.
+
+The registry every round's reachability guard reads, so adding a branch module
+means adding it here once rather than relaxing a guard somewhere.
+"""
 
 
 def test_no_structure_code_is_reachable_from_the_shipped_products() -> None:
@@ -310,7 +320,7 @@ def test_nothing_outside_the_ict_branch_mentions_any_of_it() -> None:
         if path.name in ICT_BRANCH:
             continue
         text = path.read_text(encoding="utf-8")
-        for module in ("ict_primitives", "ict_structure", "ict_liquidity"):
+        for module in ("ict_primitives", "ict_structure", "ict_liquidity", "ict_fvg"):
             if module in text:
                 offenders.append(f"{path.name} -> {module}")
 
