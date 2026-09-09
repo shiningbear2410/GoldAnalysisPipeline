@@ -65,6 +65,7 @@ from goldpipeline.services.ict_primitives import (
     SwingPoint,
     SwingType,
     confirmed_swings,
+    require_swings_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -528,6 +529,7 @@ class StructureAnalysis:
 def analyse_structure(
     series: IctTimeframeSnapshot,
     *,
+    swings: Sequence[SwingPoint] | None = None,
     symbol: str = "",
     as_of: datetime | None = None,
     left_bars: int = DEFAULT_LEFT_BARS,
@@ -589,6 +591,14 @@ def analyse_structure(
 
     annotated = annotate_swings(
         confirmed_swings(working, left_bars=left_bars, right_bars=right_bars)
+        if swings is None
+        else require_swings_for(
+            swings,
+            timeframe=working.timeframe,
+            observed_at=observed_at,
+            left_bars=left_bars,
+            right_bars=right_bars,
+        )
     )
 
     bias = StructureBias.NEUTRAL
@@ -715,6 +725,7 @@ def analyse_snapshot_structure(
     snapshot: IctMarketSnapshot,
     timeframe: Timeframe,
     *,
+    swings: Sequence[SwingPoint] | None = None,
     as_of: datetime | None = None,
     left_bars: int = DEFAULT_LEFT_BARS,
     right_bars: int = DEFAULT_RIGHT_BARS,
@@ -729,6 +740,7 @@ def analyse_snapshot_structure(
     """
     return analyse_structure(
         snapshot.require(timeframe),
+        swings=swings,
         symbol=snapshot.symbol,
         as_of=as_of,
         left_bars=left_bars,

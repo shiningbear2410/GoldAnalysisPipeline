@@ -304,6 +304,67 @@ def swings_known_at(swings: Sequence[SwingPoint], moment: datetime) -> list[Swin
     return [swing for swing in swings if swing.confirmed_at <= moment]
 
 
+def require_swings_for(
+    swings: Sequence[SwingPoint],
+    *,
+    timeframe: Timeframe,
+    observed_at: datetime,
+    left_bars: int,
+    right_bars: int,
+) -> tuple[SwingPoint, ...]:
+    """Accept a precomputed swing collection, or refuse to use it.
+
+    Round 6.6e.1. The seam a composite stage needs so
+    :func:`confirmed_swings` runs once per timeframe instead of once per
+    consumer. It checks the four things that could make a supplied collection
+    the wrong one, all of which a :class:`SwingPoint` carries itself:
+
+    * a swing from another timeframe;
+    * a swing found with a different pivot window, which is a different
+      definition of "swing" rather than a different amount of it;
+    * a swing confirmed **after** the analysis instant, which is the leak this
+      exists to prevent;
+    * an out-of-order collection, since consumers walk it chronologically.
+
+    Refused rather than filtered, which is the opposite of the fair-value-gap
+    seam's choice and deliberately so. Filtering *would* be sound here -
+    :func:`confirmed_swings` over a truncated series equals
+    :func:`swings_known_at` over the full one, and Round 6.6e.1 pins that. But
+    silently trimming would also accept a collection built with the wrong pivot
+    width or for the wrong timeframe, and those are not recoverable by
+    filtering. A caller that genuinely wants the historical subset can say so
+    with :func:`swings_known_at` and mean it.
+
+    Returns:
+        The same swings, as an immutable tuple.
+
+    Raises:
+        ValueError: Any of the four checks fails.
+    """
+    ordered = tuple(swings)
+    for swing in ordered:
+        if swing.timeframe is not timeframe:
+            raise ValueError(
+                f"supplied swing is for {swing.timeframe.value}, not {timeframe.value}"
+            )
+        if swing.left_bars != left_bars or swing.right_bars != right_bars:
+            raise ValueError(
+                f"supplied swing was found with a {swing.left_bars}/{swing.right_bars} pivot "
+                f"window, not {left_bars}/{right_bars}"
+            )
+        if swing.confirmed_at > observed_at:
+            raise ValueError(
+                f"supplied swing confirms at {swing.confirmed_at.isoformat()}, after this "
+                f"analysis' instant {observed_at.isoformat()}; supply swings computed for it"
+            )
+
+    keys = [(swing.pivot_time, swing.swing_type) for swing in ordered]
+    if keys != sorted(keys):
+        raise ValueError("supplied swings must ascend by pivot time, as confirmed_swings returns")
+
+    return ordered
+
+
 # --------------------------------------------------------------------------
 # fair value gaps
 # --------------------------------------------------------------------------
@@ -417,6 +478,7 @@ __all__ = [
     "confirmed_swings",
     "fair_value_gaps",
     "latest_atr",
+    "require_swings_for",
     "swings_known_at",
     "true_range",
     "true_range_series",

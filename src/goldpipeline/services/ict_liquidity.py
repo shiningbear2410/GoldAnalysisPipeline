@@ -61,6 +61,7 @@ from goldpipeline.services.ict_primitives import (
     SwingPoint,
     SwingType,
     confirmed_swings,
+    require_swings_for,
 )
 from goldpipeline.services.ict_structure import swing_id
 
@@ -426,6 +427,7 @@ def analyse_liquidity(
     series: IctTimeframeSnapshot,
     *,
     config: LiquidityConfig,
+    swings: Sequence[SwingPoint] | None = None,
     symbol: str = "",
     as_of: datetime | None = None,
     left_bars: int = DEFAULT_LEFT_BARS,
@@ -474,9 +476,19 @@ def analyse_liquidity(
     duration = working.timeframe.duration
     assert duration is not None  # IctTimeframeSnapshot refuses calendar timeframes
 
-    swings = confirmed_swings(working, left_bars=left_bars, right_bars=right_bars)
+    known = (
+        confirmed_swings(working, left_bars=left_bars, right_bars=right_bars)
+        if swings is None
+        else require_swings_for(
+            swings,
+            timeframe=working.timeframe,
+            observed_at=observed_at,
+            left_bars=left_bars,
+            right_bars=right_bars,
+        )
+    )
     by_confirmation: dict[datetime, list[SwingPoint]] = {}
-    for swing in swings:
+    for swing in known:
         by_confirmation.setdefault(swing.confirmed_at, []).append(swing)
 
     pools: list[_WorkingPool] = []
@@ -544,6 +556,7 @@ def analyse_snapshot_liquidity(
     timeframe: Timeframe,
     *,
     config: LiquidityConfig,
+    swings: Sequence[SwingPoint] | None = None,
     as_of: datetime | None = None,
     left_bars: int = DEFAULT_LEFT_BARS,
     right_bars: int = DEFAULT_RIGHT_BARS,
@@ -558,6 +571,7 @@ def analyse_snapshot_liquidity(
     return analyse_liquidity(
         snapshot.require(timeframe),
         config=config,
+        swings=swings,
         symbol=snapshot.symbol,
         as_of=as_of,
         left_bars=left_bars,
