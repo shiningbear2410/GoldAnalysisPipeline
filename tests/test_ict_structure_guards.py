@@ -283,6 +283,7 @@ ICT_BRANCH = {
     "ict_fvg.py",
     "ict_protected.py",
     "ict_range.py",
+    "ict_order_block.py",
 }
 """Modules of the TRADE_PLAN branch, which are allowed to know about each other.
 
@@ -329,6 +330,7 @@ def test_nothing_outside_the_ict_branch_mentions_any_of_it() -> None:
             "ict_fvg",
             "ict_protected",
             "ict_range",
+            "ict_order_block",
         ):
             if module in text:
                 offenders.append(f"{path.name} -> {module}")
