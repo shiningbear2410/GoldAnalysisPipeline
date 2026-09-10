@@ -288,6 +288,7 @@ ICT_BRANCH = {
     "ict_composite.py",
     "ict_candidate_source.py",
     "ict_candidate_eligibility.py",
+    "ict_candidate_consolidation.py",
 }
 """Modules of the TRADE_PLAN branch, which are allowed to know about each other.
 
@@ -339,6 +340,7 @@ def test_nothing_outside_the_ict_branch_mentions_any_of_it() -> None:
             "ict_composite",
             "ict_candidate_source",
             "ict_candidate_eligibility",
+            "ict_candidate_consolidation",
         ):
             if module in text:
                 offenders.append(f"{path.name} -> {module}")
