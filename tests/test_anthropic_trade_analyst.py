@@ -18,8 +18,8 @@ from typing import Any
 import pytest
 
 from goldpipeline.adapters.anthropic_trade_analyst import (
-    ANSWER_PREFILL,
     ANTHROPIC_PROVIDER,
+    FENCE,
     AnthropicTradeAnalystClient,
 )
 from goldpipeline.adapters.trade_analyst_client import TradeAnalystRequest
@@ -87,28 +87,33 @@ def test_thinking_is_switched_off() -> None:
     Ordering a list is not a problem extended thinking helps with, and on 130
     candidates it consumed the whole budget before reaching the JSON.
     """
-    analyst, messages = client(Reply(content=[Block("text", ANSWER[1:])]))
+    analyst, messages = client(Reply(content=[Block("text", ANSWER)]))
 
     analyst.rank(request())
 
     assert messages.calls[0]["thinking"] == {"type": "disabled"}
 
 
-def test_the_answer_is_prefilled_with_an_opening_brace() -> None:
-    """The prompt asked for bare JSON; the model returned a markdown fence anyway."""
-    analyst, messages = client(Reply(content=[Block("text", ANSWER[1:])]))
+def test_the_conversation_ends_with_the_user_turn() -> None:
+    """No assistant prefill: this model refuses one outright.
+
+    Prefilling an opening brace would have been the tidier way to guarantee
+    JSON, and the provider answers "the conversation must end with a user
+    message" - so the fence is removed afterwards instead.
+    """
+    analyst, messages = client(Reply(content=[Block("text", ANSWER)]))
 
     analyst.rank(request())
     sent = messages.calls[0]["messages"]
 
-    assert [entry["role"] for entry in sent] == ["user", "assistant"]
+    assert [entry["role"] for entry in sent] == ["user"]
     assert sent[0]["content"] == "payload"
-    assert sent[1]["content"] == ANSWER_PREFILL == "{"
 
 
-def test_the_prefill_is_put_back_on_the_answer() -> None:
-    """The provider does not echo a prefill, so the client restores it."""
-    analyst, _ = client(Reply(content=[Block("text", ANSWER[1:])]))
+def test_a_fenced_answer_is_unwrapped() -> None:
+    """The prompt forbids a code fence and the model used one anyway."""
+    fenced = FENCE + "json" + chr(10) + ANSWER + chr(10) + FENCE
+    analyst, _ = client(Reply(content=[Block("text", fenced)]))
 
     response = analyst.rank(request())
 
@@ -116,8 +121,24 @@ def test_the_prefill_is_put_back_on_the_answer() -> None:
     assert json.loads(response.text)["bai_entry_candidate_ids"] == ["a" * 16]
 
 
+def test_a_bare_answer_is_left_exactly_alone() -> None:
+    analyst, _ = client(Reply(content=[Block("text", ANSWER)]))
+
+    assert analyst.rank(request()).text == ANSWER
+
+
+def test_unfencing_refuses_to_guess() -> None:
+    """Narrow on purpose: only a fence on both ends, with content between."""
+    from goldpipeline.adapters.anthropic_trade_analyst import _unfence
+
+    for untouched in (ANSWER, FENCE + "json" + FENCE, "not fenced " + FENCE):
+        assert _unfence(untouched) == untouched.strip()
+
+    assert _unfence(FENCE + chr(10) + ANSWER + chr(10) + FENCE) == ANSWER
+
+
 def test_the_system_and_the_ceiling_are_carried_through() -> None:
-    analyst, messages = client(Reply(content=[Block("text", ANSWER[1:])]))
+    analyst, messages = client(Reply(content=[Block("text", ANSWER)]))
 
     analyst.rank(request())
 
@@ -127,7 +148,7 @@ def test_the_system_and_the_ceiling_are_carried_through() -> None:
 
 
 def test_the_provider_and_model_are_reported() -> None:
-    analyst, _ = client(Reply(content=[Block("text", ANSWER[1:])], model="claude-sonnet-5"))
+    analyst, _ = client(Reply(content=[Block("text", ANSWER)], model="claude-sonnet-5"))
 
     response = analyst.rank(request())
 
@@ -184,12 +205,12 @@ def test_the_client_validates_nothing_about_the_ids() -> None:
     and is refused by ``parse_ranking`` - which is the only place that knows
     what a candidate is.
     """
-    nonsense = '"bai_entry_candidate_ids": ["deadbeefdeadbeef"]}'
+    nonsense = '{"bai_entry_candidate_ids": ["deadbeefdeadbeef"]}'
     analyst, _ = client(Reply(content=[Block("text", nonsense)]))
 
     response = analyst.rank(request())
 
-    assert response.text == "{" + nonsense
+    assert response.text == nonsense
 
 
 def test_no_credential_is_read_or_logged_by_this_module() -> None:

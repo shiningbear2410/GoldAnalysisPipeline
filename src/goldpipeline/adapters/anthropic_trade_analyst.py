@@ -17,11 +17,15 @@ not a problem extended thinking helps with, and on a set this size it consumed
 the entire budget before reaching the JSON. Thinking is therefore switched off,
 and the same call then finished in 37 seconds using 1,919 output tokens.
 
-The second is a prefilled ``{``. The prompt asks for bare JSON and the model
-wrapped it in a markdown fence anyway; prefilling the opening brace makes the
-answer JSON by construction, the way the writer's schema does for an article.
-Both are transport-level: they shape what is generated, and every id in the
-result is still checked against the deterministic candidate set afterwards.
+The second is unfencing. The prompt asks for bare JSON and on a payload this
+size the model wrapped it in a ```` ```json ```` block anyway. Prefilling an
+opening brace would have been the tidier answer and this model refuses one -
+"the conversation must end with a user message" - so the fence is removed here
+instead, in the transport, and only when the text is unambiguously fenced.
+
+Both are transport-level, and neither touches the validator: unwrapping a fence
+is the same kind of act as joining two text blocks, and every id in the result
+is still checked against the deterministic candidate set afterwards.
 
 **Same transport, same error map.** Built through
 :mod:`~goldpipeline.adapters.anthropic_errors` like the writer and the finalizer,
@@ -56,13 +60,12 @@ logger = logging.getLogger(__name__)
 
 ANTHROPIC_PROVIDER = "anthropic"
 
-ANSWER_PREFILL = "{"
-"""The opening brace of the ranking, put into the model's mouth.
+FENCE = "```"
+"""What a model wraps JSON in when it is being helpful.
 
-A one-character assistant turn. It cannot change which ids come back - the
-validator still checks every one against the deterministic set - and it
-removes the one failure the prompt could not: a correct answer wrapped in a
-markdown fence, which is not JSON.
+The prompt forbids it and the model did it anyway on a 238,000-token payload.
+Removing it is a transport concern: the bytes inside are the answer, and every
+id in them still has to survive the domain validator unchanged.
 """
 
 ANALYST_ERRORS = AnthropicErrorMap(
@@ -117,9 +120,7 @@ class AnthropicTradeAnalystClient:
         response = self._call(request)
         check_stop_reason(response, response_error=WriterResponseError)
         return TradeAnalystResponse(
-            # The prefill is part of the answer and the provider does not echo
-            # it, so it is put back before anything tries to parse the JSON.
-            text=ANSWER_PREFILL + _text_of(response),
+            text=_unfence(_text_of(response)),
             model=getattr(response, "model", self._settings.model) or self._settings.model,
             provider=self.provider,
         )
@@ -132,12 +133,10 @@ class AnthropicTradeAnalystClient:
                 model=self._settings.model,
                 max_tokens=request.max_tokens,
                 system=request.system,
-                messages=[
-                    {"role": "user", "content": request.user},
-                    # Prefill. The answer continues from here, so it is JSON by
-                    # construction rather than by the model's good manners.
-                    {"role": "assistant", "content": ANSWER_PREFILL},
-                ],
+                messages=[{"role": "user", "content": request.user}],
+                # Ordering a list is not a problem extended thinking helps with,
+                # and on 130 candidates it consumed the entire output budget
+                # before reaching the answer.
                 thinking={"type": "disabled"},
             )
         except anthropic.AnthropicError as exc:
@@ -174,6 +173,31 @@ def _text_of(response: Any) -> str:
     return joined
 
 
+def _unfence(text: str) -> str:
+    """Strip a markdown code fence, and only an unambiguous one.
+
+    Deliberately narrow. It removes an opening ```` ``` ```` line - with or
+    without a language tag - and a matching closing one, and does nothing at all
+    to text that is not fenced on both ends. Anything cleverer would be guessing
+    at what the model meant, which is the domain validator's business and not
+    this module's.
+    """
+    stripped = text.strip()
+    if not stripped.startswith(FENCE) or not stripped.endswith(FENCE):
+        return stripped
+
+    body = stripped[len(FENCE) : -len(FENCE)]
+    opening, newline, rest = body.partition("\n")
+    if not newline:
+        # ```json``` on one line is not a fenced block with content in it.
+        return stripped
+    if opening.strip() and not opening.strip().isalnum():
+        # An opening line that is not a bare language tag means the fence is
+        # not the shape this handles.
+        return stripped
+    return rest.strip()
+
+
 def _build_sdk_client(settings: WriterSettings) -> Any:
     return build_sdk_client(
         api_key=settings.api_key,
@@ -185,7 +209,7 @@ def _build_sdk_client(settings: WriterSettings) -> Any:
 
 __all__ = [
     "ANALYST_ERRORS",
-    "ANSWER_PREFILL",
+    "FENCE",
     "ANTHROPIC_PROVIDER",
     "AnthropicTradeAnalystClient",
 ]
