@@ -259,17 +259,28 @@ class TestRoutingConsistency:
         assert PLAN.generation_mode is GenerationMode.DETERMINISTIC
         assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 
-    def test_readiness_matches_the_prompts_that_exist(self) -> None:
-        """A type is ready exactly when something can write it.
+    def test_readiness_matches_how_each_type_is_actually_produced(self) -> None:
+        """A type is ready exactly when something can produce it.
 
-        Round 6.5b gave NEWS_DIGEST its own prompt and turned it on. TRADE_PLAN
-        still has neither, and a readiness flag that ran ahead of a prompt is
-        the failure this assertion exists to catch.
+        This used to read "ready exactly when a *prompt* exists", which was the
+        right rule while every product was written by a model. Round 6.6h added
+        one that is rendered instead, so the rule is now the more general form
+        it always meant: an LLM type is ready with a prompt, a DETERMINISTIC one
+        is ready without. A readiness flag ahead of *either* is still the defect.
         """
-        assert {ArticleType.ANALYSIS, ArticleType.NEWS_DIGEST} == READY_TYPES
-        assert SPECS[ArticleType.NEWS_DIGEST].prompt_id is not None
-        assert SPECS[ArticleType.TRADE_PLAN].ready is False
+        assert {
+            ArticleType.ANALYSIS,
+            ArticleType.NEWS_DIGEST,
+            ArticleType.TRADE_PLAN,
+        } == READY_TYPES
+
+        for kind in READY_TYPES:
+            has_prompt = SPECS[kind].prompt_id is not None
+            written_by_model = contract_for(kind).generation_mode is GenerationMode.LLM
+            assert has_prompt is written_by_model, kind
+
         assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
+        assert PLAN.generation_mode is GenerationMode.DETERMINISTIC
 
     def test_only_the_analysis_contract_wires_the_checks_into_production(self) -> None:
         """Round 6.4e connected these, and only through one seam.

@@ -260,19 +260,31 @@ def test_the_structure_module_reads_only_candles_and_swings() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_trade_plan_is_still_not_a_product() -> None:
-    from goldpipeline.domain.errors import ArticleTypeNotReadyError
+def test_trade_plan_is_live_and_still_publishes_nothing() -> None:
+    """Round 6.6h activated it. What must stay true is everything *else*.
+
+    Ready and dispatchable, and at the same time: no writer prompt, no style
+    pass, no repair path, and no automatic publication. Activation was about
+    letting a deterministic document reach a human, not about letting anything
+    reach a channel.
+    """
     from goldpipeline.schemas.article import ArticleType
     from goldpipeline.services.article_routing import SPECS
-    from goldpipeline.services.article_runtime import is_dispatchable, runtime_for
+    from goldpipeline.services.article_runtime import (
+        RUNTIMES,
+        RevisionRuntime,
+        WriteRuntime,
+        is_dispatchable,
+        runtime_for,
+    )
     from goldpipeline.services.review_action import STYLE_ACTIVE_TYPES
 
-    assert SPECS[ArticleType.TRADE_PLAN].ready is False
+    assert SPECS[ArticleType.TRADE_PLAN].ready is True
     assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
-    assert is_dispatchable(ArticleType.TRADE_PLAN) is False
+    assert is_dispatchable(ArticleType.TRADE_PLAN) is True
+    assert runtime_for(ArticleType.TRADE_PLAN).write is WriteRuntime.TRADE_PLAN
+    assert RUNTIMES[ArticleType.TRADE_PLAN].revise is RevisionRuntime.NONE
     assert ArticleType.TRADE_PLAN not in STYLE_ACTIVE_TYPES
-    with pytest.raises(ArticleTypeNotReadyError):
-        runtime_for(ArticleType.TRADE_PLAN)
 
 
 ICT_BRANCH = {
@@ -290,20 +302,39 @@ ICT_BRANCH = {
     "ict_candidate_eligibility.py",
     "ict_candidate_consolidation.py",
     "ict_candidate_features.py",
-    # The dormant Trade Analyst, which is part of the same TRADE_PLAN branch
-    # even though its names do not start with "ict_": the domain service, the
-    # provider protocol it is injected through, and the offline fakes.
+    # The Trade Analyst, part of the same TRADE_PLAN branch even though its
+    # names do not start with "ict_": the domain service, the provider protocol
+    # it is injected through, the offline fakes, and the live Anthropic client.
     "trade_analyst.py",
     "trade_analyst_client.py",
     "fake_trade_analyst.py",
+    "anthropic_trade_analyst.py",
     # The deterministic end of the branch: selection and the public renderer.
     "trade_plan_selector.py",
     "trade_plan_render.py",
+    # Round 6.6h: the production wiring. Live candles at one instant, the
+    # versioned policy, the run stage and its gate.
+    "mtf_market.py",
+    "trade_plan_policy.py",
+    "trade_plan_stage.py",
+    "trade_plan_gate.py",
 }
 """Modules of the TRADE_PLAN branch, which are allowed to know about each other.
 
 The registry every round's reachability guard reads, so adding a branch module
 means adding it here once rather than relaxing a guard somewhere.
+"""
+
+DISPATCH_SEAM = {"orchestrator.py", "article_runtime.py", "cli.py"}
+"""The three files outside the branch that Round 6.6h let learn about it.
+
+Until this round the branch was unreachable from anything a product ran, and
+every guard below said so. Activation needed a seam, and it is exactly three
+files wide: ``article_runtime`` names the runtime, ``orchestrator`` dispatches
+to the stage and its gate, and ``cli`` constructs the market source and the
+ranking client the way it constructs every other client. Enumerating them keeps
+the guards precise - "nothing reaches this branch except the seam we chose" is a
+much stronger statement than relaxing the rule, and a fourth caller still fails.
 """
 
 
@@ -320,22 +351,31 @@ def test_no_structure_code_is_reachable_from_the_shipped_products() -> None:
     itself; nothing outside it may reference the branch at all, which is what
     keeps ANALYSIS and NEWS_DIGEST provably untouched by any of this.
     """
+    from tests.test_ict_structure_guards import DISPATCH_SEAM
+
+    reachable = ICT_BRANCH | DISPATCH_SEAM
     root = Path("src/goldpipeline")
     callers = [
         path
         for path in root.rglob("*.py")
-        if "ict_structure" in path.read_text(encoding="utf-8") and path.name not in ICT_BRANCH
+        if "ict_structure" in path.read_text(encoding="utf-8") and path.name not in reachable
     ]
 
     assert callers == []
 
 
 def test_nothing_outside_the_ict_branch_mentions_any_of_it() -> None:
-    """The stronger statement, and the one that actually protects the products."""
+    """The stronger statement, and the one that actually protects the products.
+
+    Until Round 6.6h this was "nobody outside the branch mentions it at all".
+    Activation had to make one seam, so it is now "nobody except the two files
+    that dispatch it" - and those two are enumerated in :data:`DISPATCH_SEAM`
+    rather than the rule being loosened, so a third caller still fails here.
+    """
     root = Path("src/goldpipeline")
     offenders: list[str] = []
     for path in root.rglob("*.py"):
-        if path.name in ICT_BRANCH:
+        if path.name in ICT_BRANCH | DISPATCH_SEAM:
             continue
         text = path.read_text(encoding="utf-8")
         for module in (
@@ -352,11 +392,65 @@ def test_nothing_outside_the_ict_branch_mentions_any_of_it() -> None:
             "ict_candidate_eligibility",
             "ict_candidate_consolidation",
             "ict_candidate_features",
+            "trade_plan_selector",
+            "trade_plan_render",
+            "trade_plan_policy",
+            "trade_plan_stage",
+            "trade_plan_gate",
+            "mtf_market",
         ):
             if module in text:
                 offenders.append(f"{path.name} -> {module}")
 
     assert offenders == []
+
+
+def test_the_dispatch_seam_is_exactly_two_files_and_no_more() -> None:
+    """§48. What the seam is allowed to be, checked rather than described.
+
+    The orchestrator may name the stage and the gate; the runtime table may name
+    the runtime. Neither may reach into an ICT engine directly - a shortcut past
+    the composite would put a market rule back inside the pipeline.
+    """
+    root = Path("src/goldpipeline")
+
+    orchestrator = (root / "services" / "orchestrator.py").read_text(encoding="utf-8")
+    assert "trade_plan_stage" in orchestrator
+    assert "trade_plan_gate" in orchestrator
+    for forbidden in (
+        "ict_composite",
+        "ict_candidate_source",
+        "ict_candidate_eligibility",
+        "ict_candidate_consolidation",
+        "ict_candidate_features",
+        "trade_plan_selector",
+        "trade_plan_render",
+        "mtf_market",
+    ):
+        assert forbidden not in orchestrator, forbidden
+
+    runtime = (root / "services" / "article_runtime.py").read_text(encoding="utf-8")
+    assert "trade_plan_stage" in runtime
+    for forbidden in ("ict_", "mtf_market", "trade_plan_gate"):
+        assert forbidden not in runtime, forbidden
+
+    # The CLI builds clients and nothing else. It may name the market source,
+    # the analyst client and the policy those two are configured from; it may
+    # not reach an ICT engine, the selector, the renderer or the stage - each of
+    # which would be the pipeline being assembled at a command line.
+    cli = (root / "cli.py").read_text(encoding="utf-8")
+    assert "mtf_market" in cli
+    assert "trade_plan_policy" in cli
+    assert "anthropic_trade_analyst" in cli
+    for forbidden in (
+        "ict_composite",
+        "ict_candidate_features",
+        "trade_plan_selector",
+        "trade_plan_render",
+        "trade_plan_stage",
+        "trade_plan_gate",
+    ):
+        assert forbidden not in cli, forbidden
 
 
 def test_the_two_shipped_products_are_untouched() -> None:

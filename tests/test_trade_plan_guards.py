@@ -470,13 +470,19 @@ def test_the_branch_registry_knows_about_both_new_modules() -> None:
 
 def test_nothing_outside_the_dormant_branch_calls_either_stage() -> None:
     """§36. Still dormant: no runtime, no scheduler, no CLI reaches these."""
-    from tests.test_ict_structure_guards import ICT_BRANCH
+    from tests.test_ict_structure_guards import DISPATCH_SEAM, ICT_BRANCH
+
+    # Round 6.6h activated TRADE_PLAN, so the branch is reachable from
+    # exactly two files: the orchestrator that dispatches it and the
+    # runtime table that tells it to. Both are named, so "only the
+    # dispatch we chose" stays a stronger claim than "nobody at all".
+    REACHABLE = ICT_BRANCH | DISPATCH_SEAM
 
     root = Path("src/goldpipeline")
     offenders = [
         path.relative_to(root).as_posix()
         for path in root.rglob("*.py")
-        if path.name not in ICT_BRANCH
+        if path.name not in REACHABLE
         and any(
             module in path.read_text(encoding="utf-8")
             for module in ("trade_plan_selector", "trade_plan_render")
@@ -486,26 +492,31 @@ def test_nothing_outside_the_dormant_branch_calls_either_stage() -> None:
     assert offenders == []
 
 
-def test_trade_plan_is_still_not_a_product() -> None:
-    """§36. The renderer exists; dispatch does not."""
-    from goldpipeline.domain.errors import ArticleTypeNotReadyError
+def test_trade_plan_is_live_and_still_publishes_nothing() -> None:
+    """Round 6.6h activated it. What must stay true is everything *else*.
+
+    Ready and dispatchable, and at the same time: no writer prompt, no style
+    pass, no repair path, and no automatic publication. Activation was about
+    letting a deterministic document reach a human, not about letting anything
+    reach a channel.
+    """
     from goldpipeline.schemas.article import ArticleType
     from goldpipeline.services.article_routing import SPECS
     from goldpipeline.services.article_runtime import (
         RUNTIMES,
         RevisionRuntime,
+        WriteRuntime,
         is_dispatchable,
         runtime_for,
     )
     from goldpipeline.services.review_action import STYLE_ACTIVE_TYPES
 
-    assert SPECS[ArticleType.TRADE_PLAN].ready is False
+    assert SPECS[ArticleType.TRADE_PLAN].ready is True
     assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
-    assert is_dispatchable(ArticleType.TRADE_PLAN) is False
+    assert is_dispatchable(ArticleType.TRADE_PLAN) is True
+    assert runtime_for(ArticleType.TRADE_PLAN).write is WriteRuntime.TRADE_PLAN
     assert RUNTIMES[ArticleType.TRADE_PLAN].revise is RevisionRuntime.NONE
     assert ArticleType.TRADE_PLAN not in STYLE_ACTIVE_TYPES
-    with pytest.raises(ArticleTypeNotReadyError):
-        runtime_for(ArticleType.TRADE_PLAN)
 
 
 def test_the_two_shipped_products_are_untouched() -> None:

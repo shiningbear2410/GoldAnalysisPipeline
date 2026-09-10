@@ -987,11 +987,16 @@ class TestProductionUnchanged:
         from goldpipeline.schemas.article import ArticleType
         from goldpipeline.services.article_routing import READY_TYPES, SPECS
 
-        assert {ArticleType.ANALYSIS, ArticleType.NEWS_DIGEST} == READY_TYPES
-        # NEWS_DIGEST was activated by Round 6.5b, with its own writer.
+        # Each type was activated by the round that built it - 6.5b for the
+        # digest, 6.6h for the trade plan - and never by a market-data round.
+        assert {
+            ArticleType.ANALYSIS,
+            ArticleType.NEWS_DIGEST,
+            ArticleType.TRADE_PLAN,
+        } == READY_TYPES
         assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == DEFAULT_DIGEST_WRITER_PROMPT
         assert DEFAULT_DIGEST_WRITER_PROMPT.startswith("gold_news_digest_writer_")
-        assert SPECS[ArticleType.TRADE_PLAN].ready is False
+        assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 
     def test_the_mt5_provider_name_is_untouched(self) -> None:
         from goldpipeline.adapters.mt5_market import PROVIDER_NAME as MT5_PROVIDER

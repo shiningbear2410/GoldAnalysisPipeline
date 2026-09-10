@@ -43,6 +43,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from goldpipeline.adapters.base import AnalysisSource, MarketDataSource
 from goldpipeline.adapters.digest_finalizer_client import (
@@ -53,6 +54,7 @@ from goldpipeline.adapters.digest_writer_client import DigestWriterClient
 from goldpipeline.adapters.finalizer_client import FinalizerClient, LazyFinalizerClient
 from goldpipeline.adapters.publisher_client import PublisherClient
 from goldpipeline.adapters.reviewer_client import ReviewerClient
+from goldpipeline.adapters.trade_analyst_client import TradeAnalystClient
 from goldpipeline.adapters.writer_client import WriterClient
 from goldpipeline.domain.errors import (
     ArticleTypeNotReadyError,
@@ -80,10 +82,12 @@ from goldpipeline.services.article_runtime import WriteRuntime, runtime_for
 from goldpipeline.services.digest_stage import DigestMarketSource
 from goldpipeline.services.finalizer import finalize_run, load_verified_inputs
 from goldpipeline.services.pipeline import create_run
-from goldpipeline.services.publish_gate import gate_publish
+from goldpipeline.services.publish_gate import DECISION_FILENAME, GateResult, gate_publish
 from goldpipeline.services.publisher import publish_run
 from goldpipeline.services.reviewer import review_draft
 from goldpipeline.services.run_lock import RunLock
+from goldpipeline.services.trade_plan_gate import gate_trade_plan
+from goldpipeline.services.trade_plan_stage import write_trade_plan
 from goldpipeline.services.writer import write_digest_draft, write_draft
 from goldpipeline.storage.run_store import RunStore
 
@@ -191,6 +195,32 @@ class PipelineClients:
     produces a revised article, the other revised editorial content. Round
     6.5c.3 made a digest repairable, and a single factory would have had to
     guess which product it was building for.
+    """
+
+    trade_plan_market: Callable[[], Any] | None = None
+    """Fetches five timeframes at one instant, for a trade plan and nothing else.
+
+    A callable rather than a source because building one opens no socket and
+    calling one opens five: a tick with no new trade plan must never reach a
+    market feed, and a Run that is not due for this stage never calls it.
+    """
+
+    trade_plan_analyst: Callable[[GenerationSelection | None], TradeAnalystClient] | None = None
+    """The ranking client. Takes the Run's frozen selection like the other two.
+
+    Separate from ``writer`` because it returns a different protocol: one
+    produces an article, this one produces an ordering of ids and has nowhere to
+    put prose.
+    """
+
+    trade_plan_news: Callable[[], Any] | None = None
+    """Optional untrusted context for the analyst.
+
+    ``None`` is the production default and a legitimate one. The scheduled
+    worker has never collected news - that path belongs to the producer - and
+    adding a live fetch to a tick would be building a second news engine, which
+    is exactly what Round 6.6h was told not to do. The seam exists so the
+    already-curated object can be threaded the day it is available.
     """
 
     digest_market: DigestMarketSource | None = None
@@ -490,11 +520,20 @@ def _run_write(
     article_type = _article_type_of(store, execution.run_id)
     try:
         runtime = runtime_for(article_type)
-        prompt_id = writer_prompt_for(article_type)
+        # Resolved only for the runtimes that send a prompt to a model. A trade
+        # plan has no writer prompt and never will, so asking for one would be
+        # asking which words a document with no author was written from.
+        prompt_id = (
+            None if runtime.write is WriteRuntime.TRADE_PLAN else writer_prompt_for(article_type)
+        )
     except ArticleTypeNotReadyError as exc:
         execution.record(PipelineStage.WRITE, started, StageOutcome.FAILED)
         return _fail(store, execution, PipelineStage.WRITE, exc)
 
+    if runtime.write is WriteRuntime.TRADE_PLAN:
+        return _run_trade_plan(store, clients, execution, started)
+
+    assert prompt_id is not None
     if runtime.write is WriteRuntime.NEWS_DIGEST:
         # Round 6.5c.2 replaced a fail-closed guard here with the real thing.
         # The guard existed because `write_draft` parses an article and the
@@ -533,6 +572,49 @@ def _run_write(
         execution.run_id,
         PipelineEvent.WRITER_COMPLETED,
         f"{result.result.article_chars} chars",
+    )
+    return None
+
+
+def _run_trade_plan(
+    store: RunStore,
+    clients: PipelineClients,
+    execution: _Execution,
+    started: datetime,
+) -> PipelineRunResult | None:
+    """The deterministic branch: five timeframes, one ranking, one rendered page.
+
+    It occupies the write stage's slot and leaves the Run ``FINALIZED``, so the
+    loop's next step is the gate. ``DRAFTED`` and ``REVIEWED`` are skipped
+    because no draft and no review happened - writing either would put a claim
+    in the manifest that no artifact supports.
+    """
+    result = write_trade_plan(
+        run_id=execution.run_id,
+        store=store,
+        observe=_require(clients.trade_plan_market, "trade plan market"),
+        analyst=_require(clients.trade_plan_analyst, "trade plan analyst")(
+            _generation_of(store, execution.run_id)
+        ),
+        news=clients.trade_plan_news() if clients.trade_plan_news is not None else None,
+    )
+
+    if not result.succeeded:
+        assert result.error is not None
+        execution.record(PipelineStage.WRITE, started, StageOutcome.FAILED)
+        return _fail(store, execution, PipelineStage.WRITE, result.error)
+
+    execution.record(
+        PipelineStage.WRITE,
+        started,
+        StageOutcome.COMPLETED,
+        f"TRADE_PLAN {result.plan_chars} chars",
+    )
+    _record_event(
+        store,
+        execution.run_id,
+        PipelineEvent.WRITER_COMPLETED,
+        f"trade plan: {result.selected_count} zone(s), {result.plan_chars} chars",
     )
     return None
 
@@ -630,7 +712,22 @@ def _run_gate(
     now: datetime | None,
 ) -> PipelineRunResult | None:
     started = utc_now()
-    result = gate_publish(run_id=execution.run_id, store=store, now=now)
+
+    # Two gates, chosen by what the Run actually is. The analysis gate asks
+    # whether a model's article survived review and repair; a trade plan had
+    # neither, and running that gate over it would block on the absence of
+    # artifacts it was right not to produce.
+    if runtime_for(_article_type_of(store, execution.run_id)).write is WriteRuntime.TRADE_PLAN:
+        decision = gate_trade_plan(run_id=execution.run_id, store=store, now=now)
+        result = GateResult(
+            run_id=execution.run_id,
+            run_dir=execution.run_dir,
+            status=(RunStatus.READY_TO_PUBLISH if decision.approved else RunStatus.PUBLISH_BLOCKED),
+            decision=decision,
+            decision_path=store.open(execution.run_id).artifact_path(DECISION_FILENAME),
+        )
+    else:
+        result = gate_publish(run_id=execution.run_id, store=store, now=now)
     decision = result.decision
     execution.publish_decision = decision.decision
 

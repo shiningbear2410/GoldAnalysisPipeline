@@ -429,11 +429,19 @@ class TestHistoricalContinuity:
 
 class TestBoundary:
     def test_downstream_stages_never_import_the_provider(self) -> None:
+        """Only the adapter layer and its one composer may name the vendor.
+
+        ``mtf_market.py`` joined the list in Round 6.6h. It is an adapter, not a
+        stage: it composes five single-timeframe TradingView sources so that all
+        five share one observation instant, and everything downstream of it
+        receives an ``IctMarketSnapshot`` that names no provider module.
+        """
         allowed = {
             "cli.py",
             "tradingview_market.py",
             "tradingview_protocol.py",
             "fake_tradingview.py",
+            "mtf_market.py",
         }
         for path in SRC.rglob("*.py"):
             if path.name in allowed:
@@ -487,12 +495,18 @@ class TestArticleBehaviourUnchanged:
         from goldpipeline.schemas.article import ArticleType
         from goldpipeline.services.article_routing import READY_TYPES, SPECS
 
-        assert {ArticleType.ANALYSIS, ArticleType.NEWS_DIGEST} == READY_TYPES
-        # NEWS_DIGEST was activated by Round 6.5b, with its own writer.
-        # What a market-data round must never do is activate anything.
+        # Each type was activated by the round that built it - 6.5b for the
+        # digest, 6.6h for the trade plan. What a market-data round must
+        # never do is activate anything, so what is pinned here is that the
+        # writers are unchanged and the rendered type still has none.
+        assert {
+            ArticleType.ANALYSIS,
+            ArticleType.NEWS_DIGEST,
+            ArticleType.TRADE_PLAN,
+        } == READY_TYPES
         assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == DEFAULT_DIGEST_WRITER_PROMPT
         assert DEFAULT_DIGEST_WRITER_PROMPT.startswith("gold_news_digest_writer_")
-        assert SPECS[ArticleType.TRADE_PLAN].ready is False
+        assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 
     def test_the_analysis_writer_prompt_is_the_current_version(self) -> None:
         from goldpipeline.prompts import DEFAULT_WRITER_PROMPT

@@ -716,16 +716,22 @@ def test_28_an_analysis_run_is_untouched_by_any_of_this(tmp_path: Path, runs_dir
     assert not run.has_artifact(DIGEST_EDITORIAL_FILENAME)
 
 
-def test_29_trade_plan_is_still_refused_by_production_dispatch() -> None:
-    from goldpipeline.domain.errors import ArticleTypeNotReadyError
-    from goldpipeline.services.article_runtime import is_dispatchable, runtime_for
+def test_29_all_three_types_are_dispatchable_by_their_own_runtimes() -> None:
+    """Round 6.6h. Three products, three runtimes, and no shared writer.
+
+    The point this test made while TRADE_PLAN was refused was that dispatch had
+    to be per-type rather than a fallback to ANALYSIS. Activation is the proof:
+    each type names its own runtime and none of them borrows another's.
+    """
+    from goldpipeline.services.article_runtime import WriteRuntime, is_dispatchable, runtime_for
 
     assert is_dispatchable(ArticleType.ANALYSIS) is True
     assert is_dispatchable(ArticleType.NEWS_DIGEST) is True
-    assert is_dispatchable(ArticleType.TRADE_PLAN) is False
+    assert is_dispatchable(ArticleType.TRADE_PLAN) is True
 
-    with pytest.raises(ArticleTypeNotReadyError):
-        runtime_for(ArticleType.TRADE_PLAN)
+    assert runtime_for(ArticleType.ANALYSIS).write is WriteRuntime.ANALYSIS
+    assert runtime_for(ArticleType.NEWS_DIGEST).write is WriteRuntime.NEWS_DIGEST
+    assert runtime_for(ArticleType.TRADE_PLAN).write is WriteRuntime.TRADE_PLAN
 
 
 def test_news_digest_style_activation_is_on_and_trade_plan_is_not() -> None:

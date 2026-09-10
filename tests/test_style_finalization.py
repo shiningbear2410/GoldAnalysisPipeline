@@ -1149,7 +1149,9 @@ def test_readiness_is_unchanged() -> None:
 
     assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == DEFAULT_DIGEST_WRITER_PROMPT
     assert DEFAULT_DIGEST_WRITER_PROMPT.startswith("gold_news_digest_writer_")
-    assert SPECS[ArticleType.TRADE_PLAN].ready is False
+    # Round 6.6h activated TRADE_PLAN, and it still has no writer prompt -
+    # which is what a style round must never change.
+    assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 
 
 # --------------------------------------------------------------------------

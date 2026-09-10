@@ -21,7 +21,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from goldpipeline.domain.errors import ArticleTypeNotReadyError
+from goldpipeline.domain.errors import (
+    ArticleTypeNotReadyError,
+    WriterPromptUnavailableError,
+)
 from goldpipeline.prompts import DEFAULT_DIGEST_WRITER_PROMPT, DEFAULT_WRITER_PROMPT
 from goldpipeline.schemas.article import ArticleType
 
@@ -57,12 +60,9 @@ SPECS: dict[ArticleType, ArticleTypeSpec] = {
     ),
     ArticleType.TRADE_PLAN: ArticleTypeSpec(
         article_type=ArticleType.TRADE_PLAN,
-        ready=False,
+        ready=True,
         prompt_id=None,
-        requires=(
-            "a deterministic engine for entry, invalidation and targets. "
-            "context.levels holds candidate technical zones, which is not a trade plan"
-        ),
+        requires="",
     ),
     ArticleType.NEWS_DIGEST: ArticleTypeSpec(
         article_type=ArticleType.NEWS_DIGEST,
@@ -97,7 +97,7 @@ def require_ready(article_type: ArticleType) -> ArticleTypeSpec:
             whole point of refusing is that somebody notices.
     """
     spec = spec_for(article_type)
-    if not spec.ready or spec.prompt_id is None:
+    if not spec.ready:
         raise ArticleTypeNotReadyError(
             f"article type {article_type} is not implemented yet; it requires {spec.requires}",
             article_type=str(article_type),
@@ -106,9 +106,23 @@ def require_ready(article_type: ArticleType) -> ArticleTypeSpec:
 
 
 def writer_prompt_for(article_type: ArticleType) -> str:
-    """The prompt id for a runnable article type."""
+    """The prompt id for an article type that a model writes.
+
+    Until Round 6.6h every ready type had a prompt, so readiness could carry
+    both facts at once. ``TRADE_PLAN`` is now ready *and* prompt-less, and
+    conflating the two would mean either refusing to run a producible type or -
+    far worse - answering with some other product's prompt.
+
+    Raises:
+        ArticleTypeNotReadyError: Nothing can produce this type.
+        WriterPromptUnavailableError: Something can, and it is not a model.
+    """
     spec = require_ready(article_type)
-    assert spec.prompt_id is not None  # noqa: S101 - guaranteed by require_ready
+    if spec.prompt_id is None:
+        raise WriterPromptUnavailableError(
+            f"article type {article_type} is rendered deterministically and has no writer prompt",
+            article_type=str(article_type),
+        )
     return spec.prompt_id
 
 

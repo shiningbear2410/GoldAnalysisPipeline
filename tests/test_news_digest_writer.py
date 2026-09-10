@@ -776,8 +776,9 @@ def test_analysis_still_routes_to_its_own_prompt() -> None:
     assert SPECS[ArticleType.ANALYSIS].ready is True
 
 
-def test_trade_plan_is_still_not_ready() -> None:
-    assert SPECS[ArticleType.TRADE_PLAN].ready is False
+def test_trade_plan_is_ready_and_still_has_no_prompt() -> None:
+    """Round 6.6h. Producible, and still with no writer prompt of its own."""
+    assert SPECS[ArticleType.TRADE_PLAN].ready is True
     assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 
 

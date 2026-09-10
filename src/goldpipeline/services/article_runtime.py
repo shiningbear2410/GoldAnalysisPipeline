@@ -47,6 +47,17 @@ class WriteRuntime(StrEnum):
     NEWS_DIGEST = "NEWS_DIGEST"
     """`services.digest_stage`: snapshot, editorial call, deterministic render."""
 
+    TRADE_PLAN = "TRADE_PLAN"
+    """`services.trade_plan_stage`: five timeframes, a ranking call, and a page
+    composed entirely by code.
+
+    Named a *write* runtime because it occupies the write stage's slot, not
+    because anything writes prose. It is the only runtime that leaves a Run
+    ``FINALIZED`` rather than ``DRAFTED``: there is no draft to review and no
+    revision to make, and recording either would be a false claim about what the
+    Run did.
+    """
+
 
 class RevisionRuntime(StrEnum):
     """Which repair implementation a Run uses when a review asks for one."""
@@ -106,17 +117,17 @@ RUNTIMES: Mapping[ArticleType, ArticleRuntime] = {
         revise=RevisionRuntime.NEWS_DIGEST,
     ),
     ArticleType.TRADE_PLAN: ArticleRuntime(
-        write=WriteRuntime.ANALYSIS,
-        dispatchable=False,
+        write=WriteRuntime.TRADE_PLAN,
+        dispatchable=True,
         revise=RevisionRuntime.NONE,
     ),
 }
 """Every article type, and what the pipeline can do with it.
 
-``TRADE_PLAN`` names a write runtime it will never use - the field is not
-optional, and ``dispatchable=False`` is what actually governs. A rendered trade
-plan has no writer at all; when it arrives it will bring its own runtime and
-this row changes with it.
+``TRADE_PLAN`` arrived in Round 6.6h with its own runtime, and its ``revise``
+stays ``NONE`` for a reason that will not change: there is nothing to repair.
+The document is rendered from deterministic selection, so a "revision" could
+only mean editing prices a model never chose in the first place.
 """
 
 

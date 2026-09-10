@@ -381,5 +381,9 @@ class TestNewsDigestStillNotReady:
         # Coverage accounting is not the same as being able to publish a
         # digest. The type was activated later, by the round that wrote the
         # digest writer - never as a side effect of coverage work.
-        assert spec_for(ArticleType.TRADE_PLAN).ready is False
-        assert ArticleType.TRADE_PLAN not in READY_TYPES
+        # The type was activated later, by the round that built its own
+        # producer - 6.6h for the trade plan - and never as a side effect
+        # of news work. What that leaves pinned here is that this module
+        # gave it no writer, which it still has none of.
+        assert ArticleType.TRADE_PLAN in READY_TYPES
+        assert spec_for(ArticleType.TRADE_PLAN).prompt_id is None

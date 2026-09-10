@@ -265,17 +265,42 @@ def test_any_article_type_may_be_stored(article_type: ArticleType, store: Prefer
 
 @pytest.mark.parametrize("article_type", [ArticleType.TRADE_PLAN])
 def test_storing_an_unfinished_type_does_not_make_it_ready(
-    article_type: ArticleType, store: PreferencesStore
+    article_type: ArticleType, store: PreferencesStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A preference records a wish. Readiness is a fact about the code."""
+    """A preference records a wish. Readiness is a fact about the code.
+
+    Every type is finished as of Round 6.6h, so the unfinished one is made up
+    here. The property under test never belonged to a particular type: it is
+    that a stored preference cannot make anything ready, and the day there is no
+    unfinished type left is the day that check would silently stop running.
+    """
+    from dataclasses import replace
+
+    monkeypatch.setitem(
+        SPECS,
+        article_type,
+        replace(SPECS[article_type], ready=False, requires="an engine this test invented"),
+    )
+
     store.set_article_type(article_type)
     status = store.status()
 
     assert status.article_type is article_type
     assert status.article_type_ready is False
     assert status.article_type_requires
-    assert SPECS[article_type].ready is False
     assert status.generation_ready is False
+
+
+@pytest.mark.parametrize("article_type", list(ArticleType))
+def test_every_type_is_ready_and_a_preference_still_decides_nothing(
+    article_type: ArticleType, store: PreferencesStore
+) -> None:
+    """The post-activation half: storing a type reports the table's answer."""
+    store.set_article_type(article_type)
+    status = store.status()
+
+    assert status.article_type is article_type
+    assert status.article_type_ready is SPECS[article_type].ready is True
 
 
 def test_readiness_is_read_from_routing_not_stored(store: PreferencesStore) -> None:

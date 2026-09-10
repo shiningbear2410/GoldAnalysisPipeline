@@ -1003,7 +1003,8 @@ def test_news_digest_became_ready_with_its_own_prompt() -> None:
     assert SPECS[ArticleType.NEWS_DIGEST].ready is True
     assert SPECS[ArticleType.NEWS_DIGEST].prompt_id == DEFAULT_DIGEST_WRITER_PROMPT
     assert DEFAULT_DIGEST_WRITER_PROMPT.startswith("gold_news_digest_writer_")
-    assert SPECS[ArticleType.TRADE_PLAN].ready is False
+    # TRADE_PLAN was activated later still, by Round 6.6h, and with no
+    # prompt of its own - never as a side effect of the digest.
     assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 
 

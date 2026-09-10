@@ -463,17 +463,22 @@ class TestOtherStagesUnchanged:
         assert "chars_before" not in fields
         assert "chars_after" not in fields
 
-    def test_trade_plan_is_still_not_ready(self) -> None:
-        """NEWS_DIGEST became producible in Round 6.5b; TRADE_PLAN has not.
+    def test_trade_plan_is_ready_and_still_has_no_prompt(self) -> None:
+        """Round 6.6h activated it, and it borrowed nobody's prompt to do so.
 
-        What this test protects is that activating one article type did not
-        quietly activate the other - a deterministic document has no writer at
-        all, and a prompt that borrowed the digest's would be a real defect.
+        What this test protected before activation was that turning one article
+        type on did not turn another on by accident. What it protects now is the
+        sharper half of the same thing: TRADE_PLAN is producible *and* has no
+        writer prompt, because a deterministic document has no writer at all.
         """
         from goldpipeline.services.article_routing import READY_TYPES, SPECS
 
-        assert {ArticleType.ANALYSIS, ArticleType.NEWS_DIGEST} == READY_TYPES
-        assert SPECS[ArticleType.TRADE_PLAN].ready is False
+        assert {
+            ArticleType.ANALYSIS,
+            ArticleType.NEWS_DIGEST,
+            ArticleType.TRADE_PLAN,
+        } == READY_TYPES
+        assert SPECS[ArticleType.TRADE_PLAN].ready is True
         assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 
     def test_the_analysis_route_points_at_v4(self) -> None:

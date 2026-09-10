@@ -260,20 +260,26 @@ def test_the_ict_modules_do_not_reach_the_analysis_levels_module() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_trade_plan_is_still_not_ready_and_has_no_runtime() -> None:
-    """Primitives exist; the product does not. Round 6.6a wires nothing."""
-    import pytest
+def test_trade_plan_now_has_a_runtime_and_still_has_no_prompt() -> None:
+    """Round 6.6a wired nothing; Round 6.6h wired the whole branch.
 
-    from goldpipeline.domain.errors import ArticleTypeNotReadyError
+    The primitives this file tests are now reachable from a product, which is
+    what the six rounds between were for. What has not changed is that the
+    product has no writer: the runtime is ``TRADE_PLAN``, not ``ANALYSIS``, and
+    there is still no prompt id to send anywhere.
+    """
     from goldpipeline.schemas.article import ArticleType
     from goldpipeline.services.article_routing import SPECS
-    from goldpipeline.services.article_runtime import is_dispatchable, runtime_for
+    from goldpipeline.services.article_runtime import (
+        WriteRuntime,
+        is_dispatchable,
+        runtime_for,
+    )
 
-    assert SPECS[ArticleType.TRADE_PLAN].ready is False
+    assert SPECS[ArticleType.TRADE_PLAN].ready is True
     assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
-    assert is_dispatchable(ArticleType.TRADE_PLAN) is False
-    with pytest.raises(ArticleTypeNotReadyError):
-        runtime_for(ArticleType.TRADE_PLAN)
+    assert is_dispatchable(ArticleType.TRADE_PLAN) is True
+    assert runtime_for(ArticleType.TRADE_PLAN).write is WriteRuntime.TRADE_PLAN
 
 
 def test_the_two_shipped_products_are_untouched() -> None:

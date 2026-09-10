@@ -1473,6 +1473,20 @@ def _pipeline_clients(args: argparse.Namespace) -> PipelineClients:
         digest_market=lambda window: _digest_market_source(
             window, fake=getattr(args, "fake_market", False)
         ),
+        # Called only when a TRADE_PLAN Run reaches its stage. Building the
+        # lambda opens nothing; calling it opens five sockets, which is why the
+        # seam is a callable and why an idle tick costs a trade plan nothing.
+        trade_plan_market=lambda: _trade_plan_market_source(
+            fake=fake_ai or getattr(args, "fake_market", False)
+        ).observe(),
+        trade_plan_analyst=lambda selection: _trade_plan_analyst_client(
+            fake=fake_ai or getattr(args, "fake_writer", False)
+        ),
+        # No production news path reaches a scheduled tick - collection belongs
+        # to the producer, and adding a fetch here would be a second news
+        # engine. The seam stays so the already-curated object can be threaded
+        # the day one is available; until then `None` is the honest answer.
+        trade_plan_news=None,
     )
 
 
@@ -1674,6 +1688,74 @@ def _digest_market_source(window: Any, *, fake: bool = False) -> Any:
         connector=connector,
         series_id=series_id,
         max_data_age_minutes=settings.max_data_age_minutes,
+    )
+
+
+def _trade_plan_market_source(*, fake: bool = False) -> Any:
+    """The five-timeframe source a TRADE_PLAN Run observes the market with.
+
+    Parallel to :func:`_digest_market_source` rather than a branch inside
+    :func:`_market_source`, because it answers a different question: not "which
+    candles does this Run normalize from" but "what did the whole market look
+    like at one instant". Same venue, same provider, same staleness policy - a
+    trade plan must not be publishable against older data than an analysis
+    would accept.
+
+    The depth and the timeframe list come from the versioned production policy,
+    not from configuration: they are part of what the product *means*, and an
+    operator changing them between two Runs would make the two incomparable.
+    """
+    from goldpipeline.adapters.mtf_market import MultiTimeframeMarketSource
+    from goldpipeline.services.trade_plan_policy import PRODUCTION_POLICY_V1
+
+    settings = MarketDataSettings.from_env(_config_env())
+    policy = PRODUCTION_POLICY_V1
+
+    def build(timeframe: Any, bars: int) -> Any:
+        from goldpipeline.adapters.tradingview_market import TradingViewMarketDataSource
+
+        connector, series_id = _fake_market_connector(timeframe, bars) if fake else (None, None)
+        return TradingViewMarketDataSource(
+            provider_symbol=policy.provider_symbol,
+            timeframe=timeframe,
+            limit=bars,
+            connector=connector,
+            series_id=series_id,
+            max_data_age_minutes=settings.max_data_age_minutes,
+        )
+
+    return MultiTimeframeMarketSource(
+        provider_symbol=policy.provider_symbol,
+        timeframes=policy.timeframes,
+        bars_per_timeframe=policy.bars_per_timeframe,
+        build_source=build,
+        max_data_age_minutes=settings.max_data_age_minutes,
+    )
+
+
+def _trade_plan_analyst_client(*, fake: bool = False) -> Any:
+    """The ranking client. Anthropic, or the offline echo.
+
+    The model is the policy's, not the environment's: every other stage lets an
+    operator choose a model because prose is a matter of taste, and a ranking is
+    part of what the product means. Two trade plans ranked by different models
+    would disagree for a reason no artifact records.
+    """
+    if fake:
+        from goldpipeline.adapters.fake_trade_analyst import EchoTradeAnalyst
+
+        return EchoTradeAnalyst()
+
+    from goldpipeline.adapters.anthropic_trade_analyst import AnthropicTradeAnalystClient
+    from goldpipeline.config import WriterSettings
+    from goldpipeline.services.trade_plan_policy import PRODUCTION_POLICY_V1
+
+    return AnthropicTradeAnalystClient(
+        WriterSettings.from_env(
+            _config_env(),
+            model_override=PRODUCTION_POLICY_V1.analyst_model,
+            secrets=_secret_provider(),
+        )
     )
 
 

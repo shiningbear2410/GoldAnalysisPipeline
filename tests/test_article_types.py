@@ -21,7 +21,6 @@ from typing import Any
 
 import pytest
 
-from goldpipeline.domain.errors import ArticleTypeNotReadyError
 from goldpipeline.prompts import DEFAULT_WRITER_PROMPT
 from goldpipeline.schemas.article import ArticleType
 from goldpipeline.schemas.inbox import AnalysisEvent
@@ -109,35 +108,45 @@ class TestRouting:
         assert writer_prompt_for(ArticleType.ANALYSIS) == DEFAULT_WRITER_PROMPT
         assert DEFAULT_WRITER_PROMPT.startswith("gold_writer_v")
 
-    def test_the_prose_types_are_ready_and_the_rendered_one_is_not(self) -> None:
-        """Two writers exist; the deterministic document still has none."""
-        assert {ArticleType.ANALYSIS, ArticleType.NEWS_DIGEST} == READY_TYPES
+    def test_all_three_types_are_ready_and_only_two_have_writers(self) -> None:
+        """Round 6.6h. The rendered document is producible and still has no prompt."""
+        assert {
+            ArticleType.ANALYSIS,
+            ArticleType.NEWS_DIGEST,
+            ArticleType.TRADE_PLAN,
+        } == READY_TYPES
+        assert spec_for(ArticleType.TRADE_PLAN).prompt_id is None
 
-    @pytest.mark.parametrize("kind", [ArticleType.TRADE_PLAN])
-    def test_unimplemented_types_refuse(self, kind: ArticleType) -> None:
-        with pytest.raises(ArticleTypeNotReadyError) as caught:
-            require_ready(kind)
-        assert caught.value.code == "ARTICLE_TYPE_NOT_READY"
-        assert spec_for(kind).requires, "a refusal must say what is missing"
+    def test_a_type_with_no_prompt_still_refuses_to_name_one(self) -> None:
+        """The failure mode that always mattered: silent substitution.
 
-    @pytest.mark.parametrize("kind", [ArticleType.TRADE_PLAN])
-    def test_unimplemented_types_never_borrow_the_analysis_prompt(self, kind: ArticleType) -> None:
-        """The failure mode that matters: silent substitution."""
-        assert spec_for(kind).prompt_id is None
-        with pytest.raises(ArticleTypeNotReadyError):
-            writer_prompt_for(kind)
+        TRADE_PLAN is ready now, so ``require_ready`` lets it through - and
+        ``writer_prompt_for`` must *still* refuse, because being producible is
+        not the same as having a writer. Answering ``gold_writer_v4`` here would
+        be exactly the substitution this class was written to prevent.
+        """
+        from goldpipeline.domain.errors import WriterPromptUnavailableError
 
-    def test_every_ready_type_has_a_prompt_of_its_own(self) -> None:
-        """Activation is per type, and no two types share a writer.
+        assert require_ready(ArticleType.TRADE_PLAN).ready is True
+        assert spec_for(ArticleType.TRADE_PLAN).prompt_id is None
+        with pytest.raises(WriterPromptUnavailableError) as caught:
+            writer_prompt_for(ArticleType.TRADE_PLAN)
+        assert caught.value.code == "WRITER_PROMPT_UNAVAILABLE"
+
+    def test_no_two_types_share_a_writer_prompt(self) -> None:
+        """Activation is per type, and no two types borrow the same writer.
 
         Round 6.5b turned NEWS_DIGEST on with its own prompt rather than by
         pointing it at the analysis writer - which would have produced an
-        article-shaped digest and looked like it worked.
+        article-shaped digest and looked like it worked. Round 6.6h added a type
+        with no prompt at all, so the rule is now about the prompts that exist.
         """
-        prompts = {kind: spec_for(kind).prompt_id for kind in READY_TYPES}
+        prompts = [
+            spec_for(kind).prompt_id for kind in READY_TYPES if spec_for(kind).prompt_id is not None
+        ]
 
-        assert None not in prompts.values()
-        assert len(set(prompts.values())) == len(prompts)
+        assert len(prompts) == 2
+        assert len(set(prompts)) == len(prompts)
 
     def test_no_placeholder_prompt_files_were_created(self) -> None:
         """Prefer no prompt over a fake usable one."""

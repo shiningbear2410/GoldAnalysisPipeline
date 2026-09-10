@@ -804,6 +804,22 @@ class NewsConfigurationError(NewsError):
 # --- article types -------------------------------------------------------
 
 
+class WriterPromptUnavailableError(PipelineError):
+    """A producible article type that no model writes.
+
+    Distinct from :class:`ArticleTypeNotReadyError`, and the distinction is the
+    point. "Not ready" means nothing can produce this type; this means something
+    can, and it is not a writer. Round 6.6h created the first such type -
+    ``TRADE_PLAN`` is rendered from deterministic selection - and collapsing the
+    two would mean either refusing to run it or, far worse, handing back another
+    product's prompt.
+
+    Permanent by nature: a rendered document does not acquire an author later.
+    """
+
+    code = "WRITER_PROMPT_UNAVAILABLE"
+
+
 class ArticleTypeNotReadyError(PipelineError):
     """A valid article type whose implementation does not exist yet.
 

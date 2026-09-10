@@ -771,13 +771,14 @@ def test_the_branch_registry_knows_about_every_new_module() -> None:
         assert name in ICT_BRANCH, name
 
 
-def test_nothing_outside_the_dormant_branch_calls_the_new_modules() -> None:
-    """§48. One mention exists outside it, and it is a string, not a call.
+def test_only_the_named_seam_reaches_the_feature_graph_and_the_analyst() -> None:
+    """§48, restated for a live branch rather than a dormant one.
 
-    ``prompts/__init__.py`` registers ``gold_trade_analyst_v1`` the way it
-    registers every other prompt id. That is a versioned constant, not an
-    import and not an invocation, and refusing to register the prompt would
-    mean the loader could not find it at all.
+    Two mentions exist outside the branch and both are enumerated. The prompt
+    registry names ``gold_trade_analyst_v1`` as a versioned constant, the way it
+    names every prompt id - a string, not an import. The orchestrator imports
+    the analyst *protocol* so it can type the client factory it is handed; it
+    never builds one and never calls a model.
     """
     from tests.test_ict_structure_guards import ICT_BRANCH
 
@@ -791,7 +792,29 @@ def test_nothing_outside_the_dormant_branch_calls_the_new_modules() -> None:
             if module in text:
                 offenders.append(f"{path.relative_to(root).as_posix()} -> {module}")
 
-    assert offenders == ["prompts/__init__.py -> trade_analyst"]
+    assert sorted(offenders) == [
+        "cli.py -> trade_analyst",
+        "prompts/__init__.py -> trade_analyst",
+        "services/orchestrator.py -> trade_analyst",
+    ]
+
+    # The CLI builds the client; it does not rank anything.
+    cli = (root / "cli.py").read_text(encoding="utf-8")
+    assert "AnthropicTradeAnalystClient" in cli
+    assert "rank_candidates" not in cli
+    assert "parse_ranking" not in cli
+
+    registry = (root / "prompts" / "__init__.py").read_text(encoding="utf-8")
+    assert 'GOLD_TRADE_ANALYST_V1 = "gold_trade_analyst_v1"' in registry
+    first_line = registry.split("GOLD_TRADE_ANALYST_V1")[1].splitlines()[0]
+    assert "import" not in first_line
+
+    orchestrator = (root / "services" / "orchestrator.py").read_text(encoding="utf-8")
+    assert "from goldpipeline.adapters.trade_analyst_client import TradeAnalystClient" in (
+        orchestrator
+    )
+    assert "rank_candidates" not in orchestrator
+    assert "AnthropicTradeAnalystClient" not in orchestrator
 
     registry = (root / "prompts" / "__init__.py").read_text(encoding="utf-8")
     assert 'GOLD_TRADE_ANALYST_V1 = "gold_trade_analyst_v1"' in registry
@@ -840,26 +863,31 @@ def test_no_shipped_prompt_changed() -> None:
             assert word not in text, f"{name} mentions {word!r}"
 
 
-def test_trade_plan_is_still_not_a_product() -> None:
-    """§47."""
-    from goldpipeline.domain.errors import ArticleTypeNotReadyError
+def test_trade_plan_is_live_and_still_publishes_nothing() -> None:
+    """Round 6.6h activated it. What must stay true is everything *else*.
+
+    Ready and dispatchable, and at the same time: no writer prompt, no style
+    pass, no repair path, and no automatic publication. Activation was about
+    letting a deterministic document reach a human, not about letting anything
+    reach a channel.
+    """
     from goldpipeline.schemas.article import ArticleType
     from goldpipeline.services.article_routing import SPECS
     from goldpipeline.services.article_runtime import (
         RUNTIMES,
         RevisionRuntime,
+        WriteRuntime,
         is_dispatchable,
         runtime_for,
     )
     from goldpipeline.services.review_action import STYLE_ACTIVE_TYPES
 
-    assert SPECS[ArticleType.TRADE_PLAN].ready is False
+    assert SPECS[ArticleType.TRADE_PLAN].ready is True
     assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
-    assert is_dispatchable(ArticleType.TRADE_PLAN) is False
+    assert is_dispatchable(ArticleType.TRADE_PLAN) is True
+    assert runtime_for(ArticleType.TRADE_PLAN).write is WriteRuntime.TRADE_PLAN
     assert RUNTIMES[ArticleType.TRADE_PLAN].revise is RevisionRuntime.NONE
     assert ArticleType.TRADE_PLAN not in STYLE_ACTIVE_TYPES
-    with pytest.raises(ArticleTypeNotReadyError):
-        runtime_for(ArticleType.TRADE_PLAN)
 
 
 def test_the_two_shipped_products_are_untouched() -> None:

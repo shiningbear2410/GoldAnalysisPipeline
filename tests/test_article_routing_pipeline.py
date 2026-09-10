@@ -77,11 +77,37 @@ class TestAnalysisIsUnchanged:
         assert "writer" in clients.built
 
 
-# NEWS_DIGEST became producible in Round 6.5b, so it is no longer one of
-# these. TRADE_PLAN still is, and the fail-closed behaviour it proves is
-# what stops a rendered document being handed to a prose writer.
+# Every article type is producible as of Round 6.6h, so there is no longer a
+# real one to point this class at - and the behaviour it proves is a permanent
+# property of the dispatcher, not a fact about whichever type happened to be
+# unfinished. So the type is made unfinished for the duration of each test.
+# Deleting the class instead would have retired the check the day it stopped
+# having an example, which is precisely when a fail-closed path rots.
 @pytest.mark.parametrize("kind", [ArticleType.TRADE_PLAN])
 class TestUnimplementedTypesFailClosed:
+    @pytest.fixture(autouse=True)
+    def _not_ready(self, kind: ArticleType, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Mark *kind* unfinished, exactly as the table did before activation."""
+        from dataclasses import replace
+
+        from goldpipeline.services.article_routing import SPECS
+        from goldpipeline.services.article_runtime import RUNTIMES
+
+        # Both tables, because they answer different questions and the
+        # dispatcher consults both: the registry says whether a product exists,
+        # the runtime table says whether the pipeline can run one.
+        monkeypatch.setitem(
+            SPECS,
+            kind,
+            replace(
+                SPECS[kind],
+                ready=False,
+                prompt_id=None,
+                requires="a deterministic engine that does not exist in this test",
+            ),
+        )
+        monkeypatch.setitem(RUNTIMES, kind, replace(RUNTIMES[kind], dispatchable=False))
+
     def test_the_run_fails_with_an_explicit_reason(
         self, runs_dir: Path, tmp_path: Path, kind: ArticleType
     ) -> None:
