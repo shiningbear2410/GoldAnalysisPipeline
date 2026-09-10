@@ -296,6 +296,9 @@ ICT_BRANCH = {
     "trade_analyst.py",
     "trade_analyst_client.py",
     "fake_trade_analyst.py",
+    # The deterministic end of the branch: selection and the public renderer.
+    "trade_plan_selector.py",
+    "trade_plan_render.py",
 }
 """Modules of the TRADE_PLAN branch, which are allowed to know about each other.
 
