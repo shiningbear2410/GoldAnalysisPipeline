@@ -178,6 +178,23 @@ toward it, and this one does the same for a digest. One contract, four readers,
 no copies.
 """
 
+GOLD_TRADE_ANALYST_V1 = "gold_trade_analyst_v1"
+"""The TRADE_PLAN candidate-ranking prompt. Dormant.
+
+Not a writer, not a finalizer, and deliberately not a prose prompt at all. It
+asks for one thing - the order of candidate ids that a deterministic engine
+already produced - and its output contract is four arrays of strings with no
+room for a price, a score or a sentence.
+
+Does **not** include `gold_human_style_v1`, and never will. That contract is the
+voice of a published article; this prompt produces no prose to have a voice, and
+including it would suggest the ranking is something a reader sees.
+
+Listed in no `DEFAULT_*` binding, selected by no runtime, and reachable only
+from the dormant Trade Analyst service. Choosing a provider and a model for it
+is 6.6h wiring.
+"""
+
 DEFAULT_WRITER_PROMPT = GOLD_WRITER_V4
 DEFAULT_DIGEST_WRITER_PROMPT = GOLD_NEWS_DIGEST_WRITER_V2
 DEFAULT_REVIEWER_PROMPT = GOLD_REVIEWER_V2
@@ -276,6 +293,7 @@ __all__ = [
     "GOLD_NEWS_DIGEST_WRITER_V2",
     "GOLD_REVIEWER_V1",
     "GOLD_REVIEWER_V2",
+    "GOLD_TRADE_ANALYST_V1",
     "GOLD_WRITER_V1",
     "GOLD_WRITER_V2",
     "GOLD_WRITER_V3",

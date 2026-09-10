@@ -289,6 +289,13 @@ ICT_BRANCH = {
     "ict_candidate_source.py",
     "ict_candidate_eligibility.py",
     "ict_candidate_consolidation.py",
+    "ict_candidate_features.py",
+    # The dormant Trade Analyst, which is part of the same TRADE_PLAN branch
+    # even though its names do not start with "ict_": the domain service, the
+    # provider protocol it is injected through, and the offline fakes.
+    "trade_analyst.py",
+    "trade_analyst_client.py",
+    "fake_trade_analyst.py",
 }
 """Modules of the TRADE_PLAN branch, which are allowed to know about each other.
 
@@ -341,6 +348,7 @@ def test_nothing_outside_the_ict_branch_mentions_any_of_it() -> None:
             "ict_candidate_source",
             "ict_candidate_eligibility",
             "ict_candidate_consolidation",
+            "ict_candidate_features",
         ):
             if module in text:
                 offenders.append(f"{path.name} -> {module}")
