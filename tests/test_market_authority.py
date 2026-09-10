@@ -387,6 +387,15 @@ class TestProvenance:
         assert expected == self.loaded().model.symbol == "XAUUSD"
 
 
+MIGRATION_RUN_ID = "20260903"
+"""Run ids sort chronologically, so the date the authority moved is a bound.
+
+Every Run created before this came from MetaTrader; every Run after it may
+legitimately name TradingView. Written as a prefix rather than a list of ids
+so a new Run does not have to be added here to keep the guard honest.
+"""
+
+
 class TestHistoricalContinuity:
     def test_mt5_era_runs_still_load(self) -> None:
         from goldpipeline.schemas.context import AnalysisContext
@@ -410,11 +419,23 @@ class TestHistoricalContinuity:
         assert loaded > 0
         # Historical Runs keep whatever they recorded, including the older
         # `mt5-demo` label from before the provider name settled. Nothing was
-        # retrofitted, and the point of the assertion is the absence below: no
+        # retrofitted, and the point of the assertion is the absence: no
         # pre-migration Run may claim to have come from the new authority.
+        #
+        # "Pre-migration" was every Run on disk until Round 6.6h created one
+        # from the live TradingView feed, so the set is now scoped by the date
+        # the authority moved rather than by "whatever happens to be here".
         assert providers
-        assert "tradingview" not in providers, providers
-        assert providers <= {"metatrader5", "mt5-demo", "file", "fixture"}, providers
+        assert providers <= {"metatrader5", "mt5-demo", "file", "fixture", "tradingview"}, providers
+        for run in sorted(runs.iterdir()):
+            context = run / "context.json"
+            if not run.is_dir() or not context.exists():
+                continue
+            parsed = AnalysisContext.model_validate_json(context.read_bytes())
+            if parsed.market.provider == "tradingview":
+                assert run.name >= MIGRATION_RUN_ID, (
+                    f"{run.name} predates the TradingView migration and must not claim it"
+                )
 
     def test_no_migration_rewrote_a_historical_price(self) -> None:
         """No cross-provider adjustment exists anywhere in the source."""

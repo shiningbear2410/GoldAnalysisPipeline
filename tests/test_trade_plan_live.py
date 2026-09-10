@@ -584,6 +584,90 @@ def test_the_existing_products_keep_the_configured_limit_unchanged() -> None:
 
 
 # --------------------------------------------------------------------------
+# §12: the answer's ceiling scales with what it has to say
+# --------------------------------------------------------------------------
+
+
+def test_the_output_ceiling_scales_with_the_candidate_count() -> None:
+    """The third defect the live smoke found, pinned.
+
+    A ranking repeats every id it was given, so its length is linear in the
+    candidate set. The fixed 2,000-token ceiling was sized against a
+    six-candidate fixture; the first live reading had 130 candidates and the
+    provider cut the JSON off mid-array, which arrives as a response error and
+    looks like a provider fault rather than a ceiling nobody re-derived.
+    """
+    from goldpipeline.services.ict_candidate_consolidation import consolidate_candidates
+    from goldpipeline.services.ict_candidate_features import build_candidate_features
+    from goldpipeline.services.trade_analyst import (
+        RANKING_TOKENS_BASE,
+        RANKING_TOKENS_PER_CANDIDATE,
+        ranking_token_ceiling,
+    )
+    from tests.test_ict_candidate_eligibility_fixture import analysis as eligibility_analysis
+
+    features = build_candidate_features(consolidate_candidates(eligibility_analysis()))
+
+    assert len(features.candidates) == 6
+    assert ranking_token_ceiling(features) == RANKING_TOKENS_BASE + 6 * (
+        RANKING_TOKENS_PER_CANDIDATE
+    )
+    assert ranking_token_ceiling(features) > 6 * 20, "an id is more than a few tokens"
+
+
+def test_the_ceiling_is_large_enough_for_the_ids_it_must_carry() -> None:
+    """Checked against the bytes a correct answer needs, not a number someone liked."""
+    from goldpipeline.services.ict_candidate_consolidation import consolidate_candidates
+    from goldpipeline.services.ict_candidate_features import build_candidate_features
+    from goldpipeline.services.trade_analyst import expected_buckets, ranking_token_ceiling
+    from tests.test_ict_candidate_eligibility_fixture import analysis as eligibility_analysis
+
+    graph = build_candidate_features(consolidate_candidates(eligibility_analysis()))
+    answer = json.dumps({key: list(values) for key, values in expected_buckets(graph).items()})
+
+    # Four characters per token is the conventional floor; hex tokenises worse,
+    # which is why the per-candidate allowance sits well above this.
+    assert ranking_token_ceiling(graph) > len(answer) // 4
+
+
+class TruncatingAnalyst:
+    """A provider that stops mid-answer, the way a low ceiling makes one."""
+
+    provider = "fake"
+    model = "truncating"
+
+    def rank(self, request: TradeAnalystRequest) -> TradeAnalystResponse:
+        from goldpipeline.adapters.fake_trade_analyst import BUCKET_KEYS, _payload_of
+
+        buckets = _payload_of(request)["buckets"]
+        answer = json.dumps({key: list(buckets[key]) for key in BUCKET_KEYS})
+        return TradeAnalystResponse(
+            text=answer[: len(answer) // 2], model=self.model, provider="fake"
+        )
+
+
+def test_a_truncated_ranking_is_refused_and_leaves_nothing_behind(
+    runs_dir: Path, trade_plan_run: str
+) -> None:
+    """§12, §25. What the live failure looked like, as a test."""
+    result = stage(runs_dir, trade_plan_run, analyst=TruncatingAnalyst())
+
+    assert not result.succeeded
+    assert "did not return JSON" in str(result.error)
+    assert_failed_cleanly(runs_dir, trade_plan_run)
+
+
+def test_the_stage_and_the_service_both_default_to_the_derived_ceiling() -> None:
+    """§12. Neither entry point carries a constant that could go stale."""
+    import inspect
+
+    from goldpipeline.services.trade_analyst import rank_candidates
+
+    assert inspect.signature(rank_candidates).parameters["max_tokens"].default is None
+    assert inspect.signature(write_trade_plan).parameters["max_tokens"].default is None
+
+
+# --------------------------------------------------------------------------
 # §22: an idle tick costs a trade plan nothing
 # --------------------------------------------------------------------------
 

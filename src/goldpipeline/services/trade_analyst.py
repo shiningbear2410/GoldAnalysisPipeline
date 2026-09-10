@@ -80,6 +80,23 @@ RANKING_KEYS: tuple[str, ...] = (BAI_KEY, SEO_KEY, UPPER_KEY, LOWER_KEY)
 PAYLOAD_OPEN = "<CANDIDATE_DATA>"
 PAYLOAD_CLOSE = "</CANDIDATE_DATA>"
 
+RANKING_TOKENS_BASE = 512
+RANKING_TOKENS_PER_CANDIDATE = 48
+"""How large the answer may be, per candidate that has to appear in it.
+
+A ranking is not a fixed-size document: it repeats every candidate id the
+model was given, so its length is linear in the candidate set. A constant
+ceiling is therefore a hidden cap on how many candidates the product can
+handle, and the failure it produces is a truncated JSON object rather than an
+honest refusal - the first live reading had 130 candidates against a
+2,000-token ceiling, and the answer was cut off mid-array.
+
+Sixteen hex characters tokenise poorly and unpredictably, so the per-candidate
+figure is deliberately generous. The answer is machine-readable and tiny
+beside the input that produced it: being wrong in this direction costs almost
+nothing, and being wrong in the other costs the whole Run.
+"""
+
 
 class TradeAnalystError(ValueError):
     """The model's answer was not a ranking of the candidates it was given."""
@@ -498,12 +515,22 @@ def parse_ranking(text: str, *, features: CandidateFeatureAnalysis) -> TradeAnal
     )
 
 
+def ranking_token_ceiling(features: CandidateFeatureAnalysis) -> int:
+    """The output ceiling this candidate set needs.
+
+    Derived rather than configured: the number that matters is a property of the
+    reading, and an operator who set it too low would get a truncated answer that
+    looks like a provider fault.
+    """
+    return RANKING_TOKENS_BASE + RANKING_TOKENS_PER_CANDIDATE * len(features.candidates)
+
+
 def rank_candidates(
     features: CandidateFeatureAnalysis,
     *,
     model: TradeAnalystClient,
     news: CuratedNews | None = None,
-    max_tokens: int = 2000,
+    max_tokens: int | None = None,
 ) -> TradeAnalystRanking:
     """Features in, validated ranking out, through an injected provider.
 
@@ -513,7 +540,9 @@ def rank_candidates(
         model: Any client satisfying the analyst protocol. Every test in this
             round passes a fake; no vendor is reachable from here.
         news: Optional untrusted context, threaded verbatim.
-        max_tokens: Carried to the provider. Four id lists are small.
+        max_tokens: Carried to the provider. ``None`` derives the ceiling
+            from the candidate count, which is the only honest default: a
+            ranking's length is linear in the set it orders.
 
     Raises:
         TradeAnalystError: The provider's answer is not a valid ranking.
@@ -526,8 +555,9 @@ def rank_candidates(
         model.model,
         len(features.candidates),
     )
+    ceiling = max_tokens if max_tokens is not None else ranking_token_ceiling(features)
     response = model.rank(
-        TradeAnalystRequest(system=prompt.system, user=prompt.user, max_tokens=max_tokens)
+        TradeAnalystRequest(system=prompt.system, user=prompt.user, max_tokens=ceiling)
     )
     return parse_ranking(response.text, features=features)
 
@@ -569,6 +599,7 @@ __all__ = [
     "build_trade_analyst_input",
     "build_trade_analyst_prompt",
     "expected_buckets",
+    "ranking_token_ceiling",
     "parse_ranking",
     "rank_candidates",
     "resolve_ranked_candidates",

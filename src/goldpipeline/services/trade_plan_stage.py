@@ -61,6 +61,7 @@ from goldpipeline.services.trade_analyst import (
     build_trade_analyst_prompt,
     expected_buckets,
     parse_ranking,
+    ranking_token_ceiling,
 )
 from goldpipeline.services.trade_plan_policy import (
     PRODUCTION_POLICY_V1,
@@ -372,7 +373,7 @@ def build_trade_plan(
     analyst: TradeAnalystClient,
     policy: TradePlanProductionPolicyV1,
     news: CuratedNews | None,
-    max_tokens: int,
+    max_tokens: int | None,
 ) -> _Built:
     """Run the whole deterministic chain, call the analyst once, render the page.
 
@@ -388,7 +389,8 @@ def build_trade_plan(
     prompt = build_trade_analyst_prompt(request)
     payload = prompt.user
 
-    response = analyst.rank(_request(system=prompt.system, user=payload, max_tokens=max_tokens))
+    ceiling = max_tokens if max_tokens is not None else ranking_token_ceiling(features)
+    response = analyst.rank(_request(system=prompt.system, user=payload, max_tokens=ceiling))
     ranking = parse_ranking(response.text, features=features)
     selection = select_trade_plan(features, ranking)
     plan = render_and_validate(selection)
@@ -452,7 +454,7 @@ def write_trade_plan(
     analyst: TradeAnalystClient,
     news: CuratedNews | None = None,
     policy: TradePlanProductionPolicyV1 = PRODUCTION_POLICY_V1,
-    max_tokens: int = 2000,
+    max_tokens: int | None = None,
     now: datetime | None = None,
 ) -> TradePlanStageResult:
     """Build and persist a trade plan for an existing normalized Run.
@@ -466,7 +468,8 @@ def write_trade_plan(
         analyst: Any client satisfying the analyst protocol.
         news: Optional untrusted context, threaded verbatim.
         policy: The production policy. Persisted in full on the Run.
-        max_tokens: Ceiling for the ranking call.
+        max_tokens: Ceiling for the ranking call. ``None`` derives it from
+            the candidate count, which is what a ranking's length depends on.
         now: Injection point for tests.
 
     Returns:

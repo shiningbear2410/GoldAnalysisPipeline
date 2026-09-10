@@ -185,10 +185,18 @@ class TestRunProvenance:
         assert provenance.article_type is ArticleType.TRADE_PLAN
 
     def test_historical_manifests_still_load(self) -> None:
-        """Real Runs on disk predate the field entirely."""
+        """Every Run on disk still loads, and every product mode on one is real.
+
+        The original form asserted ANALYSIS everywhere, which held for as long as
+        ANALYSIS was the only mode anything produced. Round 6.6h produced a
+        TRADE_PLAN Run, so the surviving claim is the one that matters: an old
+        manifest with no provenance still parses, and any manifest that does
+        carry a mode carries a mode the enum knows.
+        """
         from goldpipeline.schemas.manifest import RunManifest
 
         seen = 0
+        modes: set[ArticleType] = set()
         for run in sorted(Path("runs").iterdir()):
             manifest_file = run / "manifest.json"
             if not manifest_file.is_file():
@@ -196,8 +204,9 @@ class TestRunProvenance:
             manifest = RunManifest.model_validate_json(manifest_file.read_text(encoding="utf-8"))
             seen += 1
             if manifest.provenance is not None:
-                assert manifest.provenance.article_type is ArticleType.ANALYSIS
+                modes.add(manifest.provenance.article_type)
         assert seen, "expected at least one historical Run to check"
+        assert modes <= set(ArticleType)
 
 
 # ------------------------------------------------------------ idempotency
@@ -234,11 +243,23 @@ class TestPayloadIdentity:
 # ------------------------------------------------- fixtures on disk still load
 class TestHistoricalEvents:
     def test_processed_inbox_events_still_parse(self) -> None:
+        """Every event on disk still loads, and every one predating the field is ANALYSIS.
+
+        The original form asserted ANALYSIS for *all* of them, which was true for
+        as long as ANALYSIS was the only type anything submitted. Round 6.6h
+        submitted a TRADE_PLAN event, so the claim is now the narrower one it
+        always meant: an event that carries no ``article_type`` reads back as
+        ANALYSIS, and one that carries a type reads back as the type it carries.
+        """
         from goldpipeline.adapters.inbox_source import parse_event
 
         seen = 0
         for path in sorted(Path("inbox/processed").glob("*.json")):
-            event = parse_event(json.loads(path.read_text(encoding="utf-8")))
-            assert event.article_type is ArticleType.ANALYSIS
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            event = parse_event(raw)
+            if "article_type" not in raw:
+                assert event.article_type is ArticleType.ANALYSIS, path.name
+            else:
+                assert event.article_type is ArticleType(raw["article_type"]), path.name
             seen += 1
         assert seen, "expected historical events to check"
