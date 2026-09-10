@@ -122,7 +122,11 @@ def test_the_payload_carries_the_facts_the_prompt_names() -> None:
     assert payload["reference_price"]["price"] == "4043"
     assert len(payload["timeframe_contexts"]) == 5
     assert len(payload["candidates"]) == 6
-    assert len(payload["pair_relations"]) == 15
+    # Twelve of the fifteen pairs, because only the pairs that meet are sent:
+    # the three disjoint ones say nothing the two zones' own bounds do not.
+    assert len(payload["pair_relations"]) == 12
+    assert all(entry["relation"] != "DISJOINT" for entry in payload["pair_relations"])
+    assert len(realistic().pair_relations) == 15, "the feature graph still keeps all of them"
 
     first = payload["candidates"][0]
     assert set(first) >= {

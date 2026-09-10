@@ -488,6 +488,102 @@ def test_a_delivered_plan_is_no_longer_eligible(runs_dir: Path, trade_plan_run: 
 
 
 # --------------------------------------------------------------------------
+# §3, §5: the staleness budget is per timeframe
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "allowance"),
+    [
+        (Timeframe.H4, 330),
+        (Timeframe.H1, 150),
+        (Timeframe.M15, 105),
+        (Timeframe.M5, 95),
+        (Timeframe.M1, 91),
+    ],
+)
+def test_the_staleness_budget_is_the_limit_plus_the_bar_duration(
+    timeframe: Timeframe, allowance: int
+) -> None:
+    """The defect the first live fetch found, pinned.
+
+    ``GOLDPIPELINE_MAX_DATA_AGE_MINUTES`` is 90 and was chosen for M15, where
+    the newest closed bar is at most 15 minutes behind the point one could
+    exist. Applied unchanged to H4 it asks a 240-minute bar to be under 90
+    minutes old, which a live feed can never satisfy: the first real fetch of
+    this round refused a perfectly healthy H4 series at 113 minutes.
+
+    The configured number is a *lateness* budget, so each timeframe gets it plus
+    its own duration - the question the setting was always meant to ask.
+    """
+    from goldpipeline.adapters.mtf_market import MultiTimeframeMarketSource
+    from goldpipeline.schemas.ict import ICT_TIMEFRAMES
+
+    source = MultiTimeframeMarketSource(
+        provider_symbol="OANDA:XAUUSD",
+        timeframes=ICT_TIMEFRAMES,
+        bars_per_timeframe=500,
+        max_data_age_minutes=90,
+    )
+
+    assert source.staleness_allowance(timeframe) == allowance
+
+
+def test_an_unset_staleness_limit_stays_unset() -> None:
+    """``None`` disables the check, and adding a duration to it would enable one."""
+    from goldpipeline.adapters.mtf_market import MultiTimeframeMarketSource
+    from goldpipeline.schemas.ict import ICT_TIMEFRAMES
+
+    source = MultiTimeframeMarketSource(
+        provider_symbol="OANDA:XAUUSD",
+        timeframes=ICT_TIMEFRAMES,
+        bars_per_timeframe=500,
+        max_data_age_minutes=None,
+    )
+
+    assert source.staleness_allowance(Timeframe.H4) is None
+
+
+def test_each_timeframe_source_is_built_with_its_own_allowance() -> None:
+    """The allowance reaches the adapter, not just the calculation."""
+    from goldpipeline.adapters.mtf_market import MultiTimeframeMarketSource
+    from goldpipeline.schemas.ict import ICT_TIMEFRAMES
+
+    seen: dict[Timeframe, int | None] = {}
+    source = MultiTimeframeMarketSource(
+        provider_symbol="OANDA:XAUUSD",
+        timeframes=ICT_TIMEFRAMES,
+        bars_per_timeframe=500,
+        max_data_age_minutes=90,
+    )
+
+    def build(timeframe: Timeframe, bars: int) -> Any:
+        seen[timeframe] = source.staleness_allowance(timeframe)
+        raise MultiTimeframeError("stop here", timeframe=timeframe)
+
+    source.set_build_source(build)
+    with pytest.raises(MultiTimeframeError):
+        source.observe()
+
+    assert seen == {Timeframe.H4: 330}
+
+
+def test_the_existing_products_keep_the_configured_limit_unchanged() -> None:
+    """§23. The per-timeframe budget lives in the MTF composer and nowhere else.
+
+    An ANALYSIS Run's M15 source and a digest's M5 source still receive the
+    configured number itself, exactly as they did before this round.
+    """
+    from pathlib import Path as _Path
+
+    cli = _Path("src/goldpipeline/cli.py").read_text(encoding="utf-8")
+    single = cli.split("def _trade_plan_market_source")[0]
+
+    assert "max_data_age_minutes=settings.max_data_age_minutes" in single
+    assert "staleness_allowance" not in single
+
+
+# --------------------------------------------------------------------------
 # §22: an idle tick costs a trade plan nothing
 # --------------------------------------------------------------------------
 

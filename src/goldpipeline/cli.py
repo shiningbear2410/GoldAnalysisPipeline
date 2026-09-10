@@ -1711,6 +1711,13 @@ def _trade_plan_market_source(*, fake: bool = False) -> Any:
     settings = MarketDataSettings.from_env(_config_env())
     policy = PRODUCTION_POLICY_V1
 
+    source = MultiTimeframeMarketSource(
+        provider_symbol=policy.provider_symbol,
+        timeframes=policy.timeframes,
+        bars_per_timeframe=policy.bars_per_timeframe,
+        max_data_age_minutes=settings.max_data_age_minutes,
+    )
+
     def build(timeframe: Any, bars: int) -> Any:
         from goldpipeline.adapters.tradingview_market import TradingViewMarketDataSource
 
@@ -1721,16 +1728,25 @@ def _trade_plan_market_source(*, fake: bool = False) -> Any:
             limit=bars,
             connector=connector,
             series_id=series_id,
-            max_data_age_minutes=settings.max_data_age_minutes,
+            # Per timeframe: the configured limit is a lateness budget, and an
+            # H4 bar is 240 minutes long, so a healthy H4 series is routinely
+            # hours "old" without being late at all.
+            max_data_age_minutes=source.staleness_allowance(timeframe),
         )
 
-    return MultiTimeframeMarketSource(
-        provider_symbol=policy.provider_symbol,
-        timeframes=policy.timeframes,
-        bars_per_timeframe=policy.bars_per_timeframe,
-        build_source=build,
-        max_data_age_minutes=settings.max_data_age_minutes,
-    )
+    return replace_build_source(source, build)
+
+
+def replace_build_source(source: Any, build: Any) -> Any:
+    """Attach the per-timeframe builder to an already-configured source.
+
+    Two steps rather than one because the builder needs the source's own
+    staleness allowance, and that allowance depends on the configured limit the
+    source was built with. Constructing the source first is the only order in
+    which each timeframe can be asked what *its* budget is.
+    """
+    source.set_build_source(build)
+    return source
 
 
 def _trade_plan_analyst_client(*, fake: bool = False) -> Any:

@@ -57,6 +57,7 @@ from goldpipeline.services.ict_candidate_eligibility import CandidateRole, Entry
 from goldpipeline.services.ict_candidate_features import (
     CandidateFeature,
     CandidateFeatureAnalysis,
+    ZoneRelation,
 )
 from goldpipeline.services.ict_range import PriceLocation
 
@@ -316,6 +317,13 @@ def serialise_trade_analyst_input(request: TradeAnalystInput) -> str:
             for context in features.timeframe_contexts
         ],
         "candidates": [_candidate_payload(feature) for feature in features.candidates],
+        # Only the pairs that touch or overlap. The feature graph computes and
+        # keeps every pair, including the disjoint ones - but a disjoint pair
+        # carries nothing the model cannot already read off the two zones'
+        # bounds, which are in this same document, and the matrix is quadratic:
+        # the first live reading had 6,441 pairs, 6,003 of them disjoint, and
+        # they alone were two thirds of a payload no context window could hold.
+        # An absent pair means disjoint, and the prompt says so.
         "pair_relations": [
             {
                 "first_candidate_id": relation.first_candidate_id,
@@ -327,6 +335,7 @@ def serialise_trade_analyst_input(request: TradeAnalystInput) -> str:
                 "gap_distance": _price(relation.gap_distance),
             }
             for relation in features.pair_relations
+            if relation.relation is not ZoneRelation.DISJOINT
         ],
         "buckets": {key: list(values) for key, values in expected_buckets(features).items()},
         "news_context": None if request.news is None else _news_payload(request.news),

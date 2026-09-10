@@ -84,8 +84,10 @@ Facts available to you, none of which is dominant on its own:
   automatically worse.
 - `market_relation` and `distance_to_reference` — where the candidate sits
   relative to the current reference price, and how far.
-- `pair_relations` — which candidates are `EQUAL`, `OVERLAPPING`, `TOUCHING` or
-  `DISJOINT` with which, and the exact intersection or gap.
+- `pair_relations` — which candidates are `EQUAL`, `OVERLAPPING` or `TOUCHING`
+  with which, and the exact intersection. Only pairs that meet are listed: **a
+  pair absent from this list is disjoint**, and how far apart it is can be read
+  off the two candidates' own `lower` and `upper`.
 
 Directional context, offered as context and not as a rule:
 

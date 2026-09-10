@@ -152,6 +152,40 @@ class MultiTimeframeMarketSource:
         self._now = now if now is not None else utc_now
         self._build_source = build_source if build_source is not None else self._tradingview
 
+    def staleness_allowance(self, timeframe: Timeframe) -> int | None:
+        """The freshness limit for one timeframe, in minutes.
+
+        The configured limit is a *lateness* budget: how far behind the market
+        the newest closed candle may be beyond the point at which one could
+        possibly exist. On M15 - the timeframe the setting was chosen for - the
+        two are nearly the same thing, and the distinction never mattered.
+
+        On H4 it is the whole story. An H4 bar is 240 minutes long, so on a
+        perfectly live market its newest *closed* bar is routinely two or three
+        hours old; measuring that against a 90-minute limit would call a healthy
+        feed stale every time. So each timeframe gets the configured budget plus
+        its own bar duration, which asks the question the setting was always
+        meant to ask: is this series later than it should be?
+        """
+        if self._max_data_age is None:
+            return None
+        duration = timeframe.duration
+        if duration is None:  # pragma: no cover - every ICT timeframe has one
+            raise MultiTimeframeError(
+                f"{timeframe.value} has no fixed duration", timeframe=timeframe
+            )
+        return self._max_data_age + int(duration.total_seconds() // 60)
+
+    def set_build_source(self, build: Callable[[Timeframe, int], object]) -> None:
+        """Replace the per-timeframe builder after construction.
+
+        The production builder needs :meth:`staleness_allowance`, which is a
+        property of a configured source, so it cannot be written before one
+        exists. Kept explicit rather than making the constructor accept a
+        callback that takes the half-built object.
+        """
+        self._build_source = build
+
     def _tradingview(self, timeframe: Timeframe, bars: int) -> object:
         return TradingViewMarketDataSource(
             provider_symbol=self._provider_symbol,
@@ -159,7 +193,7 @@ class MultiTimeframeMarketSource:
             limit=bars,
             timeout_seconds=self._timeout,
             max_retries=self._max_retries,
-            max_data_age_minutes=self._max_data_age,
+            max_data_age_minutes=self.staleness_allowance(timeframe),
         )
 
     def observe(self) -> MultiTimeframeObservation:
@@ -187,7 +221,7 @@ class MultiTimeframeMarketSource:
                     f"{timeframe.value} could not be fetched: {exc}", timeframe=timeframe
                 ) from exc
 
-            normalized = normalize_market_data(loaded.payload)
+            normalized = normalize_market_data(loaded.model)
             bars = tuple(normalized.snapshot.bars)
             if not bars:
                 raise MultiTimeframeError(
