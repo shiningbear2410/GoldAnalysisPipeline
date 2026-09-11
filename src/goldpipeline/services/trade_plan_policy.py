@@ -26,6 +26,7 @@ whatever the current one happens to be.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -159,7 +160,17 @@ PRODUCTION_POLICY_V1 = TradePlanProductionPolicyV1(
 """The one policy production uses. Frozen, versioned, and persisted per Run."""
 
 
+PLAN_NEWS_LOOKBACK = timedelta(hours=24)
+"""How far back a plan's curated news reaches. Round 6.7.
+
+Beside the policy rather than inside it: V1 describes how candidates are found,
+and its snapshot on every Run must keep meaning exactly that. The window is
+recorded on each Run separately, in the news document the page is rendered from.
+"""
+
+
 __all__ = [
+    "PLAN_NEWS_LOOKBACK",
     "PRODUCTION_POLICY_V1",
     "TRADE_PLAN_MODEL",
     "TRADE_PLAN_POLICY_VERSION",

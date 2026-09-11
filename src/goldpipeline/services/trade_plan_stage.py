@@ -1,9 +1,10 @@
 """The TRADE_PLAN stage: live candles in, a published page and its evidence out.
 
-Round 6.6h. Every engine this calls was built and proved in an earlier round;
-nothing here reimplements a market rule. What this module owns is the order the
-engines run in, the single instant they all share, and the audit trail that
-makes a published price traceable back to the candle it came from.
+Round 6.6h built it; Round 6.7 gave the page words. Every engine this calls was
+built and proved in an earlier round; nothing here reimplements a market rule.
+What this module owns is the order the engines run in, the single instant they
+all share, and the audit trail that makes a published price traceable back to
+the candle it came from.
 
 **One question this Run must always be able to answer.** Given a price on the
 page: which selected zone, which consolidated candidate, which eligibility
@@ -11,16 +12,17 @@ decision, which projected source, which order block or gap or pool, and which
 candle. Every artifact below exists to keep one link of that chain, and the
 chain is checked by the gate rather than assumed.
 
-**The model is called once, in the middle.** Before it: deterministic analysis.
-After it: deterministic selection and rendering. Its answer is text until the
-validator has proved it names exactly the candidates it was given, and its only
-contribution to the page is the order two zones appear in and which one is
-called *vùng chính*.
+**Two model calls, and neither touches a price.** The analyst orders candidate
+ids; the selection is then final. The copywriter is called *after* that, with
+the finished selection, and returns words: a market view, short notes keyed by
+selected ids, and news ids from a closed list. The page itself is rendered by
+code from three persisted documents, so what a reader sees is reproducible from
+the Run alone.
 
 **Failure is refusal, never a smaller plan.** A timeframe that will not fetch, a
-reference price two feeds disagree about, a ranking that invents an id - each
-stops the Run. A trade plan built from four timeframes, or from a repaired
-ranking, would look exactly like a good one.
+reference price two feeds disagree about, a ranking that invents an id, a copy
+with a digit in it - each stops the Run. A trade plan built from four timeframes,
+or from a repaired answer, would look exactly like a good one.
 """
 
 from __future__ import annotations
@@ -36,7 +38,8 @@ from goldpipeline.adapters.mtf_market import (
     MultiTimeframeError,
     MultiTimeframeObservation,
 )
-from goldpipeline.adapters.trade_analyst_client import TradeAnalystClient
+from goldpipeline.adapters.plan_copy_client import PlanCopyClient
+from goldpipeline.adapters.trade_analyst_client import TradeAnalystClient, TradeAnalystRequest
 from goldpipeline.domain.errors import PipelineError, RunNotReadyError
 from goldpipeline.schemas.manifest import RunManifest, RunStatus
 from goldpipeline.schemas.news import CuratedNews
@@ -63,11 +66,21 @@ from goldpipeline.services.trade_analyst import (
     parse_ranking,
     ranking_token_ceiling,
 )
+from goldpipeline.services.trade_plan_copy import build_plan_copy_request, parse_plan_copy
 from goldpipeline.services.trade_plan_policy import (
+    PLAN_NEWS_LOOKBACK,
     PRODUCTION_POLICY_V1,
     TradePlanProductionPolicyV1,
 )
-from goldpipeline.services.trade_plan_render import render_and_validate
+from goldpipeline.services.trade_plan_presentation import (
+    PRESENTATION_VERSION,
+    document_from_artifacts,
+    news_document,
+    plan_news_items,
+    render_plan,
+    selected_prices,
+    validate_plan,
+)
 from goldpipeline.services.trade_plan_selector import (
     TradePlanSelection,
     TradePlanSelectionError,
@@ -77,7 +90,10 @@ from goldpipeline.storage.run_store import PreparedArtifact, RunDirectory, RunSt
 
 logger = logging.getLogger(__name__)
 
-TRADE_PLAN_STAGE_VERSION = "trade_plan_stage_v1"
+TRADE_PLAN_STAGE_VERSION = "trade_plan_stage_v2"
+
+NEWS_LOOKBACK = PLAN_NEWS_LOOKBACK
+"""How far back the curated news for a plan reaches. Recorded on every Run."""
 
 POLICY_FILENAME = "trade_plan_policy.json"
 MARKET_FILENAME = "trade_plan_market.json"
@@ -85,6 +101,10 @@ CANDIDATES_FILENAME = "trade_plan_candidates.json"
 ANALYST_REQUEST_FILENAME = "trade_plan_analyst_request.json"
 ANALYST_RESPONSE_FILENAME = "trade_plan_analyst_response.json"
 RANKING_FILENAME = "trade_plan_ranking.json"
+NEWS_FILENAME = "trade_plan_news.json"
+COPY_REQUEST_FILENAME = "trade_plan_copy_request.json"
+COPY_RESPONSE_FILENAME = "trade_plan_copy_response.json"
+COPY_FILENAME = "trade_plan_copy.json"
 SELECTION_FILENAME = "trade_plan_selection.json"
 FINAL_ARTICLE_FILENAME = "claude_final.md"
 """The historical name, reused deliberately.
@@ -101,6 +121,10 @@ TRADE_PLAN_ARTIFACTS = (
     ANALYST_REQUEST_FILENAME,
     ANALYST_RESPONSE_FILENAME,
     RANKING_FILENAME,
+    NEWS_FILENAME,
+    COPY_REQUEST_FILENAME,
+    COPY_RESPONSE_FILENAME,
+    COPY_FILENAME,
     SELECTION_FILENAME,
     FINAL_ARTICLE_FILENAME,
 )
@@ -289,9 +313,13 @@ def _candidates_document(
 
 
 def _selection_document(
-    selection: TradePlanSelection, *, plan: str, news: CuratedNews | None
+    selection: TradePlanSelection, *, news: CuratedNews | None
 ) -> dict[str, Any]:
-    """What was published, what was suppressed, and why."""
+    """What was published, what was suppressed, and why.
+
+    The rendered text is added once the page exists, so this document is also
+    one of the three the page is rendered *from*.
+    """
 
     def zone(entry: Any) -> dict[str, Any]:
         return {
@@ -317,6 +345,7 @@ def _selection_document(
 
     return {
         "stage_version": TRADE_PLAN_STAGE_VERSION,
+        "presentation_version": PRESENTATION_VERSION,
         "selection_method_version": selection.method_version,
         "observed_at": selection.observed_at.isoformat(),
         "symbol": selection.symbol,
@@ -346,8 +375,6 @@ def _selection_document(
             }
             for decision in selection.decisions
         ],
-        "final_text": plan,
-        "final_chars": len(plan),
     }
 
 
@@ -371,11 +398,12 @@ def build_trade_plan(
     *,
     observation: MultiTimeframeObservation,
     analyst: TradeAnalystClient,
+    copywriter: PlanCopyClient,
     policy: TradePlanProductionPolicyV1,
     news: CuratedNews | None,
     max_tokens: int | None,
 ) -> _Built:
-    """Run the whole deterministic chain, call the analyst once, render the page.
+    """Run the deterministic chain, rank once, write the copy once, render the page.
 
     Pure over its inputs: it touches no Run and writes no file, so the offline
     tests can drive the entire product without a store.
@@ -390,10 +418,33 @@ def build_trade_plan(
     payload = prompt.user
 
     ceiling = max_tokens if max_tokens is not None else ranking_token_ceiling(features)
-    response = analyst.rank(_request(system=prompt.system, user=payload, max_tokens=ceiling))
+    response = analyst.rank(
+        TradeAnalystRequest(system=prompt.system, user=payload, max_tokens=ceiling)
+    )
     ranking = parse_ranking(response.text, features=features)
     selection = select_trade_plan(features, ranking)
-    plan = render_and_validate(selection)
+
+    # The selection is final from here. Everything below is presentation.
+    news_items = plan_news_items(news)
+    news_doc = news_document(news, news_items, lookback_seconds=int(NEWS_LOOKBACK.total_seconds()))
+    selection_doc = _selection_document(selection, news=news)
+
+    copy_request = build_plan_copy_request(selection, news_items)
+    copy_response = copywriter.write(copy_request)
+    copy = parse_plan_copy(copy_response.text, selection=selection, news_items=news_items)
+    copy_doc = copy.document(provider=copy_response.provider, model=copy_response.model)
+
+    document = document_from_artifacts(selection_doc, copy_doc, news_doc)
+    plan = render_plan(document)
+    validate_plan(
+        plan,
+        document,
+        allowed_prices=selected_prices(selection_doc),
+        candidate_ids=frozenset(candidate.candidate_id for candidate in features.candidates),
+        news_displays=frozenset(item.display for item in news_items),
+    )
+    selection_doc["final_text"] = plan
+    selection_doc["final_chars"] = len(plan)
 
     buckets = expected_buckets(features)
     artifacts = [
@@ -423,9 +474,18 @@ def build_trade_plan(
                 "ranked": {key: list(values) for key, values in ranking.buckets.items()},
             },
         ),
+        PreparedArtifact.from_json(NEWS_FILENAME, news_doc),
+        PreparedArtifact.from_text(COPY_REQUEST_FILENAME, copy_request.user),
         PreparedArtifact.from_json(
-            SELECTION_FILENAME, _selection_document(selection, plan=plan, news=news)
+            COPY_RESPONSE_FILENAME,
+            {
+                "provider": copy_response.provider,
+                "model": copy_response.model,
+                "text": copy_response.text,
+            },
         ),
+        PreparedArtifact.from_json(COPY_FILENAME, copy_doc),
+        PreparedArtifact.from_json(SELECTION_FILENAME, selection_doc),
         PreparedArtifact.from_text(FINAL_ARTICLE_FILENAME, plan),
     ]
 
@@ -440,18 +500,13 @@ def build_trade_plan(
     )
 
 
-def _request(*, system: str, user: str, max_tokens: int) -> Any:
-    from goldpipeline.adapters.trade_analyst_client import TradeAnalystRequest
-
-    return TradeAnalystRequest(system=system, user=user, max_tokens=max_tokens)
-
-
 def write_trade_plan(
     *,
     run_id: str,
     store: RunStore,
     observe: Any,
     analyst: TradeAnalystClient,
+    copywriter: PlanCopyClient,
     news: CuratedNews | None = None,
     policy: TradePlanProductionPolicyV1 = PRODUCTION_POLICY_V1,
     max_tokens: int | None = None,
@@ -466,6 +521,7 @@ def write_trade_plan(
             :class:`MultiTimeframeObservation`. A callable rather than a source
             so a Run that is not due for this stage never opens a socket.
         analyst: Any client satisfying the analyst protocol.
+        copywriter: Any client satisfying the copywriter protocol.
         news: Optional untrusted context, threaded verbatim.
         policy: The production policy. Persisted in full on the Run.
         max_tokens: Ceiling for the ranking call. ``None`` derives it from
@@ -487,7 +543,8 @@ def write_trade_plan(
         manifest.record_event(
             "trade_plan.start",
             "OK",
-            f"policy={policy.version} provider={analyst.provider} model={analyst.model}",
+            f"policy={policy.version} provider={analyst.provider} model={analyst.model} "
+            f"copy={copywriter.provider}/{copywriter.model}",
         )
         run.save_manifest(manifest)
 
@@ -495,6 +552,7 @@ def write_trade_plan(
         built = build_trade_plan(
             observation=observation,
             analyst=analyst,
+            copywriter=copywriter,
             policy=policy,
             news=news,
             max_tokens=max_tokens,
@@ -563,8 +621,13 @@ __all__ = [
     "ANALYST_REQUEST_FILENAME",
     "ANALYST_RESPONSE_FILENAME",
     "CANDIDATES_FILENAME",
+    "COPY_FILENAME",
+    "COPY_REQUEST_FILENAME",
+    "COPY_RESPONSE_FILENAME",
     "FINAL_ARTICLE_FILENAME",
     "MARKET_FILENAME",
+    "NEWS_FILENAME",
+    "NEWS_LOOKBACK",
     "POLICY_FILENAME",
     "RANKING_FILENAME",
     "SELECTION_FILENAME",

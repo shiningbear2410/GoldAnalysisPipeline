@@ -407,13 +407,13 @@ def test_no_new_geometry_is_constructed_from_a_pair() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_the_cap_is_five_per_side_and_is_never_a_minimum() -> None:
-    """§4. No floor anywhere - nothing counts up to three.
+def test_the_cap_is_six_per_side_and_is_never_a_minimum() -> None:
+    """§4; Round 6.7 §R raised it from five. No floor anywhere.
 
     Identifiers, not prose: the module explicitly explains that it does not
     backfill or pad, and naming a refusal is the opposite of implementing it.
     """
-    assert trade_plan_selector.MAX_ENTRY_ZONES_PER_SIDE == 5
+    assert trade_plan_selector.MAX_ENTRY_ZONES_PER_SIDE == 6
     names = identifiers(SELECTOR) | public_names(trade_plan_selector)
 
     for forbidden in ("min_entry", "minimum", "backfill", "at_least", "quota", "floor"):
@@ -533,15 +533,24 @@ def test_the_two_shipped_products_are_untouched() -> None:
 
 
 def test_no_trade_plan_writer_prompt_exists() -> None:
-    """§37. There is no LLM writer for this document, and there will not be one."""
+    """§37. There is no LLM writer for this document, and there will not be one.
+
+    Round 6.7 added exactly one TRADE_PLAN prompt, and it is a copywriter: its
+    contract has no field for a price and its prose is refused if it holds a
+    digit. The page is still rendered by code, and no product routes to it as
+    a writer prompt.
+    """
     from goldpipeline import prompts
+    from goldpipeline.schemas.article import ArticleType
+    from goldpipeline.services.article_routing import SPECS
 
     names = {name for name in dir(prompts) if name.startswith("GOLD_")}
     assert "GOLD_TRADE_PLAN_WRITER_V1" not in names
-    assert not any("TRADE_PLAN" in name for name in names)
+    assert {name for name in names if "TRADE_PLAN" in name} == {"GOLD_TRADE_PLAN_COPY_V1"}
 
     files = {path.name for path in Path("src/goldpipeline/prompts").glob("*.md")}
-    assert not any("trade_plan" in name for name in files)
+    assert {name for name in files if "trade_plan" in name} == {"gold_trade_plan_copy_v1.md"}
+    assert SPECS[ArticleType.TRADE_PLAN].prompt_id is None
 
 
 def test_no_shipped_prompt_learned_a_word_from_this_round() -> None:

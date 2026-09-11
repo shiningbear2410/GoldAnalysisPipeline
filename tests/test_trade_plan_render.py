@@ -233,7 +233,7 @@ def test_no_candidate_id_leaks() -> None:
 
 
 def test_a_full_plan_stays_well_under_the_cap() -> None:
-    """§24. Five zones and a reference on both sides is the worst honest case."""
+    """§24. A full side and a nearly full one; Round 6.7 raised the cap to six."""
     features = features_of(
         *(
             decide(gap_source(lower, upper, GapDirection.BULLISH), price="4200", tag="-bai")
@@ -254,9 +254,9 @@ def test_a_full_plan_stays_well_under_the_cap() -> None:
     selection, text = plan(features)
 
     assert len(selection.seo_entries) == 5
-    assert len(selection.bai_entries) == 5
+    assert len(selection.bai_entries) == 6
     assert len(text) <= MAX_TRADE_PLAN_CHARS
-    assert len(text) < 200, f"ten zones of four digits fit easily: {len(text)}"
+    assert len(text) < 200, f"eleven zones of four digits fit easily: {len(text)}"
 
 
 def test_the_cap_fails_closed_rather_than_truncating() -> None:

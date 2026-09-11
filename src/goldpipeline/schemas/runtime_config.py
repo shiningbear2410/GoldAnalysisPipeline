@@ -85,6 +85,7 @@ FORBIDDEN_KEYS = frozenset(
         "OPENAI_API_KEY",
         "TELEGRAM_BOT_TOKEN",
         "INGEST_TOKEN",
+        "TELEGRAM_PLAN_BOT_TOKEN",
     }
 )
 """Credentials, refused by name.

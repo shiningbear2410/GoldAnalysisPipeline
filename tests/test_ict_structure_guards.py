@@ -318,6 +318,11 @@ ICT_BRANCH = {
     "trade_plan_policy.py",
     "trade_plan_stage.py",
     "trade_plan_gate.py",
+    # Round 6.7: the V2 page and the copywriter that writes words around it.
+    "trade_plan_presentation.py",
+    "trade_plan_copy.py",
+    "plan_copy_client.py",
+    "fake_plan_copywriter.py",
 }
 """Modules of the TRADE_PLAN branch, which are allowed to know about each other.
 

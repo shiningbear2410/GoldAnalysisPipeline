@@ -39,6 +39,13 @@ class SecretName(StrEnum):
     OPENAI_API_KEY = "OPENAI_API_KEY"
     TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
     INGEST_TOKEN = "INGEST_TOKEN"
+    TELEGRAM_PLAN_BOT_TOKEN = "TELEGRAM_PLAN_BOT_TOKEN"
+    """The ``/plan`` command bot. Round 6.7.
+
+    A second bot and therefore a second credential, never the review bot's
+    token: one identity listens for commands, the other delivers review copies,
+    and a leak of either must not grant the other's powers.
+    """
 
     @property
     def entry(self) -> str:
@@ -64,7 +71,12 @@ stops the pipeline - see :data:`CONDITIONAL_SECRETS`.
 """
 
 CONDITIONAL_SECRETS = frozenset(
-    {SecretName.TELEGRAM_BOT_TOKEN, SecretName.INGEST_TOKEN, SecretName.DEEPSEEK_API_KEY}
+    {
+        SecretName.TELEGRAM_BOT_TOKEN,
+        SecretName.INGEST_TOKEN,
+        SecretName.DEEPSEEK_API_KEY,
+        SecretName.TELEGRAM_PLAN_BOT_TOKEN,
+    }
 )
 """Needed only when the feature that uses them actually runs.
 

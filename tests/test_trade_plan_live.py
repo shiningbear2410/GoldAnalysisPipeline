@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from goldpipeline.adapters.fake_plan_copywriter import EchoPlanCopywriter
 from goldpipeline.adapters.fake_publisher import FakePublisherClient
 from goldpipeline.adapters.fake_trade_analyst import (
     EchoTradeAnalyst,
@@ -152,6 +153,7 @@ def clients(
     return PipelineClients(
         trade_plan_market=market if market is not None else observe(),
         trade_plan_analyst=lambda selection: analyst or EchoTradeAnalyst(),
+        trade_plan_copywriter=lambda selection: EchoPlanCopywriter(),
         trade_plan_news=news,
     )
 
@@ -292,9 +294,10 @@ def test_the_final_article_is_the_rendered_plan(runs_dir: Path, trade_plan_run: 
     selection = json.loads(run.read_artifact_bytes(SELECTION_FILENAME))
 
     assert article == selection["final_text"]
-    assert article.startswith("SEO\n")
-    assert "\nBAI\n" in article
-    assert len(article) <= 650
+    assert article.startswith("🎯 KẾ HOẠCH VÀNG — ")
+    assert "\n🔴 SEO" in article
+    assert "\n🟢 BAI" in article
+    assert len(article) <= 3500
 
 
 def test_the_gate_approves_and_names_itself(runs_dir: Path, trade_plan_run: str) -> None:
@@ -305,7 +308,7 @@ def test_the_gate_approves_and_names_itself(runs_dir: Path, trade_plan_run: str)
     )
 
     assert decision["decision"] == Decision.APPROVED.value
-    assert decision["gate_version"] == "gold_trade_plan_gate_v1"
+    assert decision["gate_version"] == "gold_trade_plan_gate_v2"
     assert decision["stage"] == "trade_plan_gate"
     assert decision["blockers"] == []
     # No review and no finalization happened, and the decision says so rather
@@ -722,6 +725,7 @@ def stage(runs_dir: Path, run_id: str, **kwargs: Any) -> Any:
         store=RunStore(runs_dir),
         observe=kwargs.pop("observe", observe()),
         analyst=kwargs.pop("analyst", EchoTradeAnalyst()),
+        copywriter=kwargs.pop("copywriter", EchoPlanCopywriter()),
         **kwargs,
     )
 
@@ -904,7 +908,7 @@ def test_10_a_run_with_no_candidates_still_produces_a_valid_page(
         .rstrip("\n")
     )
     assert "SEO" in article and "BAI" in article
-    assert len(article) <= 650
+    assert len(article) <= 3500
 
 
 def test_11_one_empty_side_renders_the_em_dash(runs_dir: Path, trade_plan_run: str) -> None:
@@ -949,6 +953,7 @@ def test_13_a_second_stage_attempt_is_refused(runs_dir: Path, trade_plan_run: st
         store=RunStore(runs_dir),
         observe=observe(),
         analyst=EchoTradeAnalyst(),
+        copywriter=EchoPlanCopywriter(),
     )
 
     assert not second.succeeded

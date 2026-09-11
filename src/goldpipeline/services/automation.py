@@ -49,6 +49,7 @@ from goldpipeline.adapters.base import MarketDataSource
 from goldpipeline.adapters.event_transport import EventTransport
 from goldpipeline.adapters.inbox_source import parse_event
 from goldpipeline.adapters.publisher_client import PublisherClient
+from goldpipeline.adapters.telegram_command_bot import CommandBotClient
 from goldpipeline.config import AutomationSettings, IngestSettings, ReviewDeliverySettings
 from goldpipeline.domain.errors import (
     ArticleTypeNotReadyError,
@@ -81,6 +82,7 @@ from goldpipeline.schemas.common import utc_now
 from goldpipeline.schemas.ingestion import IngestOutcome, IngestResult
 from goldpipeline.schemas.manifest import RunStatus
 from goldpipeline.schemas.orchestration import PipelineMode, PipelineStatus
+from goldpipeline.schemas.plan_command import DeliveryStatus, PlanCommandSettings
 from goldpipeline.schemas.review_delivery import INTENT_FILENAME as REVIEW_INTENT_FILENAME
 from goldpipeline.schemas.review_delivery import RESULT_FILENAME as REVIEW_RESULT_FILENAME
 from goldpipeline.schemas.review_delivery import ReviewDeliveryStatus
@@ -92,13 +94,15 @@ from goldpipeline.services.automation_state import (
     write_defer,
 )
 from goldpipeline.services.event_intake import intake
-from goldpipeline.services.inbox import INCOMING, Inbox, Ledger
+from goldpipeline.services.inbox import INCOMING, INDEX, Inbox, Ledger
 from goldpipeline.services.ingestion import IngestionContext, ingest_claimed, reconcile
 from goldpipeline.services.orchestrator import (
     PipelineClients,
     PipelineRunResult,
     resume_pipeline,
 )
+from goldpipeline.services.plan_command import PlanCommandStore, poll_plan_commands
+from goldpipeline.services.plan_delivery import deliver_plan_replies
 from goldpipeline.services.preferences import PreferencesStore
 from goldpipeline.services.review_delivery import deliver_review, is_eligible
 from goldpipeline.services.run_lock import WORKER_LOCK_FILENAME, RunLock
@@ -201,6 +205,20 @@ class WorkerContext:
     never constructs one - and therefore never reads the bot token.
     """
 
+    plan_command: PlanCommandSettings = field(default_factory=PlanCommandSettings)
+    """The ``/plan`` command bot. Round 6.7. Off by default.
+
+    When off, a tick makes no Telegram request at all - exactly the tick this
+    worker did before the command existed. When on, an idle tick makes one
+    short ``getUpdates`` call and nothing else: no market, no news, no model.
+    """
+
+    plan_command_problem: str | None = None
+    """Why the command's settings file could not be used, if it could not."""
+
+    plan_bot: Callable[[], CommandBotClient] | None = None
+    """Builds the command bot, lazily. Resolves its own credential, by name."""
+
     config: ProductionConfig | None = None
     """The production configuration this context was built from, if any.
 
@@ -253,6 +271,9 @@ class _Tick:
     remote_invalid: int = 0
     remote_conflict: int = 0
     remote_items: list[WorkItem] = field(default_factory=list)
+    plan_polled: bool = False
+    plan_commands: list[WorkItem] = field(default_factory=list)
+    plan_replies: list[WorkItem] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     def finish(self, status: TickStatus) -> AutomationTickResult:
@@ -284,6 +305,9 @@ class _Tick:
             remote_events_invalid=self.remote_invalid,
             remote_events_conflict=self.remote_conflict,
             remote_intake=self.remote_items,
+            plan_command_polled=self.plan_polled,
+            plan_commands=self.plan_commands,
+            plan_replies=self.plan_replies,
             errors=self.errors,
         )
 
@@ -335,6 +359,9 @@ def run_tick(context: WorkerContext, *, now: datetime | None = None) -> Automati
         return tick.finish(TickStatus.SKIPPED)
 
     try:
+        # First, so a /plan tapped a moment ago becomes an inbox event that
+        # this same tick then processes like any other.
+        _poll_plan_commands(context, tick, moment)
         _fetch_remote_events(context, tick)
         _reconcile(context, tick)
         _promote_deferred(context, tick, moment)
@@ -343,6 +370,7 @@ def run_tick(context: WorkerContext, *, now: datetime | None = None) -> Automati
         # Last, so a Run finished by this very tick is shown immediately rather
         # than a minute later. Publishing is untouched: this changes no status.
         _deliver_reviews(context, tick, moment)
+        _deliver_plan_replies(context, tick, moment)
         status = TickStatus.BLOCKED if tick.blocked else TickStatus.OK
     except PipelineError as exc:
         # A worker-level failure. The stage-level ones are handled where they
@@ -711,6 +739,138 @@ def _deliver_reviews(context: WorkerContext, tick: _Tick, moment: datetime) -> N
                 outcome=(WorkOutcome.COMPLETED if outcome.delivered else WorkOutcome.FAILED),
                 code=str(outcome.status),
                 detail="review copy; the Run remains READY_TO_PUBLISH",
+            )
+        )
+
+
+def _plan_command_on(context: WorkerContext) -> bool:
+    return context.plan_command.enabled and context.plan_bot is not None
+
+
+def _poll_plan_commands(context: WorkerContext, tick: _Tick, moment: datetime) -> None:
+    """Ask the command bot for ``/plan`` requests and submit the authorised ones.
+
+    Never raises for a Telegram or state problem: the command is an optional
+    upstream, and a bot that cannot be reached must cost one recorded line and
+    nothing else. Everything after this runs identically either way.
+    """
+    if context.plan_command_problem is not None:
+        tick.errors.append("PLAN_COMMAND_SETTINGS_INVALID")
+    if not _plan_command_on(context):
+        return
+    assert context.plan_bot is not None
+
+    tick.plan_polled = True
+    try:
+        report = poll_plan_commands(
+            settings=context.plan_command,
+            store=PlanCommandStore(context.automation.root),
+            inbox=context.inbox,
+            ledger=Ledger(context.inbox.directory(INDEX)),
+            bot=context.plan_bot(),
+            now=moment,
+        )
+    except PipelineError as exc:
+        logger.error("automation.plan_command status=FAILED code=%s", exc.code)
+        tick.plan_commands.append(
+            WorkItem(
+                kind="event",
+                identifier="plan-command-poll",
+                outcome=WorkOutcome.FAILED,
+                code=exc.code,
+                detail="the /plan poll failed; nothing was submitted and the offset did not move",
+            )
+        )
+        tick.errors.append(exc.code)
+        return
+
+    for event_id in report.accepted:
+        tick.plan_commands.append(
+            WorkItem(
+                kind="event",
+                identifier=event_id,
+                outcome=WorkOutcome.COMPLETED,
+                code="PLAN_SUBMITTED",
+            )
+        )
+    for event_id in report.duplicates:
+        tick.plan_commands.append(
+            WorkItem(
+                kind="event",
+                identifier=event_id,
+                outcome=WorkOutcome.SKIPPED,
+                code="PLAN_DUPLICATE",
+            )
+        )
+    for reason in report.ignored:
+        tick.plan_commands.append(
+            WorkItem(
+                kind="event",
+                identifier="plan-command-update",
+                outcome=WorkOutcome.SKIPPED,
+                code=str(reason),
+            )
+        )
+    for acknowledgement in report.acknowledgements:
+        tick.plan_commands.append(
+            WorkItem(
+                kind="event",
+                identifier=acknowledgement.event_id,
+                outcome=(
+                    WorkOutcome.COMPLETED
+                    if acknowledgement.status is DeliveryStatus.DELIVERED
+                    else WorkOutcome.FAILED
+                ),
+                code=f"ACK_{acknowledgement.status}",
+            )
+        )
+
+
+def _deliver_plan_replies(context: WorkerContext, tick: _Tick, moment: datetime) -> None:
+    """Send each finished ``/plan`` its plan, or one failure notice. Changes no Run."""
+    if not _plan_command_on(context):
+        return
+    assert context.plan_bot is not None
+
+    try:
+        results = deliver_plan_replies(
+            settings=context.plan_command,
+            store=PlanCommandStore(context.automation.root),
+            runs=context.store,
+            inbox=context.inbox,
+            ledger=Ledger(context.inbox.directory(INDEX)),
+            automation=context.automation,
+            bot_factory=context.plan_bot,
+            now=moment,
+        )
+    except PipelineError as exc:
+        logger.error("automation.plan_reply status=FAILED code=%s", exc.code)
+        tick.plan_replies.append(
+            WorkItem(
+                kind="event",
+                identifier="plan-command-reply",
+                outcome=WorkOutcome.FAILED,
+                code=exc.code,
+                detail="a /plan reply could not be attempted; no Run is affected",
+            )
+        )
+        tick.errors.append(exc.code)
+        return
+
+    for result in results:
+        tick.plan_replies.append(
+            WorkItem(
+                kind="event",
+                identifier=result.event_id,
+                outcome=(
+                    WorkOutcome.COMPLETED
+                    if result.status is DeliveryStatus.DELIVERED
+                    else WorkOutcome.SKIPPED
+                    if result.status is DeliveryStatus.SKIPPED
+                    else WorkOutcome.FAILED
+                ),
+                code=f"{result.kind}_{result.status}",
+                detail="command reply; the Run remains where it was",
             )
         )
 

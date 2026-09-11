@@ -125,6 +125,15 @@ class AnthropicTradeAnalystClient:
             provider=self.provider,
         )
 
+    def write(self, request: TradeAnalystRequest) -> TradeAnalystResponse:
+        """The Plan Copywriter's call. Round 6.7.
+
+        The same transport for a smaller answer: two strings in, text out,
+        thinking off, an unambiguous fence removed. Every word that comes back is
+        still refused unless the copy validator accepts it.
+        """
+        return self.rank(request)
+
     def _call(self, request: TradeAnalystRequest) -> Any:
         import anthropic
 

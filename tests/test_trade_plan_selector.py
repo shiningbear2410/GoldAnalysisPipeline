@@ -406,8 +406,8 @@ SEVEN_SEO = (
 )
 
 
-def test_27_only_five_bai_zones_survive_and_the_ranking_picks_which() -> None:
-    """§4, §27. Seven non-contained zones; the last two are recorded, not published."""
+def test_27_only_six_bai_zones_survive_and_the_ranking_picks_which() -> None:
+    """§4, §27; Round 6.7 §R. Seven non-contained zones; the last one is recorded."""
     features = bai_zones(*SEVEN_BAI)
     order = list(expected_buckets(features)[BAI_KEY])
 
@@ -416,17 +416,17 @@ def test_27_only_five_bai_zones_survive_and_the_ranking_picks_which() -> None:
         features, ranked(features, bai_entry_candidate_ids=list(reversed(order)))
     )
 
-    assert len(forward.bai_entries) == MAX_ENTRY_ZONES_PER_SIDE == 5
-    assert len(backward.bai_entries) == 5
+    assert len(forward.bai_entries) == MAX_ENTRY_ZONES_PER_SIDE == 6
+    assert len(backward.bai_entries) == 6
 
-    assert {zone.candidate_id for zone in forward.bai_entries} == set(order[:5])
-    assert {zone.candidate_id for zone in backward.bai_entries} == set(order[-5:])
+    assert {zone.candidate_id for zone in forward.bai_entries} == set(order[:6])
+    assert {zone.candidate_id for zone in backward.bai_entries} == set(order[-6:])
     assert {zone.candidate_id for zone in forward.bai_entries} != {
         zone.candidate_id for zone in backward.bai_entries
     }
 
 
-def test_27_the_two_that_miss_the_cut_are_recorded_as_below_max_count() -> None:
+def test_27_the_one_that_misses_the_cut_is_recorded_as_below_max_count() -> None:
     """§8, §27."""
     features = bai_zones(*SEVEN_BAI)
     order = list(expected_buckets(features)[BAI_KEY])
@@ -438,8 +438,8 @@ def test_27_the_two_that_miss_the_cut_are_recorded_as_below_max_count() -> None:
         if decision.outcome is SelectionOutcome.BELOW_MAX_COUNT
     ]
 
-    assert missed == order[5:]
-    assert len(missed) == 2
+    assert missed == order[6:]
+    assert len(missed) == 1
 
 
 def test_27_geometry_never_changes_with_the_cut() -> None:
@@ -467,17 +467,17 @@ def test_27_geometry_never_changes_with_the_cut() -> None:
 
 
 def test_27_the_seo_side_caps_independently() -> None:
-    """§4. Five per side, not five in total."""
+    """§4. Six per side, not six in total."""
     features = seo_zones(*SEVEN_SEO)
 
     selection = select_trade_plan(features, natural(features))
 
-    assert len(selection.seo_entries) == 5
+    assert len(selection.seo_entries) == 6
     assert len(selection.bai_entries) == 0
 
 
 def test_both_sides_can_be_full_at_once() -> None:
-    """§4. Ten published zones is legal; five is a per-side cap."""
+    """§4. Twelve published zones is legal; six is a per-side cap."""
     features = features_of(
         *(
             decide(gap_source(lower, upper, GapDirection.BULLISH), price="4200", tag="-bai")
@@ -499,8 +499,8 @@ def test_both_sides_can_be_full_at_once() -> None:
 
     selection = select_trade_plan(features, natural(features))
 
-    assert len(selection.bai_entries) == 5
-    assert len(selection.seo_entries) == 5
+    assert len(selection.bai_entries) == 6
+    assert len(selection.seo_entries) == 6
 
 
 # --------------------------------------------------------------------------

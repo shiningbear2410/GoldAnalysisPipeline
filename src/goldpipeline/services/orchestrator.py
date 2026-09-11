@@ -52,6 +52,7 @@ from goldpipeline.adapters.digest_finalizer_client import (
 )
 from goldpipeline.adapters.digest_writer_client import DigestWriterClient
 from goldpipeline.adapters.finalizer_client import FinalizerClient, LazyFinalizerClient
+from goldpipeline.adapters.plan_copy_client import PlanCopyClient
 from goldpipeline.adapters.publisher_client import PublisherClient
 from goldpipeline.adapters.reviewer_client import ReviewerClient
 from goldpipeline.adapters.trade_analyst_client import TradeAnalystClient
@@ -213,14 +214,21 @@ class PipelineClients:
     put prose.
     """
 
-    trade_plan_news: Callable[[], Any] | None = None
-    """Optional untrusted context for the analyst.
+    trade_plan_copywriter: Callable[[GenerationSelection | None], PlanCopyClient] | None = None
+    """The Plan Copywriter. Round 6.7. Words around a finished selection.
 
-    ``None`` is the production default and a legitimate one. The scheduled
-    worker has never collected news - that path belongs to the producer - and
-    adding a live fetch to a tick would be building a second news engine, which
-    is exactly what Round 6.6h was told not to do. The seam exists so the
-    already-curated object can be threaded the day it is available.
+    Separate from the analyst for the same reason the analyst is separate from
+    the writer: a different protocol and a different job. It is called after
+    the selection is final and cannot change it.
+    """
+
+    trade_plan_news: Callable[[], Any] | None = None
+    """Optional untrusted context: the existing curated-news path.
+
+    Round 6.7 wired it, through the producer's own collector and curator - no
+    second news engine. Called only when a TRADE_PLAN Run reaches its stage, so
+    an idle tick never collects anything. ``None`` still means "no news", which
+    the page states honestly rather than inventing any.
     """
 
     digest_market: DigestMarketSource | None = None
@@ -594,6 +602,9 @@ def _run_trade_plan(
         store=store,
         observe=_require(clients.trade_plan_market, "trade plan market"),
         analyst=_require(clients.trade_plan_analyst, "trade plan analyst")(
+            _generation_of(store, execution.run_id)
+        ),
+        copywriter=_require(clients.trade_plan_copywriter, "trade plan copywriter")(
             _generation_of(store, execution.run_id)
         ),
         news=clients.trade_plan_news() if clients.trade_plan_news is not None else None,

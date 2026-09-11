@@ -1,16 +1,16 @@
 """The gate a trade plan must pass, and it checks a different thing.
 
-Round 6.6h. The analysis gate asks whether a model's article survived review and
-repair. None of that happened here: there is no draft, no verdict, no
-finalization, and asking for them would be asking a document to account for a
-history it does not have.
+Round 6.6h built it; Round 6.7 taught it the second version of the page. The
+analysis gate asks whether a model's article survived review and repair. None of
+that happened here: there is no draft, no verdict, no finalization, and asking
+for them would be asking a document to account for a history it does not have.
 
-What this gate asks instead is the only question a deterministic page can be
-wrong about: **does the published text say exactly what the selection decided,
-and did every number in it come from a candle?** It re-renders the plan from the
-persisted selection and compares bytes, then walks each published price back to
-a consolidated candidate, then checks the vocabulary, the length and the
-absence of everything the contract forbids.
+What this gate asks instead is the only question this page can be wrong about:
+**does the published text say exactly what was decided, and did every number in
+it come from a candle?** It re-renders the page from the three persisted
+documents it is made of - the selection, the validated copy and the curated news
+- and compares bytes; then walks each published price back to a consolidated
+candidate; then checks the structure, the copy's ids and the prose rules.
 
 It writes the same ``publish_decision.json`` the analysis gate writes, under its
 own ``gate_version``. That is what lets review delivery, the worker and every
@@ -39,20 +39,18 @@ from goldpipeline.schemas.publish import (
 )
 from goldpipeline.schemas.review import Severity
 from goldpipeline.services.publish_gate import DECISION_FILENAME
-from goldpipeline.services.trade_plan_render import (
-    BAI_HEADING,
-    EMPTY_SIDE,
-    FARTHER_SUFFIX,
-    FORBIDDEN_SUBSTRINGS,
-    MAIN_ZONE_SUFFIX,
-    MAX_TRADE_PLAN_CHARS,
-    PUBLIC_VOCABULARY,
-    SEO_HEADING,
-    ZONE_DASH,
+from goldpipeline.services.trade_plan_copy import PLAN_COPY_PROMPT_VERSION
+from goldpipeline.services.trade_plan_presentation import (
+    PlanPresentationError,
+    document_from_artifacts,
+    selected_prices,
+    validate_plan,
 )
 from goldpipeline.services.trade_plan_stage import (
     CANDIDATES_FILENAME,
+    COPY_FILENAME,
     FINAL_ARTICLE_FILENAME,
+    NEWS_FILENAME,
     POLICY_FILENAME,
     RANKING_FILENAME,
     SELECTION_FILENAME,
@@ -63,11 +61,12 @@ from goldpipeline.storage.run_store import PreparedArtifact, RunDirectory, RunSt
 
 logger = logging.getLogger(__name__)
 
-TRADE_PLAN_GATE_VERSION = "gold_trade_plan_gate_v1"
+TRADE_PLAN_GATE_VERSION = "gold_trade_plan_gate_v2"
 """Named separately from the analysis gate, because it proves a different thing.
 
-A decision that said ``gold_publish_gate_v1`` over a document with no review
-would be claiming checks that never ran.
+Version two, because the page it proves changed shape: a decision recorded as
+``v1`` over a page with a market view would claim checks that could not have
+understood it.
 """
 
 
@@ -141,6 +140,11 @@ def gate_trade_plan(
 # --------------------------------------------------------------------------
 
 
+def _load(run: RunDirectory, name: str) -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads(run.read_artifact_bytes(name).decode("utf-8"))
+    return loaded
+
+
 def _run_checks(run: RunDirectory, manifest: RunManifest) -> list[GateCheck]:
     """Integrity first; every later check reads content the manifest vouches for."""
     integrity = _check_integrity(run, manifest)
@@ -148,17 +152,19 @@ def _run_checks(run: RunDirectory, manifest: RunManifest) -> list[GateCheck]:
     if integrity.status is CheckStatus.FAIL:
         return checks
 
-    selection = json.loads(run.read_artifact_bytes(SELECTION_FILENAME).decode("utf-8"))
-    candidates = json.loads(run.read_artifact_bytes(CANDIDATES_FILENAME).decode("utf-8"))
-    ranking = json.loads(run.read_artifact_bytes(RANKING_FILENAME).decode("utf-8"))
+    selection = _load(run, SELECTION_FILENAME)
+    candidates = _load(run, CANDIDATES_FILENAME)
+    ranking = _load(run, RANKING_FILENAME)
+    copy = _load(run, COPY_FILENAME)
+    news = _load(run, NEWS_FILENAME)
     article = run.read_artifact_bytes(FINAL_ARTICLE_FILENAME).decode("utf-8").rstrip("\n")
 
     checks.append(_check_run_state(manifest))
     checks.append(_check_render_match(article, selection))
     checks.append(_check_geometry_provenance(selection, candidates))
     checks.append(_check_ranking_provenance(selection, ranking, candidates))
-    checks.append(_check_structure(article))
-    checks.append(_check_vocabulary(article, selection))
+    checks.append(_check_presentation(article, selection, copy, news, candidates))
+    checks.append(_check_copy_provenance(selection, copy, news))
     return checks
 
 
@@ -228,12 +234,7 @@ def _check_run_state(manifest: RunManifest) -> GateCheck:
 
 
 def _check_render_match(article: str, selection: dict[str, Any]) -> GateCheck:
-    """The published text is byte-for-byte the text the selection produced.
-
-    The selection artifact carries the rendering the stage made. Comparing the
-    two proves nothing edited the page between the renderer and the disk - which
-    is the only way a model's words could ever reach this document.
-    """
+    """The published text is byte-for-byte the text the stage rendered."""
     findings: list[GateFinding] = []
     expected = str(selection.get("final_text", ""))
 
@@ -249,7 +250,7 @@ def _check_render_match(article: str, selection: dict[str, Any]) -> GateCheck:
         findings.append(
             _finding(
                 BlockerCode.ARTIFACT_INTEGRITY_FAILURE,
-                "the published text is not the text the deterministic renderer produced",
+                "the published text is not the text the renderer produced",
                 source=FINAL_ARTICLE_FILENAME,
             )
         )
@@ -265,38 +266,20 @@ def _check_render_match(article: str, selection: dict[str, Any]) -> GateCheck:
 
     return _check(
         CheckId.CONTEXT_CONSISTENCY,
-        "the published text is exactly the deterministic rendering",
+        "the published text is exactly the rendering the stage recorded",
         findings,
     )
 
 
-def _published_prices(selection: dict[str, Any]) -> set[str]:
-    prices: set[str] = set()
-    for key in ("seo_entries", "bai_entries"):
-        for zone in selection.get(key, []):
-            prices.add(str(zone["lower"]))
-            prices.add(str(zone["upper"]))
-    for key in ("seo_reference", "bai_reference"):
-        entry = selection.get(key)
-        if entry:
-            prices.add(str(entry["level"]))
-    return prices
-
-
 def _check_geometry_provenance(selection: dict[str, Any], candidates: dict[str, Any]) -> GateCheck:
-    """Every published number is a consolidated candidate's own price.
-
-    Walked through the artifacts rather than through objects in memory, so the
-    check proves what a reader of the Run could prove: this price, that
-    candidate, those supporting decisions, that source.
-    """
+    """Every published number is a consolidated candidate's own price."""
     findings: list[GateFinding] = []
     by_id = {
         entry["consolidated_candidate_id"]: entry for entry in candidates.get("consolidated", [])
     }
     decisions = {entry["candidate_id"]: entry for entry in candidates.get("decisions", [])}
 
-    for key, is_zone in (("seo_entries", True), ("bai_entries", True)):
+    for key in ("seo_entries", "bai_entries"):
         for zone in selection.get(key, []):
             candidate = by_id.get(zone["candidate_id"])
             if candidate is None:
@@ -318,7 +301,7 @@ def _check_geometry_provenance(selection: dict[str, Any], candidates: dict[str, 
                         f"published zone {zone['candidate_id']} does not match its candidate",
                     )
                 )
-            if is_zone and not candidate["supporting_candidate_ids"]:
+            if not candidate["supporting_candidate_ids"]:
                 findings.append(
                     _finding(
                         BlockerCode.SUSPICIOUS_PRICE,
@@ -381,16 +364,7 @@ def _check_ranking_provenance(
             )
         )
 
-    published = {
-        zone["candidate_id"]
-        for key in ("seo_entries", "bai_entries")
-        for zone in selection.get(key, [])
-    } | {
-        selection[key]["candidate_id"]
-        for key in ("seo_reference", "bai_reference")
-        if selection.get(key)
-    }
-    if not published <= ranked:
+    if not _published_ids(selection) <= ranked:
         findings.append(
             _finding(
                 BlockerCode.ARTIFACT_INTEGRITY_FAILURE,
@@ -414,103 +388,88 @@ def _check_ranking_provenance(
     )
 
 
-def _check_structure(article: str) -> GateCheck:
-    """One SEO section, one BAI section, in that order, within the cap."""
-    findings: list[GateFinding] = []
-    lines = article.split("\n")
-
-    if lines.count(SEO_HEADING) != 1:
-        findings.append(
-            _finding(BlockerCode.ARTICLE_LOOKS_LIKE_JSON, "expected exactly one SEO heading")
-        )
-    if lines.count(BAI_HEADING) != 1:
-        findings.append(
-            _finding(BlockerCode.ARTICLE_LOOKS_LIKE_JSON, "expected exactly one BAI heading")
-        )
-    if (
-        SEO_HEADING in lines
-        and BAI_HEADING in lines
-        and lines.index(SEO_HEADING) > lines.index(BAI_HEADING)
-    ):
-        findings.append(_finding(BlockerCode.ARTICLE_LOOKS_LIKE_JSON, "SEO must precede BAI"))
-    if not article.strip():
-        findings.append(_finding(BlockerCode.ARTICLE_EMPTY, "the plan is empty"))
-    if len(article) > MAX_TRADE_PLAN_CHARS:
-        findings.append(
-            _finding(
-                BlockerCode.ARTICLE_TOO_LONG,
-                f"the plan is {len(article)} characters, over the {MAX_TRADE_PLAN_CHARS} cap",
-            )
-        )
-    if any(ord(character) < 32 and character != "\n" for character in article):
-        findings.append(
-            _finding(BlockerCode.ARTICLE_CONTROL_CHARACTERS, "the plan contains control characters")
-        )
-
-    return _check(CheckId.ARTICLE_STRUCTURE, "the plan has the contracted shape", findings)
-
-
-def _check_vocabulary(article: str, selection: dict[str, Any]) -> GateCheck:
-    """Nothing on the page but the allowed words, the allowed prices and digits.
-
-    This is where a stop loss, a score, a disclaimer or a candidate id would be
-    caught - not by naming each one, but because the vocabulary is closed and
-    the price set is exactly what the selection chose.
-    """
-    findings: list[GateFinding] = []
-
-    for forbidden in FORBIDDEN_SUBSTRINGS:
-        if forbidden in article:
-            findings.append(
-                _finding(
-                    BlockerCode.INSTRUCTION_SHAPED_TEXT,
-                    f"the plan contains forbidden text {forbidden!r}",
-                )
-            )
-
-    for key in ("seo_entries", "bai_entries"):
-        for zone in selection.get(key, []):
-            if zone["candidate_id"] in article:
-                findings.append(
-                    _finding(
-                        BlockerCode.POSSIBLE_CREDENTIAL_EXPOSURE,
-                        "a candidate id leaked into the published plan",
-                    )
-                )
-
-    words = {
-        word
-        for line in article.split("\n")
-        for word in line.replace("(", " ").replace(")", " ").split()
-        if not any(character.isdigit() for character in word)
+def _published_ids(selection: dict[str, Any]) -> set[str]:
+    return {
+        zone["candidate_id"]
+        for key in ("seo_entries", "bai_entries")
+        for zone in selection.get(key, [])
+    } | {
+        selection[key]["candidate_id"]
+        for key in ("seo_reference", "bai_reference")
+        if selection.get(key)
     }
-    unknown = sorted(words - PUBLIC_VOCABULARY)
-    if unknown:
+
+
+def _check_presentation(
+    article: str,
+    selection: dict[str, Any],
+    copy: dict[str, Any],
+    news: dict[str, Any],
+    candidates: dict[str, Any],
+) -> GateCheck:
+    """The page is the rendering of its three documents, and breaks no V2 rule."""
+    findings: list[GateFinding] = []
+    try:
+        document = document_from_artifacts(selection, copy, news)
+        validate_plan(
+            article,
+            document,
+            allowed_prices=selected_prices(selection),
+            candidate_ids=frozenset(
+                entry["consolidated_candidate_id"] for entry in candidates.get("consolidated", [])
+            ),
+            news_displays=frozenset(str(item["display"]) for item in news.get("items", [])),
+        )
+    except (PlanPresentationError, KeyError, ValueError) as exc:
+        findings.append(_finding(BlockerCode.ARTICLE_LOOKS_LIKE_JSON, str(exc)))
+
+    return _check(
+        CheckId.ARTICLE_STRUCTURE,
+        "the page has the contracted V2 shape and says only what was decided",
+        findings,
+    )
+
+
+def _check_copy_provenance(
+    selection: dict[str, Any], copy: dict[str, Any], news: dict[str, Any]
+) -> GateCheck:
+    """Every note describes a selected id; every cited item was offered."""
+    findings: list[GateFinding] = []
+    entries = {
+        zone["candidate_id"]
+        for key in ("seo_entries", "bai_entries")
+        for zone in selection.get(key, [])
+    }
+    references = {
+        selection[key]["candidate_id"]
+        for key in ("seo_reference", "bai_reference")
+        if selection.get(key)
+    }
+    offered = {str(item["news_item_id"]) for item in news.get("items", [])}
+
+    if copy.get("prompt_version") != PLAN_COPY_PROMPT_VERSION:
         findings.append(
             _finding(
-                BlockerCode.INSTRUCTION_SHAPED_TEXT,
-                f"the plan uses words outside the public vocabulary: {unknown}",
+                BlockerCode.INSTRUCTION_SHAPED_TEXT, "the copy was written under another prompt"
             )
         )
-
-    allowed = _published_prices(selection)
-    for line in article.split("\n"):
-        if line in {"", SEO_HEADING, BAI_HEADING, EMPTY_SIDE}:
-            continue
-        body = line.replace(MAIN_ZONE_SUFFIX, "").replace(FARTHER_SUFFIX, "").strip()
-        for token in body.split(ZONE_DASH):
-            token = token.strip()
-            if token and token not in allowed:
-                findings.append(
-                    _finding(
-                        BlockerCode.SUSPICIOUS_PRICE,
-                        f"the plan shows {token!r}, which is not a selected price",
-                    )
-                )
+    if not set(copy.get("zone_notes") or {}) <= entries:
+        findings.append(
+            _finding(BlockerCode.INSTRUCTION_SHAPED_TEXT, "a zone note names an unselected id")
+        )
+    if not set(copy.get("reference_notes") or {}) <= references:
+        findings.append(
+            _finding(BlockerCode.INSTRUCTION_SHAPED_TEXT, "a reference note names an unselected id")
+        )
+    cited = list(copy.get("news_item_ids") or [])
+    if not set(cited) <= offered or len(cited) != len(set(cited)):
+        findings.append(
+            _finding(BlockerCode.INSTRUCTION_SHAPED_TEXT, "the copy cites a news item not offered")
+        )
 
     return _check(
         CheckId.INSTRUCTION_SHAPED_TEXT,
-        "the plan uses only the public vocabulary and the selected prices",
+        "the copy describes only selected ids and cites only offered news",
         findings,
     )
 

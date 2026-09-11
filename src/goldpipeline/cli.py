@@ -12,10 +12,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import logging
 import os
 import secrets
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -510,6 +511,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan.add_argument("--xml", action="store_true", help="Print the task XML.")
     plan.add_argument("--json", action="store_true", help="Emit the plan as JSON.")
+
+    plan_status = subparsers.add_parser(
+        "plan-command-status",
+        help="Read-only state of the /plan command bot. No network, no secret values.",
+    )
+    _add_automation_arguments(plan_status)
+
+    plan_activate = subparsers.add_parser(
+        "plan-command-activate",
+        help="Verify the /plan bot, register its menu command, and switch polling on.",
+    )
+    _add_automation_arguments(plan_activate)
+    plan_activate.add_argument(
+        "--chat-id", required=True, help="The numeric chat allowed to use /plan."
+    )
+    plan_activate.add_argument(
+        "--bot-username", required=True, help="The command bot's username, checked by getMe."
+    )
+
+    plan_disable = subparsers.add_parser(
+        "plan-command-disable",
+        help="Switch /plan polling off. Receipts and reply records are kept.",
+    )
+    _add_automation_arguments(plan_disable)
 
     secrets_status = subparsers.add_parser(
         "secrets-status",
@@ -1482,11 +1507,14 @@ def _pipeline_clients(args: argparse.Namespace) -> PipelineClients:
         trade_plan_analyst=lambda selection: _trade_plan_analyst_client(
             fake=fake_ai or getattr(args, "fake_writer", False)
         ),
-        # No production news path reaches a scheduled tick - collection belongs
-        # to the producer, and adding a fetch here would be a second news
-        # engine. The seam stays so the already-curated object can be threaded
-        # the day one is available; until then `None` is the honest answer.
-        trade_plan_news=None,
+        trade_plan_copywriter=lambda selection: _trade_plan_copywriter_client(
+            fake=fake_ai or getattr(args, "fake_writer", False)
+        ),
+        # Round 6.7: the producer's own collector and curator, called only when
+        # a TRADE_PLAN Run reaches its stage. An idle tick collects nothing.
+        trade_plan_news=_trade_plan_news(
+            fake=fake_ai or getattr(args, "fake_market", False) or getattr(args, "fake_mt5", False)
+        ),
     )
 
 
@@ -1773,6 +1801,69 @@ def _trade_plan_analyst_client(*, fake: bool = False) -> Any:
             secrets=_secret_provider(),
         )
     )
+
+
+def _trade_plan_copywriter_client(*, fake: bool = False) -> Any:
+    """The Plan Copywriter. Anthropic, or the offline echo. Round 6.7.
+
+    The same transport as the analyst - thinking off, a fence removed - and a
+    pinned model, for the analyst's reason: the words on a plan are part of the
+    product, and two plans written by different models would differ for a
+    reason no artifact explains.
+    """
+    if fake:
+        from goldpipeline.adapters.fake_plan_copywriter import EchoPlanCopywriter
+
+        return EchoPlanCopywriter()
+
+    from goldpipeline.adapters.anthropic_trade_analyst import AnthropicTradeAnalystClient
+    from goldpipeline.config import WriterSettings
+    from goldpipeline.services.trade_plan_copy import PLAN_COPY_MODEL
+
+    return AnthropicTradeAnalystClient(
+        WriterSettings.from_env(
+            _config_env(), model_override=PLAN_COPY_MODEL, secrets=_secret_provider()
+        )
+    )
+
+
+def _trade_plan_news(*, fake: bool = False) -> Callable[[], Any] | None:
+    """The existing curated-news path, for a TRADE_PLAN Run that is due. Round 6.7.
+
+    The producer's collector and curator, unchanged - not a second news engine.
+    A collection failure is not a plan failure: the page says there is no news
+    worth noting rather than refusing, and never invents any.
+    """
+    if fake:
+        return None
+
+    def collect() -> Any:
+        from goldpipeline.services.news_collector import curate
+        from goldpipeline.services.trade_plan_policy import PLAN_NEWS_LOOKBACK
+
+        try:
+            return curate(
+                LiveNewsCollector().collect(window_end=utc_now(), lookback=PLAN_NEWS_LOOKBACK)
+            )
+        except PipelineError as exc:
+            logging.getLogger(__name__).warning("trade_plan.news unavailable code=%s", exc.code)
+            return None
+
+    return collect
+
+
+def _plan_bot_client() -> Any:
+    """The /plan command bot, with its own credential. Never the review bot's."""
+    from goldpipeline.adapters.telegram_command_bot import TelegramCommandBotClient
+
+    token, _ = _secret_provider().resolve(SecretName.TELEGRAM_PLAN_BOT_TOKEN)
+    if not token:
+        raise PublisherConfigurationError(
+            f"{SecretName.TELEGRAM_PLAN_BOT_TOKEN.value} is not in the credential store; "
+            "store it with `secrets-set plan-bot`",
+            setting=SecretName.TELEGRAM_PLAN_BOT_TOKEN.value,
+        )
+    return TelegramCommandBotClient(token=token)
 
 
 def _market_source(args: argparse.Namespace) -> Any:
@@ -2275,6 +2366,18 @@ def _worker_context(
             max_bytes=ingest.max_bytes,
         )
 
+    from goldpipeline.services.plan_command import PlanCommandStore
+
+    plan_read = PlanCommandStore(settings.automation_dir).read_settings()
+
+    def plan_bot() -> Any:
+        """Built only when /plan is on. Resolves the command bot's own token."""
+        if args.fake_publisher:
+            from goldpipeline.adapters.fake_command_bot import FakeCommandBot
+
+            return FakeCommandBot()
+        return _plan_bot_client()
+
     return WorkerContext(
         inbox=inbox,
         store=RunStore(args.runs_dir),
@@ -2284,6 +2387,9 @@ def _worker_context(
         review_client=review_client,
         ingest=ingest,
         event_transport=event_transport if ingest.enabled else None,
+        plan_command=plan_read.settings,
+        plan_command_problem=plan_read.problem,
+        plan_bot=plan_bot if plan_read.settings.enabled else None,
         market_source=_market_source(args),
         clients=_pipeline_clients(args),
         preferences=PreferencesStore(settings.automation_dir),
@@ -2292,6 +2398,109 @@ def _worker_context(
         config=config,
         config_mode=config_mode,
     )
+
+
+def _plan_command_store(args: argparse.Namespace) -> Any:
+    from goldpipeline.services.plan_command import PlanCommandStore
+
+    directory = args.automation_dir
+    if directory is None:
+        directory = AutomationSettings.from_env(_config_env()).automation_dir
+    return PlanCommandStore(directory)
+
+
+def _cmd_plan_command_status(args: argparse.Namespace) -> int:
+    """What the command bot would do on the next tick. Reads files only."""
+    from goldpipeline.services.plan_command import RESPONSE_KEY
+
+    store = _plan_command_store(args)
+    read = store.read_settings()
+    token, _ = _secret_provider().resolve(SecretName.TELEGRAM_PLAN_BOT_TOKEN)
+    receipts = store.receipts()
+    report = {
+        "settings_path": str(store.settings_path),
+        "enabled": read.settings.enabled,
+        "problem": read.problem,
+        "bot_username": read.settings.bot_username,
+        "authorised_chat_ids": read.settings.authorised_chat_ids,
+        "credential": SecretName.TELEGRAM_PLAN_BOT_TOKEN.value,
+        "credential_configured": bool(token),
+        "next_offset": store.read_offset(),
+        "requests": len(receipts),
+        "replies_pending": sum(
+            1 for receipt in receipts if not store.has_result(f"{receipt.event_id}.{RESPONSE_KEY}")
+        ),
+    }
+    # The value was used for a truth test and nothing else; drop it at once.
+    del token
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        for key, value in report.items():
+            print(f"{key}: {value}")
+    return EXIT_OK
+
+
+def _cmd_plan_command_activate(args: argparse.Namespace) -> int:
+    """Verify the bot is the one named, register /plan, then switch polling on.
+
+    Every network step comes before the settings are written, so a bot that
+    cannot be verified is never left enabled. The token is resolved from the
+    credential store and never printed.
+    """
+    from goldpipeline.adapters.telegram_command_bot import BotCommand, CommandBotError
+    from goldpipeline.schemas.plan_command import (
+        PLAN_COMMAND,
+        PLAN_COMMAND_DESCRIPTION,
+        PlanCommandSettings,
+    )
+
+    store = _plan_command_store(args)
+    wanted = [BotCommand(command=PLAN_COMMAND, description=PLAN_COMMAND_DESCRIPTION)]
+    try:
+        bot = _plan_bot_client()
+        identity = bot.get_me()
+        if identity.username.casefold() != args.bot_username.strip().lstrip("@").casefold():
+            print(
+                f"Refusing: the stored credential belongs to @{identity.username}, "
+                f"not @{args.bot_username}. Nothing was changed.",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+        bot.set_my_commands(wanted)
+        if bot.get_my_commands() != wanted:
+            print("Refusing: getMyCommands does not list exactly /plan.", file=sys.stderr)
+            return EXIT_ERROR
+        settings = PlanCommandSettings(
+            enabled=True,
+            bot_id=identity.bot_id,
+            bot_username=identity.username,
+            authorised_chat_ids=[str(args.chat_id).strip()],
+            activated_at=utc_now(),
+        )
+    except (PublisherConfigurationError, CommandBotError) as exc:
+        print(f"Not activated: [{exc.code}] {exc.message}", file=sys.stderr)
+        return EXIT_ERROR
+    except ValueError as exc:
+        print(f"Not activated: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    path = store.write_settings(settings)
+    print(f"/plan is on for @{settings.bot_username}. Settings: {path}")
+    print("Menu command registered and verified: /plan - " + PLAN_COMMAND_DESCRIPTION)
+    return EXIT_OK
+
+
+def _cmd_plan_command_disable(args: argparse.Namespace) -> int:
+    """Switch polling off. Everything already recorded stays where it is."""
+    store = _plan_command_store(args)
+    read = store.read_settings()
+    if not read.settings.enabled:
+        print("/plan is already off.")
+        return EXIT_OK
+    store.write_settings(read.settings.model_copy(update={"enabled": False}))
+    print("/plan is off. The next tick makes no Telegram request for it.")
+    return EXIT_OK
 
 
 def _cmd_automation_run_once(args: argparse.Namespace) -> int:
@@ -2850,6 +3059,7 @@ _SECRET_CHOICES = {
     "deepseek": SecretName.DEEPSEEK_API_KEY,
     "ingest": SecretName.INGEST_TOKEN,
     "openai": SecretName.OPENAI_API_KEY,
+    "plan-bot": SecretName.TELEGRAM_PLAN_BOT_TOKEN,
     "telegram": SecretName.TELEGRAM_BOT_TOKEN,
 }
 """Short names an operator types, mapped to the credential each stands for.
@@ -3350,6 +3560,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "automation-status": _cmd_automation_status,
         "automation-preflight": _cmd_automation_preflight,
         "automation-task-plan": _cmd_automation_task_plan,
+        "plan-command-status": _cmd_plan_command_status,
+        "plan-command-activate": _cmd_plan_command_activate,
+        "plan-command-disable": _cmd_plan_command_disable,
         "secrets-status": _cmd_secrets_status,
         "secrets-set": _cmd_secrets_set,
         "secrets-delete": _cmd_secrets_delete,

@@ -197,6 +197,22 @@ class AutomationTickResult(StrictModel):
     existed - which is the point: switching this on must be visible, and leaving
     it off must change nothing.
     """
+    plan_command_polled: bool = Field(
+        default=False, description="Whether this tick asked the /plan command bot for updates."
+    )
+    plan_commands: list[WorkItem] = Field(
+        default_factory=list,
+        description="/plan requests accepted, recognised as duplicates, ignored or acknowledged.",
+    )
+    plan_replies: list[WorkItem] = Field(
+        default_factory=list,
+        description="Plans or failure notices sent to the chat that asked. Never a publication.",
+    )
+    """The /plan command bot, all empty when it is off.
+
+    Round 6.7. Defaults throughout, so earlier tick records still load and a
+    tick with the command bot disabled records exactly what it always did.
+    """
     errors: list[str] = Field(
         default_factory=list, description="Safe error codes only, never values or messages."
     )
@@ -214,6 +230,8 @@ class AutomationTickResult(StrictModel):
             or self.review_deliveries
             or self.remote_events_submitted
             or self.remote_intake
+            or self.plan_commands
+            or self.plan_replies
         )
 
 

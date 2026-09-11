@@ -63,12 +63,12 @@ logger = logging.getLogger(__name__)
 TRADE_PLAN_SELECTION_METHOD_VERSION = "1.0.0"
 """Stamped on the selection, and separate from the ranking's own versions."""
 
-MAX_ENTRY_ZONES_PER_SIDE = 5
+MAX_ENTRY_ZONES_PER_SIDE = 6
 """A ceiling, and deliberately not a quota.
 
-Three to five is the product shape when that many honest zones exist. Nothing
-here counts *up* to a minimum: a side with two non-redundant zones publishes
-two, and a side with none publishes none.
+Round 6.7 raised it from five to six; nothing else about selection changed.
+Nothing here counts *up* to a minimum: a side with two non-redundant zones
+publishes two, and a side with none publishes none.
 """
 
 

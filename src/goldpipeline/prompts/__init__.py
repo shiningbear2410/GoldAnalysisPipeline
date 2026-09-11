@@ -195,6 +195,19 @@ from the dormant Trade Analyst service. Choosing a provider and a model for it
 is 6.6h wiring.
 """
 
+GOLD_TRADE_PLAN_COPY_V1 = "gold_trade_plan_copy_v1"
+"""The TRADE_PLAN copywriter prompt. Round 6.7.
+
+Words only. It is sent *after* the deterministic selection is final and asks for
+a market view and short notes about zones that already exist; its output
+contract has no field that can hold a price, and its prose is refused if it
+contains a digit. Not a writer in the article sense - it cannot choose, move or
+add a zone, and the page is still rendered by code.
+
+Does not include `gold_human_style_v1`: that contract is written for full
+articles, and a sixty-character zone note is not one.
+"""
+
 DEFAULT_WRITER_PROMPT = GOLD_WRITER_V4
 DEFAULT_DIGEST_WRITER_PROMPT = GOLD_NEWS_DIGEST_WRITER_V2
 DEFAULT_REVIEWER_PROMPT = GOLD_REVIEWER_V2
@@ -294,6 +307,7 @@ __all__ = [
     "GOLD_REVIEWER_V1",
     "GOLD_REVIEWER_V2",
     "GOLD_TRADE_ANALYST_V1",
+    "GOLD_TRADE_PLAN_COPY_V1",
     "GOLD_WRITER_V1",
     "GOLD_WRITER_V2",
     "GOLD_WRITER_V3",
